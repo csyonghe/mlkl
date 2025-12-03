@@ -1,0 +1,12 @@
+[submodule "external/lz4"]
+	path = external/lz4
+	url = https://github.com/lz4/lz4
+[submodule "external/miniz"]
+	path = external/miniz
+	url = https://github.com/richgel999/miniz
+[submodule "external/unordered_dense"]
+	path = external/unordered_dense
+	url = https://github.com/martinus/unordered_dense
+[submodule "external/slang-rhi"]
+	path = external/slang-rhi
+	url = https://github.com/shader-slang/slang-rhi
