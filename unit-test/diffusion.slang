@@ -411,31 +411,29 @@ struct SimpleConvolutionParams<int kernelSize, int inChannels, int outChannels>
     Conv2D<kernelSize, inChannels, outChannels> convLayer;
 }
 
-static const int gTileSize = 16;
-
-[numthreads(gTileSize,gTileSize,1)]
-void simpleConvolution<int kernelSize, int inChannels, int outChannels>(
-    ParameterBlock<SimpleConvolutionParams<kernelSize, inChannels, outChannels>> params,
+[numthreads(tileSize,tileSize,1)]
+void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChannels>(
+    ConstantBuffer<SimpleConvolutionParams<kernelSize, inChannels, outChannels>, ScalarDataLayout> params,
     int3 groupThreadId : SV_GroupThreadID,
-    int3 groupId : SV_GroupID,
-    int3 tid : SV_DispatchThreadID)
+    int3 groupId : SV_GroupID)
 {
-    static groupshared float sharedMem[(gTileSize + kernelSize - 1)*(gTileSize + kernelSize - 1) * inChannels];
-    int2 srcOrigin = groupId.xy * gTileSize * params.stride;
+    static groupshared float sharedMem[(tileSize + kernelSize - 1)*(tileSize + kernelSize - 1) * inChannels];
+    int2 srcOrigin = groupId.xy * tileSize * params.stride;
     let srcTile = DeviceTile<float, inChannels>(srcOrigin, params.inputImageWidth*inChannels, params.inputImage);
 
-    int2 destOrigin = groupId.xy * gTileSize;
+    int2 destOrigin = groupId.xy * tileSize;
     int outputStride = params.outputImageWidth * outChannels;
     let destTile = DeviceTile<float, outChannels>(destOrigin, outputStride, params.outputImage);
     let interTile = SharedTile<float, inChannels>(
         0,
-        (gTileSize + kernelSize - 1) * inChannels,
+        (tileSize + kernelSize - 1) * inChannels,
         0);
+
     params.convLayer.apply(
         srcTile,
         destTile,
         interTile,
-        gTileSize,
+        tileSize,
         params.stride,
         params.padding,
         int2(params.inputImageWidth, params.inputImageHeight),
@@ -454,9 +452,9 @@ struct SimpleTransposedConvolutionParams<int kernelSize, int inChannels, int out
     ConvTransposed2D<kernelSize, inChannels, outChannels> transposedConvLayer;
 }
 
-[numthreads(gTileSize, gTileSize, 1)]
-void simpleTransposedConvolution<int kernelSize, int stride, int inChannels, int outChannels>(
-    ParameterBlock<SimpleTransposedConvolutionParams<kernelSize, inChannels, outChannels>> params,
+[numthreads(tileSize, tileSize, 1)]
+void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels>(
+    ConstantBuffer<SimpleTransposedConvolutionParams<kernelSize, inChannels, outChannels>, CDataLayout> params,
     int3 groupThreadId : SV_GroupThreadID,
     int3 groupId : SV_GroupID,
     int3 tid : SV_DispatchThreadID)
@@ -464,7 +462,7 @@ void simpleTransposedConvolution<int kernelSize, int stride, int inChannels, int
     // 1. Calculate Shared Memory Size (Compile-Time)
     // The input patch is roughly (OutputSize / Stride).
     // Formula matches 'inputPatchWidth' in the struct: (Tile + Kernel + Stride - 1) / Stride + 2
-    static const int smemWidth = (gTileSize + kernelSize + stride - 1) / stride + 2;
+    static const int smemWidth = (tileSize + kernelSize + stride - 1) / stride + 2;
     static groupshared float sharedMem[smemWidth * smemWidth * inChannels];
 
     // 2. Source Tile (Input)
@@ -484,7 +482,7 @@ void simpleTransposedConvolution<int kernelSize, int stride, int inChannels, int
     int outputStride = params.outputImageWidth * outChannels; 
     
     let destTile = DeviceTile<float, outChannels>(
-        groupId.xy * gTileSize, 
+        groupId.xy * tileSize, 
         outputStride, 
         params.outputImage
     );
@@ -501,7 +499,7 @@ void simpleTransposedConvolution<int kernelSize, int stride, int inChannels, int
         srcTile,
         destTile,
         interTile,
-        gTileSize,
+        tileSize,
         stride,
         params.padding,
         int2(params.inputImageWidth, params.inputImageHeight),

@@ -66,3 +66,57 @@ void _Win32OutputDebugString(const char* str)
     OutputDebugStringW(Slang::String(str).toWString().begin());
 }
 #endif
+
+#define ENABLE_RENDERDOC 1
+
+#if ENABLE_RENDERDOC
+#include "external/slang-rhi/external/renderdoc/renderdoc_app.h"
+
+static RENDERDOC_API_1_6_0* renderdoc_api = nullptr;
+void initializeRenderDoc()
+{
+    if (renderdoc_api)
+        return;
+
+#if SLANG_WINDOWS_FAMILY
+    auto module = LoadLibraryW(L"renderdoc.dll");
+    if (!module)
+    {
+        return;
+    }
+#endif
+
+    pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)GetProcAddress(module, "RENDERDOC_GetAPI");
+    int ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&renderdoc_api);
+    if (ret != 1 || renderdoc_api == nullptr)
+    {
+        printf("failed to use renderdoc\n");
+        renderdoc_api = nullptr;
+        return;
+    }
+    printf("loaded renderdoc\n");
+
+}
+
+void renderDocBeginFrame()
+{
+    initializeRenderDoc();
+    if (renderdoc_api)
+    {
+        renderdoc_api->StartFrameCapture(nullptr, nullptr);
+    }
+}
+
+void renderDocEndFrame()
+{
+    if (renderdoc_api)
+    {
+        renderdoc_api->EndFrameCapture(nullptr, nullptr);
+        fgetc(stdin);
+    }
+}
+#else
+void initializeRenderDoc() {}
+void renderDocBeginFrame() {}
+void renderDocEndFrame() {}
+#endif

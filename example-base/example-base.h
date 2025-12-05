@@ -90,3 +90,7 @@ inline void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
         reportError("%s", (const char*)diagnosticsBlob->getBufferPointer());
     }
 }
+
+
+void renderDocBeginFrame();
+void renderDocEndFrame();
