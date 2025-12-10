@@ -344,7 +344,7 @@ struct UnitTestProgram : public TestBase
         DiffusionReverseStepKernel diffusionKernel = DiffusionReverseStepKernel(gInferencingCtx);
 
         RefPtr<FileStream> fileStream = new FileStream();
-        SLANG_RETURN_ON_FAIL(fileStream->init(resourceBase.resolveResource("unet-params.bin"), FileMode::Open));
+        SLANG_RETURN_ON_FAIL(fileStream->init(resourceBase.resolveResource("model_weights.bin"), FileMode::Open));
         TorchParamReader reader(fileStream);
         SLANG_RETURN_ON_FAIL(model.loadParams(reader));
         auto task = gInferencingCtx->createTask();
