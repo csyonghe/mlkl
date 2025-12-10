@@ -17,10 +17,12 @@ Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernel
 
 SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseBNorm)
 {
+    logInfo("Loading Conv2D Layer: inChannels=%d, outChannels=%d, kernelSize=%d\n", inChannels, outChannels, kernelSize);
     Conv2DLayerParams convParams;
     SLANG_RETURN_ON_FAIL(reader.readConv2DLayer(inChannels, outChannels, kernelSize, convParams));
     if (loadAndFuseBNorm)
     {
+        logInfo("Loading and fusing BatchNorm2D Layer: numFeatures=%d\n", outChannels);
         BatchNorm2DLayerParams bnParams;
         SLANG_RETURN_ON_FAIL(reader.readBatchNorm2DLayer(outChannels, bnParams));
         convParams.fuseBatchNorm(bnParams);

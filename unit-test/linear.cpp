@@ -34,6 +34,7 @@ LinearKernel::LinearKernel(InferencingContext* context, ActivationFunction activ
 
 SlangResult LinearKernel::loadParams(TorchParamReader& reader)
 {
+    logInfo("Loading Linear Layer: inputSize=%d, outputSize=%d\n", inputSize, outputSize);
     LinearLayerParams params;
     SLANG_RETURN_ON_FAIL(reader.readLinearLayer(inputSize, outputSize, params));
     weightsBuffer = context->createBuffer(params.weights);

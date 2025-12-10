@@ -11,6 +11,7 @@ TimeEmbedingKernel::TimeEmbedingKernel(InferencingContext* context, int outputCh
 
 SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
 {
+    logInfo("Loading TimeEmbed Linear Layer: outputChannel %d\n", outputChannels);
     LinearLayerParams linearParams;
     reader.readLinearLayer(outputChannels, outputChannels, linearParams);
     biasesBuffer = context->createBuffer(linearParams.biases);

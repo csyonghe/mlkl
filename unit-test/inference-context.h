@@ -84,3 +84,9 @@ public:
     }
 };
 
+
+template<typename...TArgs>
+static void logInfo(const char* format, TArgs... args)
+{
+    printf(format, std::forward<TArgs>(args)...);
+}

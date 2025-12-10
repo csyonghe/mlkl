@@ -18,6 +18,7 @@ TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int 
 
 SlangResult TransposedConv2DKernel::loadParams(TorchParamReader& reader)
 {
+    logInfo("Loading TransposedConv2D Layer: inChannels=%d, outChannels=%d, kernelSize=%d\n", inChannels, outChannels, kernelSize);
     TransposedConv2DLayerParams convParams;
     SLANG_RETURN_ON_FAIL(reader.readTransposedConv2DLayer(inChannels, outChannels, kernelSize, convParams));
     biasesBuffer = context->createBuffer(convParams.biases);
