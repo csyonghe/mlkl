@@ -2,78 +2,232 @@
 
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
-#include "slang-rhi/shader-cursor.h"
-#include "external/slang-rhi/include/slang-rhi.h"
-#include "slang-com-ptr.h"
-#include "slang.h"
-
-#include <string>
+#include "kernels.h"
+#include "inference-context.h"
 
 using Slang::ComPtr;
 
 static const ExampleResources resourceBase("unit-test");
 
-
-struct Kernel
+enum class UNetBlockKind
 {
-    ComPtr<rhi::IShaderProgram> program;
+    Down,
+    Up
+};
+
+class UNetBlock : public RefObject
+{
+protected:
+    RefPtr<InferencingContext> inferencingCtx;
+    RefPtr<Conv2DKernel> conv1, conv2;
+    RefPtr<Conv2DKernel> downTransform;
+    RefPtr<TransposedConv2DKernel> upTransform;
+    RefPtr<LinearKernel> timeEmbedTransform;
+    RefPtr<BroadcastAddKernel> broadcastAdd;
+public:
+    int inChannels;
+    int outChannels;
+    UNetBlock(RefPtr<InferencingContext> inferencingCtx, UNetBlockKind kind, int inChannels, int outChannels, int timeEmbedDim)
+        : inferencingCtx(inferencingCtx), inChannels(inChannels), outChannels(outChannels)
+    {
+        if (kind == UNetBlockKind::Down)
+        {
+            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, inChannels, outChannels);
+            downTransform = new Conv2DKernel(inferencingCtx, 16, 4, outChannels, outChannels);
+        }
+        else
+        {
+            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 2*inChannels, outChannels);
+            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels);
+        }
+        conv2 = new Conv2DKernel(inferencingCtx, 16, 3, outChannels, outChannels);
+        timeEmbedTransform = new LinearKernel(inferencingCtx, ActivationFunction::ReLU, 128, timeEmbedDim, outChannels);
+        broadcastAdd = new BroadcastAddKernel(inferencingCtx);
+    }
+
+    SlangResult loadParams(TorchParamReader& reader)
+    {
+        SLANG_RETURN_ON_FAIL(timeEmbedTransform->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(conv1->loadParams(reader));
+        if (downTransform)
+            SLANG_RETURN_ON_FAIL(downTransform->loadParams(reader));
+        if (upTransform)
+            SLANG_RETURN_ON_FAIL(upTransform->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(conv2->loadParams(reader));
+        return SLANG_OK;
+    }
+
+    ComPtr<rhi::IBuffer> forward(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, rhi::IBuffer* timeEmbedding)
+    {
+        auto transformedTimeEmbedding = timeEmbedTransform->queueExecute(task, timeEmbedding);
+        auto conv1Result = conv1->queueExecute(task, inputImage, inputWidth, inputHeight, 1, 1);
+        int shapeA[] = { inputHeight, inputWidth, outChannels };
+        int shapeB[] = { 1, 1, outChannels };
+        auto added = broadcastAdd->queueExecute(task, conv1Result, makeArrayView(shapeA), transformedTimeEmbedding, makeArrayView(shapeB));
+        auto conv2Result = conv2->queueExecute(task, inputImage, inputWidth, inputHeight, 1, 1);
+        rhi::IBuffer* finalResult = conv2Result;
+        if (downTransform)
+            finalResult = downTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 2, 1);
+        else
+            finalResult = upTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 1);
+        return ComPtr<rhi::IBuffer>(finalResult);
+    }
+};
+
+class UNetModel : public RefObject
+{
+protected:
+    RefPtr<InferencingContext> inferencingCtx;
+    List<RefPtr<UNetBlock>> downBlocks;
+    List<RefPtr<UNetBlock>> upBlocks;
+    RefPtr<TimeEmbedingKernel> timeEmbedKernel;
+    RefPtr<Conv2DKernel> initialConv;
+    RefPtr<Conv2DKernel> finalConv;
+    RefPtr<ConcatKernel> concat;
+public:
+    UNetModel(RefPtr<InferencingContext> inferencingCtx, int inputChannels, int outputChannels)
+        : inferencingCtx(inferencingCtx)
+    {
+        static const int timeEmbedDim = 32;
+        timeEmbedKernel = new TimeEmbedingKernel(inferencingCtx, timeEmbedDim);
+        int channelSizes[] = { 64, 128, 256, 512, 1024 };
+        for (Index i = 0; i < SLANG_COUNT_OF(channelSizes) - 1; i++)
+        {
+            downBlocks.add(new UNetBlock(
+                inferencingCtx,
+                UNetBlockKind::Down,
+                channelSizes[i],
+                channelSizes[i+1],
+                timeEmbedDim));
+            upBlocks.add(new UNetBlock(
+                inferencingCtx,
+                UNetBlockKind::Up,
+                channelSizes[SLANG_COUNT_OF(channelSizes) - 1 - i],
+                channelSizes[SLANG_COUNT_OF(channelSizes) - 2 - i],
+                timeEmbedDim));
+        }
+        initialConv = new Conv2DKernel(inferencingCtx, 16, 3, inputChannels, channelSizes[0]);
+        finalConv = new Conv2DKernel(inferencingCtx, 16, 1, channelSizes[0], outputChannels);
+        concat = new ConcatKernel(inferencingCtx);
+    }
+
+    SlangResult loadParams(TorchParamReader& reader)
+    {
+        SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader));
+        for (auto& block : downBlocks)
+        {
+            SLANG_RETURN_ON_FAIL(block->loadParams(reader));
+        }
+        for (auto& block : upBlocks)
+        {
+            SLANG_RETURN_ON_FAIL(block->loadParams(reader));
+        }
+        SLANG_RETURN_ON_FAIL(finalConv->loadParams(reader));
+        return SLANG_OK;
+    }
+
+    ComPtr<rhi::IBuffer> forward(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int timeStep)
+    {
+        auto timeEmbedding = timeEmbedKernel->queueExecute(task, timeStep);
+        auto x = initialConv->queueExecute(task, inputImage, inputWidth, inputHeight, 1, 1);
+        List<ComPtr<rhi::IBuffer>> skipConnections;
+        for (auto& block : downBlocks)
+        {
+            x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
+            skipConnections.add(x);
+            inputWidth /= 2;
+            inputHeight /= 2;
+        }
+        for (Index i = 0; i < upBlocks.getCount(); i++)
+        {
+            auto& block = upBlocks[i];
+            // Concat skip connection
+            auto skipConnection = skipConnections[skipConnections.getCount() - 1 - i];
+            int shape[] = { inputHeight, inputWidth, block->inChannels };
+            auto shapeView = makeArrayView(shape);
+            x = concat->queueExecute(task, x, shapeView, skipConnection, shapeView, 3);
+            // Up block
+            x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
+            inputWidth *= 2;
+            inputHeight *= 2;
+        }
+        x = finalConv->queueExecute(task, x, inputWidth, inputHeight, 1, 1);
+        return ComPtr<rhi::IBuffer>(x);
+    }
+};
+
+class DiffusionReverseStepKernel : public RefObject
+{
+protected:
+    RefPtr<InferencingContext> inferencingCtx;
     ComPtr<rhi::IComputePipeline> pipeline;
-    operator bool() { return program && pipeline; }
+public:
+    DiffusionReverseStepKernel(RefPtr<InferencingContext> inferencingCtx)
+        : inferencingCtx(inferencingCtx)
+    {
+        slang::TypeLayoutReflection* paramTypeLayout = nullptr;
+        pipeline = inferencingCtx->createComputePipeline("diffusionReverseStep", {});
+    }
+    void forward(
+        InferencingTask& task,
+        float alpha,
+        float alphaCumprod,
+        float beta,
+        rhi::IBuffer* currentImage,
+        rhi::IBuffer* predictedNoise,
+        uint32_t imageWidth,
+        uint32_t imageHeight,
+        uint32_t channelCount,
+        uint32_t seed,
+        uint32_t t)
+    {
+        struct DiffusionStepParams
+        {
+            // Raw Pointers (Buffer Device Address)
+            rhi::DeviceAddress currentImage;   // x_t (Input)
+            rhi::DeviceAddress predictedNoise; // epsilon_theta (Input)
+            rhi::DeviceAddress outputImage;    // x_{t-1} (Output)
+
+            // Scalar Coefficients
+            float coeff1;
+            float coeff2;
+            float coeff3;
+
+            uint32_t totalElements;
+            uint32_t seed;             // Change this every frame/step on CPU!
+        };
+        DiffusionStepParams params;
+        params.coeff1 = 1.0f / sqrtf(alpha);
+        params.coeff2 = (alpha - 1.0f) / (sqrtf(1.0f - alphaCumprod) * sqrtf(alpha));
+        if (t > 0)
+            params.coeff3 = sqrtf(beta);
+        else
+            params.coeff3 = 0.0f;
+        params.currentImage = currentImage->getDeviceAddress();
+        params.predictedNoise = predictedNoise->getDeviceAddress();
+        params.outputImage = currentImage->getDeviceAddress(); // In-place
+        params.totalElements = imageWidth * imageHeight * channelCount;
+        params.seed = seed;
+        task.dispatchKernel(pipeline, (params.totalElements + 255) / 256, 1, 1, params);
+    }
 };
 
-template<int kernelSize, int inChannels, int outChannels>
-struct Conv2D
-{
-    float weights[kernelSize * kernelSize * inChannels * outChannels];
-    float biases[outChannels];
-};
-
-template<int kernelSize, int inChannels, int outChannels>
-struct ConvTransposed2D
-{
-    float weights[kernelSize * kernelSize * inChannels * outChannels];
-    float biases[outChannels];
-};
-
-template<int kernelSize, int inChannels, int outChannels>
-struct SimpleConvolutionParams
-{
-    rhi::DeviceAddress inputImage;
-    rhi::DeviceAddress outputImage;
-    int inputImageWidth;
-    int inputImageHeight;
-    int outputImageWidth;
-    int stride;
-    int padding;
-    Conv2D<kernelSize, inChannels, outChannels> convLayer;
-};
-
-template<int kernelSize, int inChannels, int outChannels>
-struct SimpleTransposedConvolutionParams
-{
-    rhi::DeviceAddress inputImage;
-    rhi::DeviceAddress outputImage;
-    int inputImageWidth;
-    int inputImageHeight;
-    int outputImageWidth;
-    int stride;
-    int padding;
-    ConvTransposed2D<kernelSize, inChannels, outChannels> transposedConvLayer;
-};
+void writeImagePNG(
+    const char* filename,
+    int width,
+    int height,
+    int numChannels,
+    const void* data);
 
 struct UnitTestProgram : public TestBase
 {
     ComPtr<rhi::IDevice> gDevice;
 
-    ComPtr<slang::ISession> gSlangSession;
-    ComPtr<slang::IModule> gSlangModule;
-    Kernel gConvolutionProgram;
-    Kernel gTransposedConvolutionProgram;
+    RefPtr<InferencingContext> gInferencingCtx;
 
     SlangResult execute(int argc, char* argv[])
     {
         parseOption(argc, argv);
-        static const int v = sizeof(SimpleConvolutionParams<3, 1, 1>);
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
@@ -81,10 +235,11 @@ struct UnitTestProgram : public TestBase
         if (!gDevice)
             return SLANG_FAIL;
 
-        SLANG_RETURN_ON_FAIL(loadShaderKernels());
+        gInferencingCtx = new InferencingContext(gDevice);
 
         SLANG_RETURN_ON_FAIL(testSimpleConvolution());
         SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
+        SLANG_RETURN_ON_FAIL(testUNetModel());
 
         printf("all tests passed!\n");
         return SLANG_OK;
@@ -107,32 +262,30 @@ struct UnitTestProgram : public TestBase
         float inputData[] = { 1,2,3,4,5,
                            6,7,8,9,10,
                            11,12,13,14,15,
-                           16,17,18,19,20 };
+                           16,17,18,19,20,
+                           21,22,23,24,25};
         auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-        auto inputBuffer = createBuffer(5 * 5 * sizeof(float), inputData);
-        auto outputBuffer = createBuffer(inputBuffer->getDesc().size);
-        SimpleConvolutionParams<3, 1, 1> params;
-        params.inputImage = inputBuffer->getDeviceAddress();
-        params.outputImage = outputBuffer->getDeviceAddress();
-        params.inputImageHeight = 5;
-        params.inputImageWidth = 5;
-        params.outputImageWidth = 5;
-        params.padding = 1;
-        params.stride = 1;
-        params.convLayer.biases[0] = 1000.0f;
+        auto inputBuffer = gInferencingCtx->createBuffer(inputData, 5 * 5 * sizeof(float));
         float convWeights[9] = { 0.1, 0.5, 0.2,
                                 0.5, 1.0, 0.5,
                                 0.2, 0.5, 0.4 };
+        float convBiases[] = { 1000.0f };
+        Conv2DKernel convKernel = Conv2DKernel(gInferencingCtx.Ptr(), 4, 3, 1, 1);
+        auto task = gInferencingCtx->createTask();
+        convKernel.loadParams(3, 1, convWeights, convBiases);
+        auto outputBuffer = convKernel.queueExecute(task, inputBuffer, 5, 5, 1, 1);
+
         auto readWeight = [&](int x, int y) {return convWeights[y * 3 + x]; };
-        memcpy(params.convLayer.weights, convWeights, sizeof(convWeights));
+        
         renderDocBeginFrame();
-        dispatchKernel(gConvolutionProgram, params, 1, 1);
+        task.execute();
         float outputData[25];
+        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
         gDevice->readBuffer(outputBuffer, 0, sizeof(outputData), outputData);
         renderDocEndFrame();
         float v0 = outputData[0];
         float expectedV0 = readInput(0, 0) * readWeight(1, 1) + readInput(1, 0) * readWeight(2, 1) +
-            readInput(0, 1) * readWeight(2, 1) + readInput(1, 1) * readWeight(2, 2) + params.convLayer.biases[0];
+            readInput(0, 1) * readWeight(2, 1) + readInput(1, 1) * readWeight(2, 2) + convBiases[0];
         TEST_CHECK("simpleConvolution", fabs(v0 - expectedV0) < 1e-3f);
         return SLANG_OK;
     }
@@ -142,109 +295,129 @@ struct UnitTestProgram : public TestBase
         float inputData[] = { 1,2,3,4,5,
                            6,7,8,9,10,
                            11,12,13,14,15,
-                           16,17,18,19,20 };
-        auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-        auto inputBuffer = createBuffer(5 * 5 * sizeof(float), inputData);
-        auto outputBuffer = createBuffer(inputBuffer->getDesc().size);
-        SimpleTransposedConvolutionParams<3, 1, 1> params;
-        params.inputImage = inputBuffer->getDeviceAddress();
-        params.outputImage = outputBuffer->getDeviceAddress();
-        params.inputImageHeight = 5;
-        params.inputImageWidth = 5;
-        params.outputImageWidth = 5;
-        params.padding = 1;
-        params.stride = 1;
-        params.transposedConvLayer.biases[0] = 1000.0f;
+                           16,17,18,19,20,
+                           21,22,23,24,25};
         float convWeights[9] = { 0.1, 0.5, 0.2,
                                 0.5, 1.0, 0.5,
                                 0.2, 0.5, 0.4 };
+        float convBiases[] = { 1000.0f };
+        auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
+        auto inputBuffer = gInferencingCtx->createBuffer(inputData, 5 * 5 * sizeof(float));
+        TransposedConv2DKernel transposedConvKernel = TransposedConv2DKernel(gInferencingCtx.Ptr(), 4, 3, 1, 1, 1);
+        auto task = gInferencingCtx->createTask();
+        transposedConvKernel.loadParams(3, 1, convWeights, convBiases);
+        auto outputBuffer = transposedConvKernel.queueExecute(task, inputBuffer, 5, 5, 1);
         auto readWeight = [&](int x, int y) {return convWeights[y * 3 + x]; };
-        memcpy(params.transposedConvLayer.weights, convWeights, sizeof(convWeights));
         renderDocBeginFrame();
-        dispatchKernel(gTransposedConvolutionProgram, params, 1, 1);
+        task.execute();
         float outputData[25];
         gDevice->readBuffer(outputBuffer, 0, sizeof(outputData), outputData);
         renderDocEndFrame();
         float v0 = outputData[0];
         float expectedV0 = readInput(1, 0) * readWeight(1, 1) + readInput(0, 1) * readWeight(1, 0) +
-            readInput(1, 1) * readWeight(0, 0) + params.transposedConvLayer.biases[0];
+            readInput(1, 1) * readWeight(0, 0) + convBiases[0];
         TEST_CHECK("simpleTransposedConvolution", fabs(v0 - expectedV0) < 1e-3f);
         return SLANG_OK;
     }
 
-    template<typename Args>
-    void dispatchKernel(Kernel& kernel, Args& args, size_t numWorkGroupsX, size_t numWorkGroupsY)
+    void initImage(List<float>& imageData, int width, int height, int channels = 1)
     {
-        auto queue = gDevice->getQueue(rhi::QueueType::Graphics);
-        ComPtr<rhi::ICommandEncoder> encoder;
-        queue->createCommandEncoder(encoder.writeRef());
+        Random random(42);
+        imageData.setCount(width * height * channels);
+        for (int y = 0; y < height; y++)
         {
-            auto computeEncoder = encoder->beginComputePass();
-            auto rootShaderObject = computeEncoder->bindPipeline(kernel.pipeline.get());
-            rhi::ShaderCursor cursor(rootShaderObject->getEntryPoint(0));
-            auto bufferObj = gDevice->createShaderObject(cursor["params"].getTypeLayout()->getElementTypeLayout()->getType());
-            bufferObj->setData(rhi::ShaderOffset(), &args, sizeof(Args));
-            cursor["params"].setObject(bufferObj);
-            computeEncoder->dispatchCompute(numWorkGroupsX, numWorkGroupsY, 1);
-            computeEncoder->end();
+            for (int x = 0; x < width; x++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    imageData[(y * width + x) * channels + c] = random.NextFloat(0.0f, 1.0f);
+                }
+            }
         }
-        ComPtr<rhi::ICommandBuffer> commandBuffer;
-        encoder->finish(commandBuffer.writeRef());
-        queue->submit(commandBuffer);
     }
 
-    // Create a buffer with the specified size and optional initial data.
-    ComPtr<rhi::IBuffer> createBuffer(size_t size, void* initData = nullptr)
+    SlangResult testUNetModel()
     {
-        rhi::BufferDesc bufferDesc = {};
-        bufferDesc.size = size;
-        bufferDesc.defaultState = rhi::ResourceState::UnorderedAccess;
-        bufferDesc.usage = rhi::BufferUsage::CopySource | rhi::BufferUsage::CopyDestination |
-                           rhi::BufferUsage::UnorderedAccess;
-        bufferDesc.memoryType = rhi::MemoryType::DeviceLocal;
-        return gDevice->createBuffer(bufferDesc, initData);
-    }
+        UNetModel model = UNetModel(gInferencingCtx, 1, 1);
+        
+        DiffusionReverseStepKernel diffusionKernel = DiffusionReverseStepKernel(gInferencingCtx);
 
-    void clearBuffer(rhi::IBuffer* buffer)
-    {
-        auto queue = gDevice->getQueue(rhi::QueueType::Graphics);
-        auto encoder = queue->createCommandEncoder();
-        encoder->clearBuffer(buffer);
-        auto cmdBuffer = encoder->finish();
-        queue->submit(cmdBuffer);
-    }
+        RefPtr<FileStream> fileStream = new FileStream();
+        SLANG_RETURN_ON_FAIL(fileStream->init(resourceBase.resolveResource("unet-params.bin"), FileMode::Open));
+        TorchParamReader reader(fileStream);
+        SLANG_RETURN_ON_FAIL(model.loadParams(reader));
+        auto task = gInferencingCtx->createTask();
+        
+        uint32_t imageSize = 32;
+        int outputChannelCount = 1;
+        int inputChannelCount = 1;
 
-    Kernel loadComputeProgram(slang::IModule* slangModule, char const* entryPointName, slang::SpecializationArg* specArgs, int specArgsCount)
-    {
-        ComPtr<ISlangBlob> diagnosticBlob;
-        ComPtr<slang::IEntryPoint> entryPoint;
-        slangModule->findAndCheckEntryPoint(entryPointName, SLANG_STAGE_COMPUTE, entryPoint.writeRef(), diagnosticBlob.writeRef());
-        diagnoseIfNeeded(diagnosticBlob);
+        List<float> inputImageData;
+        initImage(inputImageData, imageSize, imageSize, inputChannelCount);
 
-        ComPtr<slang::IComponentType> linkedProgram;
-        ComPtr<slang::IComponentType> specializedComponentType;
-        if (specArgsCount)
-            entryPoint->specialize(specArgs, specArgsCount, specializedComponentType.writeRef(), diagnosticBlob.writeRef());
-        else
-            specializedComponentType = entryPoint;
-
-        diagnoseIfNeeded(diagnosticBlob);
-
-        specializedComponentType->link(linkedProgram.writeRef());
-
-        if (isTestMode())
+        struct NoiseParam
         {
-            printEntrypointHashes(1, 1, linkedProgram);
+            float alpha;
+            float beta;
+            float alphaCumprod;
+        };
+        int stepCount = 500;
+        float betaStart = 1e-4;
+        float betaEnd = 0.02f;
+        List<NoiseParam> noiseSchedule;
+        noiseSchedule.setCount(stepCount);
+        for (int step = 0; step < stepCount; step++)
+        {
+            float t = (float)step / (float)(stepCount - 1);
+            float betaT = betaStart + t * (betaEnd - betaStart);
+            float alphaT = 1.0f - betaT;
+            float alphaCumprodT = (step == 0) ? alphaT : noiseSchedule[step - 1].alphaCumprod * alphaT;
+            noiseSchedule[step].alpha = alphaT;
+            noiseSchedule[step].beta = betaT;
+            noiseSchedule[step].alphaCumprod = alphaCumprodT;
         }
+        auto inputImage = gInferencingCtx->createBuffer(inputImageData.getBuffer(), inputImageData.getCount() * sizeof(float));
+        
+        static const int largePrime = 15485863;
+        for (int step = stepCount - 1; step >= 0; step--)
+        {
+            auto noiseParam = noiseSchedule[step];
+            auto predictedNoise = model.forward(task, inputImage, imageSize, imageSize, step);
 
-        Kernel result;
+            diffusionKernel.forward(
+                task,
+                noiseParam.alpha,
+                noiseParam.alphaCumprod,
+                noiseParam.beta,
+                inputImage,
+                predictedNoise,
+                imageSize,
+                imageSize,
+                1,
+                step*largePrime,
+                step);
+        }
+        renderDocBeginFrame();
+        task.execute();
+        renderDocEndFrame();
 
-        rhi::ComputePipelineDesc desc;
-        auto program = gDevice->createShaderProgram(linkedProgram);
-        desc.program = program.get();
-        result.program = program;
-        result.pipeline = gDevice->createComputePipeline(desc);
-        return result;
+        // Read back final image
+        List<float> outputImageData;
+        outputImageData.setCount(imageSize* imageSize * outputChannelCount);
+        gDevice->readBuffer(inputImage, 0, outputImageData.getCount() * sizeof(float), outputImageData.getBuffer());
+
+        // Save to disk as png
+        // Convert to 8-bit
+        List<uint8_t> outputImageData8Bit;
+        outputImageData8Bit.setCount(imageSize* imageSize* outputChannelCount);
+        for (int i = 0; i < outputImageData.getCount(); i++)
+        {
+            float v = outputImageData[i];
+            v = Slang::Math::Clamp(v, 0.0f, 1.0f);
+            outputImageData8Bit[i] = static_cast<uint8_t>(v * 255.0f);
+        }
+        writeImagePNG("output.png", imageSize, imageSize, outputChannelCount, outputImageData8Bit.getBuffer());
+        return SLANG_OK;
     }
 
     inline unsigned short floatToHalf(float val)
@@ -272,58 +445,6 @@ struct UnitTestProgram : public TestBase
         bits |= ((e - 112) << 10) | (m >> 1);
         bits += m & 1;
         return bits;
-    }
-
-    ComPtr<slang::ISession> createSlangSession(rhi::IDevice* device)
-    {
-        ComPtr<slang::ISession> slangSession = device->getSlangSession();
-        return slangSession;
-    }
-
-    ComPtr<slang::IModule> compileShaderModuleFromFile(
-        slang::ISession* slangSession,
-        char const* filePath)
-    {
-        ComPtr<slang::IModule> slangModule;
-        ComPtr<slang::IBlob> diagnosticBlob;
-        Slang::String path = resourceBase.resolveResource(filePath);
-        slangModule = slangSession->loadModule(path.getBuffer(), diagnosticBlob.writeRef());
-        diagnoseIfNeeded(diagnosticBlob);
-
-        return slangModule;
-    }
-
-    SlangResult loadShaderKernels()
-    {
-        Slang::String path = resourceBase.resolveResource("diffusion.slang");
-
-        gSlangSession = createSlangSession(gDevice);
-        gSlangModule = compileShaderModuleFromFile(gSlangSession, path.getBuffer());
-        if (!gSlangModule)
-            return SLANG_FAIL;
-
-        slang::SpecializationArg specArgs[] = {
-            slang::SpecializationArg::fromExpr("4"), // tile size
-            slang::SpecializationArg::fromExpr("3"),
-            slang::SpecializationArg::fromExpr("1"),
-            slang::SpecializationArg::fromExpr("1")};
-
-        gConvolutionProgram = loadComputeProgram(gSlangModule, "simpleConvolution", specArgs,
-            SLANG_COUNT_OF(specArgs));
-        if (!gConvolutionProgram)
-            return SLANG_FAIL;
-        
-        slang::SpecializationArg specArgs2[] = {
-            slang::SpecializationArg::fromExpr("3"), // tile size
-            slang::SpecializationArg::fromExpr("3"),
-            slang::SpecializationArg::fromExpr("1"),
-            slang::SpecializationArg::fromExpr("1"),
-            slang::SpecializationArg::fromExpr("1") };
-        gTransposedConvolutionProgram = loadComputeProgram(gSlangModule, "simpleTransposedConvolution", specArgs2,
-            SLANG_COUNT_OF(specArgs2));
-        if (!gTransposedConvolutionProgram)
-            return SLANG_FAIL;
-        return SLANG_OK;
     }
 };
 
