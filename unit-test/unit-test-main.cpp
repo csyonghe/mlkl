@@ -4,6 +4,7 @@
 #include "example-base/example-base.h"
 #include "kernels.h"
 #include "inference-context.h"
+#include "torch-reader.h"
 
 using Slang::ComPtr;
 
@@ -48,12 +49,12 @@ public:
     SlangResult loadParams(TorchParamReader& reader)
     {
         SLANG_RETURN_ON_FAIL(timeEmbedTransform->loadParams(reader));
-        SLANG_RETURN_ON_FAIL(conv1->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(conv1->loadParams(reader, true));
         if (downTransform)
-            SLANG_RETURN_ON_FAIL(downTransform->loadParams(reader));
+            SLANG_RETURN_ON_FAIL(downTransform->loadParams(reader, false));
         if (upTransform)
             SLANG_RETURN_ON_FAIL(upTransform->loadParams(reader));
-        SLANG_RETURN_ON_FAIL(conv2->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(conv2->loadParams(reader, true));
         return SLANG_OK;
     }
 
@@ -113,7 +114,7 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader)
     {
-        SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader, false));
         for (auto& block : downBlocks)
         {
             SLANG_RETURN_ON_FAIL(block->loadParams(reader));
@@ -122,7 +123,7 @@ public:
         {
             SLANG_RETURN_ON_FAIL(block->loadParams(reader));
         }
-        SLANG_RETURN_ON_FAIL(finalConv->loadParams(reader));
+        SLANG_RETURN_ON_FAIL(finalConv->loadParams(reader, false));
         return SLANG_OK;
     }
 

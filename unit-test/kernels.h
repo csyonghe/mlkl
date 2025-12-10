@@ -79,7 +79,7 @@ public:
 
     Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels);
 
-    SlangResult loadParams(TorchParamReader& reader);
+    SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
     SlangResult loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData);
 
     ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int stride, int padding);

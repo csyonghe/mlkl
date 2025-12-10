@@ -15,10 +15,16 @@ Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernel
     pipeline = context->createComputePipeline("simpleConvolution", makeArrayView(specArgs));
 }
 
-SlangResult Conv2DKernel::loadParams(TorchParamReader& reader)
+SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseBNorm)
 {
     Conv2DLayerParams convParams;
     SLANG_RETURN_ON_FAIL(reader.readConv2DLayer(inChannels, outChannels, kernelSize, convParams));
+    if (loadAndFuseBNorm)
+    {
+        BatchNorm2DLayerParams bnParams;
+        SLANG_RETURN_ON_FAIL(reader.readBatchNorm2DLayer(outChannels, bnParams));
+        convParams.fuseBatchNorm(bnParams);
+    }
     biasesBuffer = context->createBuffer(convParams.biases);
     if (!biasesBuffer)
         return SLANG_FAIL;
