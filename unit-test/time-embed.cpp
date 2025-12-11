@@ -35,7 +35,7 @@ struct TimeEmbeddingKernelParams
 
 ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uint32_t timeStepsBuffer)
 {
-    auto outputBuffer = task.allocateBuffer(outputChannels * sizeof(float));
+    auto outputBuffer = task.allocateBuffer("time-embed", outputChannels * sizeof(float));
 
     TimeEmbeddingKernelParams params = {};
     params.output = outputBuffer->getDeviceAddress();

@@ -3,8 +3,8 @@
 
 using namespace Slang;
 
-TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels)
-    : context(context), tileSize(tileSize), stride(stride), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels)
+TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, String name)
+    : context(context), tileSize(tileSize), stride(stride), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels), name(name)
 {
     String specArgs[] = {
         String(tileSize),
@@ -50,6 +50,7 @@ struct TransposedConv2DKernelParams
     int inputImageWidth;
     int inputImageHeight;
     int outputImageWidth;
+    int outputImageHeight;
     int stride;
     int padding;
 };
@@ -58,7 +59,8 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(InferencingTask& task,
 {
     int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
     int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
-    auto outputBuffer = task.allocateBuffer(outputWidth * outputHeight * outChannels * sizeof(float));
+    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
+    auto outputBuffer = task.allocateBuffer(resultBufferName.getBuffer(), outputWidth * outputHeight * outChannels * sizeof(float));
 
     TransposedConv2DKernelParams params = {};
     params.inputImage = inputImage->getDeviceAddress();
@@ -66,10 +68,14 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(InferencingTask& task,
     params.inputImageWidth = inputWidth;
     params.inputImageHeight = inputHeight;
     params.outputImageWidth = outputWidth;
+    params.outputImageHeight = outputHeight;
     params.stride = stride;
     params.padding = padding;
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
-    task.dispatchKernel(pipeline, (outputWidth + tileSize - 1) / tileSize, (outputHeight + tileSize - 1) / tileSize, 1, params);
+
+    static const int batchOutChannels = 32;
+    int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
+    task.dispatchKernel(pipeline, (outputWidth + tileSize - 1) / tileSize, (outputHeight + tileSize - 1) / tileSize, zBlocks, params);
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

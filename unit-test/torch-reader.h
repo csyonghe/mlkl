@@ -55,6 +55,7 @@ class TorchParamReader
 {
 private:
     RefPtr<Stream> stream;
+    SlangResult readParams(List<float>& result, int count);
 public:
     TorchParamReader(RefPtr<Stream> inputStream);
     // Read torch's exported parameters for a linear layer, and swap the weights layout to be [outFeatures, inFeatures].

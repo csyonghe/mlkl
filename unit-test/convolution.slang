@@ -1,510 +1,394 @@
 implementing diffusion;
 
-interface ITile<T : __BuiltinArithmeticType>
+// --- Constants for Tiling and Batching ---
+// These define the size of the work chunks. 
+// 32 is chosen to align with typical GPU warp/wavefront sizes.
+static const int inputChannelBatchSize = 32;
+static const int outputChannelBatchSize = 32;
+
+// --- Shader Parameters ---
+struct SimpleConvolutionParams
 {
-    property int originX {get;}
-    property int originY {get;}
-    property int stride {get;}
-    int getLinearIndex(int x, int y, int c);
-    T read(int linearIndex);
-    vector<T, N> readVector<int N>(int linearIndex);
-    void write(int linearIndex, T value);
-    void writeVector<int N>(int linearIndex, vector<T,N> value);
-}
-
-// Represent a 2d-slice of iamge in device or shared memory.
-struct DeviceTile<T : __BuiltinArithmeticType, int channels> : ITile<T>
-{
-    // Origin in the larger image.
-    int originX;
-    int originY;
-
-    // Stride (in elements) to go to next row.
-    int stride;
-
-    T* data;
-
-    __init(int2 origin, int stride, T* data)
-    {
-        this.originX = origin.x;
-        this.originY = origin.y;
-        this.stride = stride;
-        this.data = data;
-    }
-
-    int getLinearIndex(int x, int y, int c)
-    {
-        return (originY + y) * stride + (originX + x) * channels + c;
-    }
-    vector<T,N> readVector<int N>(int linearIndex)
-    {
-        return *(bit_cast<vector<T,N>*>(data + linearIndex));
-    }
-    void writeVector<int N>(int linearIndex, vector<T,N> value)
-    {
-        *(bit_cast<vector<T,N>*>(data + linearIndex)) = value;
-    }
+    // CRITICAL CHANGE: Weight layout must be permuted on the host.
+    // New Layout: [inChannels, kernelSize, kernelSize, outChannels]
+    // This ensures stride-1 access in the innermost loop.
+    float* weights;         
     
-    T read(int linearIndex)
-    {
-        return data[linearIndex];
-    }
-    void write(int linearIndex, T value)
-    {
-        data[linearIndex] = value;
-    }
-}
-
-static const int kSharedTensorSize = 8192;
-
-struct SharedTile<T:__BuiltinArithmeticType, int channels> : ITile<T>
-{
-    // Origin in the larger image.
-    int originX;
-    int originY;
-
-    // Stride (in elements) to go to next row.
+    float* bias;            // Layout: [outChannels]
+    float* inputImage;      // Layout: [Height, Width, inChannels] (Standard NHWC)
+    float* outputImage;     // Layout: [Height, Width, outChannels] (Standard NHWC)
+    int inputImageWidth;
+    int inputImageHeight;
+    int outputImageWidth;
+    int outputImageHeight;
     int stride;
+    int padding;
+};
 
-    int dataIndex;
-    static groupshared T sharedData[kSharedTensorSize];
+// The shader entry point using generics for compile-time constants needed for array sizing.
+[numthreads(tileSize, tileSize, 1)]
+void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChannels>(
+    ConstantBuffer<SimpleConvolutionParams> params,
+    int3 groupThreadId : SV_GroupThreadID,
+    int3 groupId : SV_GroupID)
+{
+    // --- 1. Coordinates & Setup ---
     
-    __init(int2 origin, int stride, int dataIndex)
-    {
-        this.originX = origin.x;
-        this.originY = origin.y;
-        this.stride = stride;
-        this.dataIndex = dataIndex;
-    }
-    int getLinearIndex(int x, int y, int c)
-    {
-        return (originY + y) * stride + (originX + x) * channels + c;
-    }
-    vector<T,N> readVector<int N>(int linearIndex)
-    {
-        vector<T,N> v;
-        [ForceUnroll]
-        for (int i = 0; i < N; i++)
-        {
-            v[i] = sharedData[dataIndex + linearIndex + i];
-        }
-        return v;
-    }
-    void writeVector<int N>(int linearIndex, vector<T,N> value)
-    {
-        [ForceUnroll]
-        for (int i = 0; i < N; i++)
-        {
-            sharedData[dataIndex + linearIndex + i] = value[i];
-        }
-    }
-    T read(int linearIndex)
-    {
-        return sharedData[dataIndex + linearIndex];
-    }
-    void write(int linearIndex, T value)
-    {
-        sharedData[dataIndex + linearIndex] = value;
-    }
-}
+    // Global output pixel position for this thread
+    const int2 outPos = groupId.xy * int2(tileSize) + groupThreadId.xy;
+    
+    // Top-left corner of the input area required for this thread group (the anchor)
+    const int2 tileOrigin = groupId.xy * int2(tileSize) * params.stride - int2(params.padding);
+    
+    // Determine which batch of output channels this thread group is responsible for
+    const int outChannelStart = groupId.z * outputChannelBatchSize;
 
-void copyTileElement<int channels, T : __BuiltinArithmeticType, SrcTile:ITile<T>, DestTile:ITile<T>>(DestTile dest, int linearIndexInDest, SrcTile src, int linearIndexInSrc)
-{
-    if (channels % 4 == 0)
-    {
-        for (int c = 0; c < channels; c+=4)
-        {
-            // TODO: use loadAligned when it supports arbitrary address spaces.
-            let vecValue =src.readVector<4>(linearIndexInSrc + c);
-            dest.writeVector<4>(linearIndexInDest + c, vecValue);
-        }
-    }
-    else
-    {
-        for (int c = 0; c < channels; c++)
-        {
-            dest.write(linearIndexInDest + c, src.read(linearIndexInSrc + c));
-        }
-    }
-}
+    // --- 2. Shared Memory Allocation ---
+    
+    // The shared memory tile must hold the data for the threads plus the required "halo" (apron).
+    // Dimension = TileSize + (KernelSize - 1)
+    static const int sharedDim = tileSize + kernelSize - 1;
+    
+    // Layout: [ChannelBatch][Row][Col] used to minimize bank conflicts during loading/reading.
+    static groupshared float s_inputTile[inputChannelBatchSize][sharedDim * sharedDim];
 
-// A 2D convolution layer.
-struct Conv2D<int kernelSize, int inChannels, int outChannels>
-{
-    ImmutablePtr<float> weights;
-    ImmutablePtr<float> biases;
-
-    // Compute convolution of src, and store the result into dest.
-    // Use inter as shared memory buffer to speed up memory access.
-    // This function is supposed to be called from a compute shader with a 2D thread group that matches
-    // the output tile size.
-    void apply<
-    SrcTile : ITile<float>,
-    DestTile : ITile<float>,
-    InterTile : ITile<float>>(
-        SrcTile src,
-        DestTile dest,
-        InterTile inter,
-        int outTileSize,
-        int stride,
-        int padding,
-        int2 srcImageSize,
-        int2 localThreadId // RENAMED: This is SV_GroupThreadID (local), not GroupIndex
-    )
+    // --- 3. Output Accumulators ---
+    
+    // Registers to hold partial sums for the batch of output channels being computed.
+    float outputAccumulators[outputChannelBatchSize];
+    
+    // Initialize accumulators with bias values (if bias exists and index is valid)
+    for (int o = 0; o < outputChannelBatchSize; ++o)
     {
-        // --- 1. COLLABORATIVE LOADING ---
-        // Note: This relies on 'src.originX/Y' being set to the 
-        // top-left of the current TILE by the caller.
+        int globalOutC = outChannelStart + o;
+        if (globalOutC < outChannels && params.bias != 0)
+            outputAccumulators[o] = params.bias[globalOutC];
+        else
+            outputAccumulators[o] = 0.0f;
+    }
+
+    // --- 4. Main Convolution Loop (Input Channel Slicing) ---
+    
+    // We iterate over total input channels in chunks of 'inputChannelBatchSize'
+    // to keep shared memory usage constant regardless of input depth.
+    for (int inCBase = 0; inCBase < inChannels; inCBase += inputChannelBatchSize)
+    {
+        // ==============================================================================
+        // A. Cooperative Load: Load Input Tile into Shared Memory
+        // ==============================================================================
+        // The shared tile region is larger than the number of threads in the block.
+        // Threads loop to cooperatively load the entire required region.
         
-        int groupThreadIdx = outTileSize * localThreadId.y + localThreadId.x;
-        int inputTileSize = outTileSize * stride; 
-        
-        // Calculate the full size of the required patch (Input Tile + Halo)
-        int haloSize = kernelSize - 1;
-        int totalPixelsToLoad = (inputTileSize + haloSize) * (inputTileSize + haloSize);
+        const int numSharedPixels = sharedDim * sharedDim;
+        const int numThreads = tileSize * tileSize;
+        const int linearThreadIndex = groupThreadId.y * tileSize + groupThreadId.x;
 
-        for (int p = groupThreadIdx; p < totalPixelsToLoad; p += outTileSize * outTileSize)
+        for (int i = linearThreadIndex; i < numSharedPixels; i += numThreads)
         {
-            int patchWidth = inputTileSize + haloSize;
-            int loadY = p / patchWidth;
-            int loadX = p % patchWidth;
+            // Map linear index to 2D shared coordinates
+            int sY = i / sharedDim;
+            int sX = i % sharedDim;
 
-            // Calculate global coordinates for bounds checking
-            // Note: src.originX must be the top-left of the tile in Global space
-            int absX = loadX + src.originX - padding;
-            int absY = loadY + src.originY - padding;
+            // Calculate corresponding global input coordinates based on tile anchor
+            int globalInY = tileOrigin.y + sY;
+            int globalInX = tileOrigin.x + sX;
 
-            int interDestIndex = inter.getLinearIndex(loadX, loadY, 0);
+            // Check boundaries for zero-padding
+            bool inBounds = globalInY >= 0 && globalInY < params.inputImageHeight &&
+                            globalInX >= 0 && globalInX < params.inputImageWidth;
 
-            if (absX < 0 || absY < 0 || absX >= srcImageSize.x || absY >= srcImageSize.y)
+            // Load the batch of input channels for this specific pixel location
+            for (int k = 0; k < inputChannelBatchSize; ++k)
             {
-                for (int c = 0; c < inChannels; c++) 
-                    inter.write(interDestIndex + c, 0.0);
-            }
-            else
-            {
-                // We use (loadX - padding) because src.getLinearIndex adds originX back in.
-                // Effectively: GlobalX = src.originX + loadX - padding
-                copyTileElement<inChannels>(inter, interDestIndex, src, src.getLinearIndex(loadX - padding, loadY - padding, 0));
-            }
-        }
-        
-        GroupMemoryBarrierWithGroupSync();
-
-        // --- 2. CONVOLUTION ---
-
-        // Pre-calculate the destination index for this thread
-        let destLinearIndex = dest.getLinearIndex(localThreadId.x, localThreadId.y, 0);
-
-        // Optimization: Loop over Output Channels FIRST.
-        // This allows us to accumulate 'sum' in a register and write to VRAM once.
-        for (int oc = 0; oc < outChannels; oc++)
-        {
-            // Initialize with Bias (Done once per pixel per channel)
-            float sum = biases[oc];
-
-            // Now loop over the Spatial Kernel
-            for (int ky = 0; ky < kernelSize; ky++)
-            {
-                for (int kx = 0; kx < kernelSize; kx++)
+                int currentInC = inCBase + k;
+                
+                if (inBounds && currentInC < inChannels)
                 {
-                    // Calculate index in Shared Memory (The cached tile)
-                    // Note: threadId * stride gives us the input center
-                    int smemX = kx + localThreadId.x * stride;
-                    int smemY = ky + localThreadId.y * stride;
-                    
-                    int interLinearIndex = inter.getLinearIndex(smemX, smemY, 0);
-
-                    // Accumulate Input Channels
-                    for (int ic = 0; ic < inChannels; ic++)
-                    {
-                        // Compute flat weight index
-                        // Layout: [OutCh][InCh][Ky][Kx]
-                        int wIndex = oc * (inChannels * kernelSize * kernelSize) +
-                                     ic * (kernelSize * kernelSize) +
-                                     ky * kernelSize +
-                                     kx;
-
-                        float w = weights[wIndex];
-                        float val = inter.read(interLinearIndex + ic);
-                        
-                        sum += w * val;
-                    }
+                    // Input Layout: [H, W, C] (Channels Last)
+                    // Contiguous read for the inner loop 'k'
+                    int64_t idx = ((int64_t)globalInY * params.inputImageWidth + globalInX) * inChannels + currentInC;
+                    s_inputTile[k][i] = params.inputImage[idx];
+                }
+                else
+                {
+                    // Handle padding or out-of-bounds channels
+                    s_inputTile[k][i] = 0.0f;
                 }
             }
-
-            // Write to global memory only ONCE per channel
-            dest.write(destLinearIndex + oc, sum);
-        }
-    }
-}
-
-struct ConvTransposed2D<int kernelSize, int inChannels, int outChannels>
-{
-    ImmutablePtr<float> weights;
-    ImmutablePtr<float> biases;
-
-    // Compute Transposed Convolution using Output-Centric approach.
-    // 
-    // groupThreadId: The SV_GroupThreadID (0..15, 0..15)
-    // dest: Represents the slice for the *current tile* in global memory. 
-    //       (dest.originX/Y must represent the Global Top-Left of this tile)
-    void apply<
-        SrcTile : ITile<float>,
-        DestTile : ITile<float>,
-        InterTile : ITile<float>>
-    (
-        SrcTile srcGlobal,
-        DestTile dest,
-        InterTile inter,
-        int outTileSize,
-        int stride,
-        int padding,
-        int2 srcImageSize,
-        int2 groupThreadId) 
-    {
-        // ==========================================================
-        // 1. CALCULATE INPUT BOUNDS
-        // ==========================================================
-        
-        // We need to find the top-leftmost Input pixel that contributes 
-        // to the top-leftmost Output pixel of this tile.
-        
-        // Inverse Formula: Input = floor((Output + Padding - KernelIndex) / Stride)
-        // To find the lowest possible Input index, we maximize KernelIndex (kernelSize - 1).
-        
-        // Global Output Origin for this tile
-        int outOriginX = dest.originX;
-        int outOriginY = dest.originY;
-
-        // Calculate Start Input X (Handle negative numerator correctly for floor division)
-        // Numerator: outOriginX + padding - (kernelSize - 1)
-        int numX = outOriginX + padding - (kernelSize - 1);
-        int numY = outOriginY + padding - (kernelSize - 1);
-
-        // Safe floor division for (num / stride)
-        int startInputX = numX < 0 ? (numX - stride + 1) / stride : numX / stride;
-        int startInputY = numY < 0 ? (numY - stride + 1) / stride : numY / stride;
-
-        // Determine patch size required
-        // A rough upper bound is (TileSize + KernelSize) / Stride + 2
-        int inputPatchWidth = (outTileSize + kernelSize + stride - 1) / stride + 2;
-        int totalPixelsToLoad = inputPatchWidth * inputPatchWidth;
-
-        // Flatten thread ID for loading loop
-        int tid = outTileSize * groupThreadId.y + groupThreadId.x;
-
-        // ==========================================================
-        // 2. COLLABORATIVE LOADING
-        // ==========================================================
-        
-        for (int p = tid; p < totalPixelsToLoad; p += outTileSize * outTileSize)
-        {
-            int localLoadY = p / inputPatchWidth;
-            int localLoadX = p % inputPatchWidth;
-            
-            // Global Input Coordinates to read from
-            int globalInX = startInputX + localLoadX;
-            int globalInY = startInputY + localLoadY;
-
-            // Shared Memory Index (linear)
-            int interIndex = inter.getLinearIndex(localLoadX, localLoadY, 0);
-
-            // Bounds Check
-            // Using a basic negative check for safety:
-            if (globalInX < 0 || globalInY < 0 || globalInX >= srcImageSize.x || globalInY >= srcImageSize.y) 
-            {
-                for(int c = 0; c < inChannels; c++) inter.write(interIndex + c, 0.0);
-            }
-            else
-            {
-                // Read from Global Memory
-                // Adjusting index relative to src.origin if src is not 0-based
-                int srcLinear = srcGlobal.getLinearIndex(globalInX, globalInY, 0);
-                copyTileElement<inChannels>(inter, interIndex, srcGlobal, srcLinear);
-            }
         }
 
+        // Ensure all threads have finished loading shared memory before proceeding
         GroupMemoryBarrierWithGroupSync();
 
-        // ==========================================================
-        // 3. COMPUTE (Accumulate Output)
-        // ==========================================================
-        
-        // Output Global Coordinate
-        int globalOutX = outOriginX + groupThreadId.x;
-        int globalOutY = outOriginY + groupThreadId.y;
-        
-        int destLinearIndex = dest.getLinearIndex(groupThreadId.x, groupThreadId.y, 0);
-
-        for (int oc = 0; oc < outChannels; oc++)
+        // ==============================================================================
+        // B. Convolution Math
+        // ==============================================================================
+        // Only proceed if this thread maps to a valid output pixel
+        if (outPos.x < params.outputImageWidth && outPos.y < params.outputImageHeight)
         {
-            float sum = biases[oc];
-
-            // Iterate over Kernel
-            for (int ky = 0; ky < kernelSize; ky++)
+            // Iterate over Kernel Spatial Dimensions
+            for (int ky = 0; ky < kernelSize; ++ky)
             {
-                for (int kx = 0; kx < kernelSize; kx++)
+                for (int kx = 0; kx < kernelSize; ++kx)
                 {
-                    // ---------------------------------------------------------
-                    // DERIVATION:
-                    // Forward Transposed Conv formula:
-                    // OutputPos = (InputPos * Stride) + KernelPos - Padding
-                    //
-                    // Rearranging to solve for InputPos:
-                    // InputPos * Stride = OutputPos - KernelPos + Padding
-                    // ---------------------------------------------------------
+                    // Calculate the index in shared memory corresponding to the input pixel
+                    // needed for this kernel weight location.
+                    // Local pixel index = (threadY * stride + ky) * sharedDim + (threadX * stride + kx)
+                    int sY = groupThreadId.y * params.stride + ky;
+                    int sX = groupThreadId.x * params.stride + kx;
+                    int sharedIdx = sY * sharedDim + sX;
 
-                    // 1. Calculate the Right Hand Side (The "Strided Input Coordinate")
-                    int stridedInX = globalOutX - kx + padding;
-                    int stridedInY = globalOutY - ky + padding;
-
-                    // 2. Stride Alignment Check (The "Integer Solution" Check)
-                    // If the result isn't divisible by stride, then the InputPos 
-                    // would be a fraction, which implies no input pixel aligns 
-                    // with this output pixel via this specific kernel weight.
-                    bool alignedX = (stridedInX % stride == 0);
-                    bool alignedY = (stridedInY % stride == 0);
-
-                    // CHECK 1: Stride Alignment
-                    if (alignedX && alignedY)
+                    // Iterate over the current batch of Input Channels sitting in LDS
+                    for (int inOffset = 0; inOffset < inputChannelBatchSize; ++inOffset)
                     {
-                        // CHECK 2: Is the resulting Input Index within our loaded Shared Memory?
-                        int globalInX = stridedInX / stride;
-                        int globalInY = stridedInY / stride;
-                        
-                        int smemX = globalInX - startInputX;
-                        int smemY = globalInY - startInputY;
+                        int globalInC = inCBase + inOffset;
+                        if (globalInC >= inChannels) break;
 
-                        if (smemX >= 0 && smemX < inputPatchWidth && 
-                            smemY >= 0 && smemY < inputPatchWidth)
+                        // Read input value once from shared memory
+                        float pixelVal = s_inputTile[inOffset][sharedIdx];
+
+                        // Compute a batch of Output Channels in parallel registers.
+                        // Unrolling is crucial here for instruction-level parallelism.
+                        [unroll]
+                        for (int outOffset = 0; outOffset < outputChannelBatchSize; ++outOffset)
                         {
-                            int interIdx = inter.getLinearIndex(smemX, smemY, 0);
-                            
-                            // Weight Index: [Out][In][Ky][Kx]
-                            int wIndex = oc * (inChannels * kernelSize * kernelSize);
+                            int globalOutC = outChannelStart + outOffset;
+                            if (globalOutC >= outChannels) continue;
 
-                            for (int ic = 0; ic < inChannels; ic++)
-                            {
-                                int currentWIndex = wIndex + 
-                                                    ic * (kernelSize * kernelSize) + 
-                                                    ky * kernelSize + kx;
-                                
-                                sum += weights[currentWIndex] * inter.read(interIdx + ic);
-                            }
+                            // ---------------------------------------------------------
+                            // OPTIMIZED WEIGHT INDEXING
+                            // Layout Requirement: [InC][KH][KW][OutC]
+                            // 
+                            // Because 'globalOutC' is the varying variable in this innermost loop,
+                            // having it as the last dimension ensures that we read contiguous
+                            // memory addresses in a single coalesced transaction.
+                            // ---------------------------------------------------------
+                            int64_t wIdx = 
+                                (int64_t)globalInC  * (kernelSize * kernelSize * outChannels) + 
+                                (int64_t)ky         * (kernelSize * outChannels) + 
+                                (int64_t)kx         * (outChannels) + 
+                                (int64_t)globalOutC;
+
+                            // Fused Multiply-Add
+                            outputAccumulators[outOffset] += pixelVal * params.weights[wIdx];
                         }
                     }
                 }
             }
-            dest.write(destLinearIndex + oc, sum);
+        }
+        
+        // Sync before overwriting shared memory in the next input-channel-batch iteration
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // --- 5. Write Final Output ---
+    
+    if (outPos.x < params.outputImageWidth && outPos.y < params.outputImageHeight)
+    {
+        for (int o = 0; o < outputChannelBatchSize; ++o)
+        {
+            int globalOutC = outChannelStart + o;
+            if (globalOutC < outChannels)
+            {
+                // Output Layout: [H, W, OutC] (Channels Last)
+                int64_t outIdx = ((int64_t)outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
+                params.outputImage[outIdx] = outputAccumulators[o];
+            }
         }
     }
-};
+}
 
-struct SimpleConvolutionParams<int kernelSize, int inChannels, int outChannels>
+struct SimpleTransposedConvolutionParams
 {
-    Conv2D<kernelSize, inChannels, outChannels> convLayer;
-    float* inputImage;
-    float* outputImage;
+    // CRITICAL: Weights must be permuted on Host (CPU) to this layout!
+    // Standard PyTorch: [inChannels, outChannels, kernelSize, kernelSize]
+    // Optimized Layout: [inChannels, kernelSize, kernelSize, outChannels]
+    float* weights;         
+    
+    float* bias;            // Layout: [outChannels]
+    float* inputImage;      // Layout: [Height, Width, inChannels] (NHWC)
+    float* outputImage;     // Layout: [Height, Width, outChannels] (NHWC)
     int inputImageWidth;
     int inputImageHeight;
     int outputImageWidth;
+    int outputImageHeight;
     int stride;
     int padding;
-}
+};
 
-[numthreads(tileSize,tileSize,1)]
-void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChannels>(
-    ConstantBuffer<SimpleConvolutionParams<kernelSize, inChannels, outChannels>, ScalarDataLayout> params,
+// Generics used for static array sizing
+[numthreads(tileSize, tileSize, 1)]
+void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels>(
+    ConstantBuffer<SimpleTransposedConvolutionParams> params,
     int3 groupThreadId : SV_GroupThreadID,
     int3 groupId : SV_GroupID)
 {
-    static groupshared float sharedMem[(tileSize + kernelSize - 1)*(tileSize + kernelSize - 1) * inChannels];
-    int2 srcOrigin = groupId.xy * tileSize * params.stride;
-    let srcTile = DeviceTile<float, inChannels>(srcOrigin, params.inputImageWidth*inChannels, params.inputImage);
+    // --- 1. Coordinate Setup ---
 
-    int2 destOrigin = groupId.xy * tileSize;
-    int outputStride = params.outputImageWidth * outChannels;
-    let destTile = DeviceTile<float, outChannels>(destOrigin, outputStride, params.outputImage);
-    let interTile = SharedTile<float, inChannels>(
-        0,
-        (tileSize + kernelSize - 1) * inChannels,
-        0);
+    // Global Output Position (The pixel this thread is responsible for)
+    const int2 outPos = groupId.xy * int2(tileSize) + groupThreadId.xy;
+    const bool validOutput = outPos.x < params.outputImageWidth && outPos.y < params.outputImageHeight;
 
-    params.convLayer.apply(
-        srcTile,
-        destTile,
-        interTile,
-        tileSize,
-        params.stride,
-        params.padding,
-        int2(params.inputImageWidth, params.inputImageHeight),
-        groupThreadId.xy);
-}
+    // Determine the Output Channel Batch (Z-dimension dispatch)
+    const int outChannelStart = groupId.z * outputChannelBatchSize;
 
-struct SimpleTransposedConvolutionParams<int kernelSize, int inChannels, int outChannels>
-{
-    ConvTransposed2D<kernelSize, inChannels, outChannels> transposedConvLayer;
-    float* inputImage;
-    float* outputImage;
-    int inputImageWidth;
-    int inputImageHeight;
-    int outputImageWidth;
-    int stride;
-    int padding;
-}
-
-[numthreads(tileSize, tileSize, 1)]
-void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels>(
-    ConstantBuffer<SimpleTransposedConvolutionParams<kernelSize, inChannels, outChannels>, CDataLayout> params,
-    int3 groupThreadId : SV_GroupThreadID,
-    int3 groupId : SV_GroupID,
-    int3 tid : SV_DispatchThreadID)
-{
-    // 1. Calculate Shared Memory Size (Compile-Time)
-    // The input patch is roughly (OutputSize / Stride).
-    // Formula matches 'inputPatchWidth' in the struct: (Tile + Kernel + Stride - 1) / Stride + 2
-    static const int smemWidth = (tileSize + kernelSize + stride - 1) / stride + 2;
-    static groupshared float sharedMem[smemWidth * smemWidth * inChannels];
-
-    // 2. Source Tile (Input)
-    // Strategy: Pass the GLOBAL view of the input image (Origin 0,0).
-    // Why? The 'apply' function calculates precise input offsets using integer division 
-    // that handles negative padding. Passing a local tile origin here is risky because 
-    // the required input pixels might shift slightly "left" of a simple block boundary.
-    let srcTile = DeviceTile<float, inChannels>(
-        int2(0, 0), 
-        params.inputImageWidth * inChannels, 
-        params.inputImage
-    );
-
-    // 3. Dest Tile (Output)
-    // Origin: The top-left of the OUTPUT tile for this group.
-    // Note: We need to calculate the output stride properly.
-    int outputStride = params.outputImageWidth * outChannels; 
+    // --- 2. Input Tile Calculation ---
     
-    let destTile = DeviceTile<float, outChannels>(
-        groupId.xy * tileSize, 
-        outputStride, 
-        params.outputImage
-    );
+    // We need to determine the range of Input pixels required to cover this Output tile.
+    // Logic: input_idx = (output_idx + padding - kernel_idx) / stride
+    
+    // Calculate the top-left input coordinate (anchor) for this tile
+    const int2 groupOriginOut = groupId.xy * int2(tileSize);
+    // Integer division floor logic to find the top-most, left-most input pixel needed
+    const int2 tileOriginIn = (groupOriginOut + params.padding - (kernelSize - 1)) / params.stride;
 
-    // 4. Shared Memory Tile (Intermediate)
-    let interTile = SharedTile<float, inChannels>(
-        int2(0, 0),
-        smemWidth * inChannels,
-        0
-    );
+    // Calculate Shared Memory Size
+    // Dimension must cover the span from Min to Max input requirements.
+    static const int inputTileDim = (tileSize + stride - 1) / stride + kernelSize; 
+    
+    // Shared Memory Layout: [Batch][Row][Col]
+    static groupshared float s_inputTile[inputChannelBatchSize][inputTileDim * inputTileDim];
 
-    // 5. Run Logic
-    params.transposedConvLayer.apply(
-        srcTile,
-        destTile,
-        interTile,
-        tileSize,
-        stride,
-        params.padding,
-        int2(params.inputImageWidth, params.inputImageHeight),
-        groupThreadId.xy
-    );
+    // --- 3. Accumulators ---
+
+    float outputAccumulators[outputChannelBatchSize];
+    
+    // Initialize accumulators (Bias)
+    for (int o = 0; o < outputChannelBatchSize; ++o)
+    {
+        int globalOutC = outChannelStart + o;
+        if (globalOutC < outChannels && params.bias != 0)
+            outputAccumulators[o] = params.bias[globalOutC];
+        else
+            outputAccumulators[o] = 0.0f;
+    }
+
+    // --- 4. Main Loop: Input Channel Slicing ---
+
+    // Iterate over Input Channels in chunks (batching) to keep shared memory small
+    for (int inCBase = 0; inCBase < inChannels; inCBase += inputChannelBatchSize)
+    {
+        // ==============================================================================
+        // A. Load Input Tile into Shared Memory
+        // ==============================================================================
+        
+        const int numSharedPixels = inputTileDim * inputTileDim;
+        const int numThreads = tileSize * tileSize;
+        const int linearThreadIndex = groupThreadId.y * tileSize + groupThreadId.x;
+
+        // Cooperative loading loop
+        for (int i = linearThreadIndex; i < numSharedPixels; i += numThreads)
+        {
+            int sY = i / inputTileDim;
+            int sX = i % inputTileDim;
+            int globalInY = tileOriginIn.y + sY;
+            int globalInX = tileOriginIn.x + sX;
+
+            bool inBounds = globalInY >= 0 && globalInY < params.inputImageHeight &&
+                            globalInX >= 0 && globalInX < params.inputImageWidth;
+
+            // Load batch of channels
+            for (int k = 0; k < inputChannelBatchSize; ++k)
+            {
+                int currentInC = inCBase + k;
+                if (inBounds && currentInC < inChannels)
+                {
+                    // Input Layout: [H, W, C]
+                    int64_t idx = ((int64_t)globalInY * params.inputImageWidth + globalInX) * inChannels + currentInC;
+                    s_inputTile[k][i] = params.inputImage[idx];
+                }
+                else
+                {
+                    s_inputTile[k][i] = 0.0f;
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        // ==============================================================================
+        // B. Transposed Convolution Math
+        // ==============================================================================
+        
+        if (validOutput)
+        {
+            // Optimization: "Strided Jump"
+            // We only iterate kernel positions (ky, kx) that theoretically align with this output pixel.
+            // Constraint: (outPos + padding - k) % stride == 0
+            
+            int startKy = (outPos.y + params.padding) % stride;
+            int startKx = (outPos.x + params.padding) % stride;
+
+            for (int ky = startKy; ky < kernelSize; ky += stride)
+            {
+                // Calculate which input pixel corresponds to this kernel offset
+                // Formula: input = (output + pad - kernel) / stride
+                int globalInY = (outPos.y + params.padding - ky) / stride;
+                int sY = globalInY - tileOriginIn.y;
+                
+                // Bounds check for shared memory
+                if (sY < 0 || sY >= inputTileDim) continue;
+
+                for (int kx = startKx; kx < kernelSize; kx += stride)
+                {
+                    int globalInX = (outPos.x + params.padding - kx) / stride;
+                    int sX = globalInX - tileOriginIn.x;
+
+                    if (sX < 0 || sX >= inputTileDim) continue;
+                    
+                    int sharedIdx = sY * inputTileDim + sX;
+
+                    // Iterate over the batch of Input Channels currently in Shared Mem
+                    for (int inOffset = 0; inOffset < inputChannelBatchSize; ++inOffset)
+                    {
+                        int globalInC = inCBase + inOffset;
+                        if (globalInC >= inChannels) break;
+
+                        float pixelVal = s_inputTile[inOffset][sharedIdx];
+
+                        // Unroll Output Channel computation
+                        [unroll]
+                        for (int outOffset = 0; outOffset < outputChannelBatchSize; ++outOffset)
+                        {
+                            int globalOutC = outChannelStart + outOffset;
+                            if (globalOutC >= outChannels) continue;
+
+                            // ---------------------------------------------------------
+                            // OPTIMIZED WEIGHT INDEXING
+                            // Layout: [InC][KH][KW][OutC]
+                            // 
+                            // Since 'globalOutC' varies fastest in this loop (stride 1),
+                            // we get coalesced memory reads.
+                            // ---------------------------------------------------------
+                            int64_t wIdx = 
+                                (int64_t)globalInC  * (kernelSize * kernelSize * outChannels) +
+                                (int64_t)ky         * (kernelSize * outChannels) + 
+                                (int64_t)kx         * (outChannels) + 
+                                (int64_t)globalOutC;
+
+                            outputAccumulators[outOffset] += pixelVal * params.weights[wIdx];
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // --- 5. Write Output ---
+
+    if (validOutput)
+    {
+        for (int o = 0; o < outputChannelBatchSize; ++o)
+        {
+            int globalOutC = outChannelStart + o;
+            if (globalOutC < outChannels)
+            {
+                // Output Layout: [H, W, OutC]
+                int64_t outIdx = ((int64_t)outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
+                params.outputImage[outIdx] = outputAccumulators[o];
+            }
+        }
+    }
 }

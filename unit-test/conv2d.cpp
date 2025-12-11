@@ -3,8 +3,8 @@
 
 using namespace Slang;
 
-Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels)
-    : context(context), tileSize(tileSize), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels)
+Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels, String name)
+    : context(context), tileSize(tileSize), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels), name(name)
 {
     String specArgs[] = {
         String(tileSize),
@@ -56,26 +56,32 @@ struct Conv2DKernelParams
     int inputImageWidth;
     int inputImageHeight;
     int outputImageWidth;
+    int outputImageHeight;
     int stride;
     int padding;
 };
 
 ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int stride, int padding)
 {
-    int outputWidth = (inputWidth + padding - 1) / stride;
-    int outputHeight = (inputHeight + padding - 1) / stride;
-    auto outputBuffer = task.allocateBuffer(outputWidth * outputHeight * outChannels * sizeof(float));
-
+    int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
+    int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
+    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
+    auto outputBuffer = task.allocateBuffer(resultBufferName.getBuffer(), outputWidth * outputHeight * outChannels * sizeof(float));
+    auto expectedInputSize = inputWidth * inputHeight * inChannels * sizeof(float);
+    SLANG_ASSERT(inputImage->getDesc().size == expectedInputSize);
     Conv2DKernelParams params = {};
     params.inputImage = inputImage->getDeviceAddress();
     params.outputImage = outputBuffer->getDeviceAddress();
     params.inputImageWidth = inputWidth;
     params.inputImageHeight = inputHeight;
     params.outputImageWidth = outputWidth;
+    params.outputImageHeight = outputHeight;
     params.stride = stride;
     params.padding = padding;
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
-    task.dispatchKernel(pipeline, (outputWidth+tileSize-1)/tileSize, (outputHeight+tileSize-1)/tileSize, 1, params);
+    static const int batchOutChannels = 32;
+    int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
+    task.dispatchKernel(pipeline, (outputWidth+tileSize-1)/tileSize, (outputHeight+tileSize-1)/tileSize, zBlocks, params);
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

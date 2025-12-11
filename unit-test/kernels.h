@@ -76,8 +76,8 @@ public:
     int kernelSize;
     int inChannels;
     int outChannels;
-
-    Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels);
+    String name;
+    Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels, String name = "conv2d");
 
     SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
     SlangResult loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData);
@@ -97,8 +97,9 @@ public:
     int inChannels;
     int outChannels;
     int stride;
+    String name;
 
-    TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels);
+    TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, String name = "transConv2d");
 
     SlangResult loadParams(TorchParamReader& reader);
     SlangResult loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData);

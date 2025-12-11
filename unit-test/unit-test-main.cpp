@@ -5,6 +5,7 @@
 #include "kernels.h"
 #include "inference-context.h"
 #include "torch-reader.h"
+#include <random>
 
 using Slang::ComPtr;
 
@@ -33,15 +34,15 @@ public:
     {
         if (kind == UNetBlockKind::Down)
         {
-            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, inChannels, outChannels);
-            downTransform = new Conv2DKernel(inferencingCtx, 16, 4, outChannels, outChannels);
+            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, inChannels, outChannels, "conv1");
+            downTransform = new Conv2DKernel(inferencingCtx, 16, 4, outChannels, outChannels, "transformDown");
         }
         else
         {
-            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 2*inChannels, outChannels);
-            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels);
+            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 2*inChannels, outChannels, "conv1");
+            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels, "transformUp");
         }
-        conv2 = new Conv2DKernel(inferencingCtx, 16, 3, outChannels, outChannels);
+        conv2 = new Conv2DKernel(inferencingCtx, 16, 3, outChannels, outChannels, "conv2");
         timeEmbedTransform = new LinearKernel(inferencingCtx, ActivationFunction::ReLU, 128, timeEmbedDim, outChannels);
         broadcastAdd = new BroadcastAddKernel(inferencingCtx);
     }
@@ -65,7 +66,7 @@ public:
         int shapeA[] = { inputHeight, inputWidth, outChannels };
         int shapeB[] = { 1, 1, outChannels };
         auto added = broadcastAdd->queueExecute(task, conv1Result, makeArrayView(shapeA), transformedTimeEmbedding, makeArrayView(shapeB));
-        auto conv2Result = conv2->queueExecute(task, inputImage, inputWidth, inputHeight, 1, 1);
+        auto conv2Result = conv2->queueExecute(task, added, inputWidth, inputHeight, 1, 1);
         rhi::IBuffer* finalResult = conv2Result;
         if (downTransform)
             finalResult = downTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 2, 1);
@@ -107,13 +108,14 @@ public:
                 channelSizes[SLANG_COUNT_OF(channelSizes) - 2 - i],
                 timeEmbedDim));
         }
-        initialConv = new Conv2DKernel(inferencingCtx, 16, 3, inputChannels, channelSizes[0]);
-        finalConv = new Conv2DKernel(inferencingCtx, 16, 1, channelSizes[0], outputChannels);
+        initialConv = new Conv2DKernel(inferencingCtx, 16, 3, inputChannels, channelSizes[0], "initialConv");
+        finalConv = new Conv2DKernel(inferencingCtx, 16, 1, channelSizes[0], outputChannels, "predictedNoiseConv");
         concat = new ConcatKernel(inferencingCtx);
     }
 
     SlangResult loadParams(TorchParamReader& reader)
     {
+        SLANG_RETURN_ON_FAIL(timeEmbedKernel->loadParams(reader));
         SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader, false));
         for (auto& block : downBlocks)
         {
@@ -232,6 +234,9 @@ struct UnitTestProgram : public TestBase
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
+        deviceDesc.enableAftermath = true;
+        deviceDesc.enableValidation = true;
+        rhi::getRHI()->enableDebugLayers();
         gDevice = rhi::getRHI()->createDevice(deviceDesc);
         if (!gDevice)
             return SLANG_FAIL;
@@ -323,17 +328,16 @@ struct UnitTestProgram : public TestBase
 
     void initImage(List<float>& imageData, int width, int height, int channels = 1)
     {
-        Random random(42);
+        uint32_t seed = 1723;
+        std::mt19937 gen(seed);
+
+        std::normal_distribution<float> dist(0.0f, 1.0f);
         imageData.setCount(width * height * channels);
-        for (int y = 0; y < height; y++)
+
+        // 3. Generate
+        for (Index i = 0; i < imageData.getCount(); i++)
         {
-            for (int x = 0; x < width; x++)
-            {
-                for (int c = 0; c < channels; c++)
-                {
-                    imageData[(y * width + x) * channels + c] = random.NextFloat(0.0f, 1.0f);
-                }
-            }
+            imageData[i] = dist(gen);
         }
     }
 
@@ -362,7 +366,7 @@ struct UnitTestProgram : public TestBase
             float beta;
             float alphaCumprod;
         };
-        int stepCount = 500;
+        int stepCount = 3;
         float betaStart = 1e-4;
         float betaEnd = 0.02f;
         List<NoiseParam> noiseSchedule;
@@ -377,7 +381,10 @@ struct UnitTestProgram : public TestBase
             noiseSchedule[step].beta = betaT;
             noiseSchedule[step].alphaCumprod = alphaCumprodT;
         }
-        auto inputImage = gInferencingCtx->createBuffer(inputImageData.getBuffer(), inputImageData.getCount() * sizeof(float));
+        auto inputImage = gInferencingCtx->createBuffer(
+            inputImageData.getBuffer(),
+            inputImageData.getCount() * sizeof(float),
+            "inputImage");
         
         static const int largePrime = 15485863;
         for (int step = stepCount - 1; step >= 0; step--)
@@ -414,7 +421,7 @@ struct UnitTestProgram : public TestBase
         for (int i = 0; i < outputImageData.getCount(); i++)
         {
             float v = outputImageData[i];
-            v = Slang::Math::Clamp(v, 0.0f, 1.0f);
+            v = (Slang::Math::Clamp(v, -1.0f, 1.0f) + 1.0) * 0.5f;
             outputImageData8Bit[i] = static_cast<uint8_t>(v * 255.0f);
         }
         writeImagePNG("output.png", imageSize, imageSize, outputChannelCount, outputImageData8Bit.getBuffer());

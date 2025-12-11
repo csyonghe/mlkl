@@ -7,6 +7,10 @@
 
 using namespace Slang;
 
+// Define this to 1 to enable intermediate mode that runs kernels synchronously
+// on the CPU for easier debugging.
+#define INTERMEDIATE_MODE 1
+
 class InferencingContext;
 
 class InferencingTask
@@ -49,7 +53,7 @@ public:
             sizeof(TParams));
     }
 
-    rhi::IBuffer* allocateBuffer(size_t size, void* initData = nullptr);
+    rhi::IBuffer* allocateBuffer(const char* name, size_t size, void* initData = nullptr);
 
     void execute();
 };
@@ -69,7 +73,7 @@ public:
 
     InferencingTask createTask();
 
-    ComPtr<rhi::IBuffer> createBuffer(const void* data, size_t size);
+    ComPtr<rhi::IBuffer> createBuffer(const void* data, size_t size, const char* label = nullptr);
 
     template<typename T>
     ComPtr<rhi::IBuffer> createBuffer(const List<T>& data)

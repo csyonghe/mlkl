@@ -72,15 +72,20 @@ void InferencingContext::diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 InferencingTask InferencingContext::createTask()
 {
     InferencingTask task = InferencingTask(
+#if INTERMEDIATE_MODE
         device->getQueue(rhi::QueueType::Graphics)->createCommandEncoder(),
+#else
+        nullptr,
+#endif
         this);
     return task;
 }
 
-ComPtr<rhi::IBuffer> InferencingContext::createBuffer(const void* data, size_t size)
+ComPtr<rhi::IBuffer> InferencingContext::createBuffer(const void* data, size_t size, const char* label)
 {
     rhi::BufferDesc bufferDesc = {};
     bufferDesc.size = size;
+    bufferDesc.label = label;
     bufferDesc.defaultState = rhi::ResourceState::UnorderedAccess;
     bufferDesc.usage = rhi::BufferUsage::CopySource | rhi::BufferUsage::CopyDestination |
         rhi::BufferUsage::UnorderedAccess;
@@ -115,6 +120,10 @@ void InferencingTask::dispatchKernel(
     const void* paramData,
     size_t paramDataSize)
 {
+#if INTERMEDIATE_MODE
+    auto queue = context->getDevice()->getQueue(rhi::QueueType::Graphics);
+    encoder = queue->createCommandEncoder();
+#endif
     auto computeEncoder = encoder->beginComputePass();
     auto rootShaderObject = computeEncoder->bindPipeline(pipeline);
     rhi::ShaderCursor cursor(rootShaderObject->getEntryPoint(0));
@@ -136,21 +145,34 @@ void InferencingTask::dispatchKernel(
     pParams.setObject(obj);
     computeEncoder->dispatchCompute(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     computeEncoder->end();
+#if INTERMEDIATE_MODE
+    if (SLANG_FAILED(queue->submit(encoder->finish())))
+    {
+        InferencingContext::reportError("Failed to submit compute command buffer\n");
+    }
+    if (SLANG_FAILED(queue->waitOnHost()))
+    {
+        InferencingContext::reportError("Failed to wait on compute queue\n");
+    }
+    encoder = nullptr;
+#endif
 }
 
-rhi::IBuffer* InferencingTask::allocateBuffer(size_t size, void* initData)
+rhi::IBuffer* InferencingTask::allocateBuffer(const char* name, size_t size, void* initData)
 {
-    ComPtr<rhi::IBuffer> buffer = context->createBuffer(initData, size);
+    ComPtr<rhi::IBuffer> buffer = context->createBuffer(initData, size, name);
     buffers.add(buffer);
     return buffer;
 }
 
 void InferencingTask::execute()
 {
+#if !INTERMEDIATE_MODE
     auto commandBuffer = encoder->finish();
     auto result = context->getDevice()->getQueue(rhi::QueueType::Graphics)->submit(commandBuffer);
     if (SLANG_FAILED(result))
     {
         InferencingContext::reportError("Failed to submit command buffer\n");
     }
+#endif
 }
