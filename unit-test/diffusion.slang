@@ -46,15 +46,15 @@ float getGaussianNoise(uint tid, uint seed)
 
 struct DiffusionStepParams
 {
-    // Scalar Coefficients
-    float coeff1; 
-    float coeff2; 
-    float coeff3; 
-    
     // Raw Pointers (Buffer Device Address)
     float* currentImage;   // x_t (Input)
     float* predictedNoise; // epsilon_theta (Input)
     float* outputImage;    // x_{t-1} (Output)
+    
+    // Scalar Coefficients
+    float coeff1; 
+    float coeff2; 
+    float coeff3; 
     
     uint totalElements;
     uint seed;             // Change this every frame/step on CPU!

@@ -61,7 +61,7 @@ void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChan
     for (int o = 0; o < outputChannelBatchSize; ++o)
     {
         int globalOutC = outChannelStart + o;
-        if (globalOutC < outChannels && params.bias != 0)
+        if (globalOutC < outChannels)
             outputAccumulators[o] = params.bias[globalOutC];
         else
             outputAccumulators[o] = 0.0f;
@@ -257,7 +257,7 @@ void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int i
     for (int o = 0; o < outputChannelBatchSize; ++o)
     {
         int globalOutC = outChannelStart + o;
-        if (globalOutC < outChannels && params.bias != 0)
+        if (globalOutC < outChannels)
             outputAccumulators[o] = params.bias[globalOutC];
         else
             outputAccumulators[o] = 0.0f;

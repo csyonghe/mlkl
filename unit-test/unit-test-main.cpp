@@ -154,7 +154,7 @@ public:
             inputWidth *= 2;
             inputHeight *= 2;
         }
-        x = finalConv->queueExecute(task, x, inputWidth, inputHeight, 1, 1);
+        x = finalConv->queueExecute(task, x, inputWidth, inputHeight, 1, 0);
         return ComPtr<rhi::IBuffer>(x);
     }
 };
@@ -366,7 +366,7 @@ struct UnitTestProgram : public TestBase
             float beta;
             float alphaCumprod;
         };
-        int stepCount = 3;
+        int stepCount = 100;
         float betaStart = 1e-4;
         float betaEnd = 0.02f;
         List<NoiseParam> noiseSchedule;
