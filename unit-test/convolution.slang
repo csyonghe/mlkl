@@ -323,7 +323,8 @@ void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int i
             {
                 // Calculate which input pixel corresponds to this kernel offset
                 // Formula: input = (output + pad - kernel) / stride
-                int globalInY = (outPos.y + params.padding - ky) / stride;
+                int numY = outPos.y + params.padding - ky;
+                int globalInY = numY < 0 ? (numY - stride + 1) / stride : numY / stride;
                 int sY = globalInY - tileOriginIn.y;
                 
                 // Bounds check for shared memory

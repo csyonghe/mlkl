@@ -148,7 +148,7 @@ public:
             auto skipConnection = skipConnections[skipConnections.getCount() - 1 - i];
             int shape[] = { inputHeight, inputWidth, block->inChannels };
             auto shapeView = makeArrayView(shape);
-            x = concat->queueExecute(task, x, shapeView, skipConnection, shapeView, 3);
+            x = concat->queueExecute(task, x, shapeView, skipConnection, shapeView, 2);
             // Up block
             x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
             inputWidth *= 2;
@@ -201,7 +201,7 @@ public:
         };
         DiffusionStepParams params;
         params.coeff1 = 1.0f / sqrtf(alpha);
-        params.coeff2 = (alpha - 1.0f) / (sqrtf(1.0f - alphaCumprod) * sqrtf(alpha));
+        params.coeff2 = (1.0f - alpha) / (sqrtf(1.0f - alphaCumprod) * sqrtf(alpha));
         if (t > 0)
             params.coeff3 = sqrtf(beta);
         else
