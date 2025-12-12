@@ -6,6 +6,7 @@
 #include "inference-context.h"
 #include "torch-reader.h"
 #include <random>
+#include <chrono>
 
 using Slang::ComPtr;
 
@@ -40,7 +41,7 @@ public:
         else
         {
             conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 1, 2*inChannels, outChannels, ActivationFunction::ReLU, "conv1");
-            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels, "transformUp");
+            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels, ActivationFunction::None, "transformUp");
         }
         conv2 = new Conv2DKernel(inferencingCtx, 16, 3, 1, outChannels, outChannels, ActivationFunction::ReLU, "conv2");
         timeEmbedTransform = new LinearKernel(inferencingCtx, ActivationFunction::ReLU, 128, timeEmbedDim, outChannels);
@@ -191,9 +192,7 @@ struct UnitTestProgram : public TestBase
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
-        deviceDesc.enableAftermath = true;
-        deviceDesc.enableValidation = true;
-        rhi::getRHI()->enableDebugLayers();
+        //rhi::getRHI()->enableDebugLayers();
         gDevice = rhi::getRHI()->createDevice(deviceDesc);
         if (!gDevice)
             return SLANG_FAIL;
@@ -364,7 +363,8 @@ struct UnitTestProgram : public TestBase
             "imageB");
         auto outputImage = imageA;
         static const int largePrime = 15485863;
-        //renderDocBeginFrame();
+        renderDocBeginFrame();
+        auto task = gInferencingCtx->createTask();
         for (int step = inferenceSteps - 1; step >= 0; step--)
         {
             // Map 0..100 -> 0..500
@@ -382,7 +382,6 @@ struct UnitTestProgram : public TestBase
             // Special handling for the final step:
             // If we are going below t=0, the target is the pure image (AlphaBar = 1.0)
             float alphaBar_prev = (step_prev < 0) ? 1.0f : noiseSchedule[t_prev].alphaCumprod;
-            auto task = gInferencingCtx->createTask();
 
             // Use 't' for the model, but 'step' for the loop logic
             auto predictedNoise = model.forward(task, imageA, imageSize, imageSize, t);
@@ -396,12 +395,15 @@ struct UnitTestProgram : public TestBase
                 alphaBar_t,
                 alphaBar_prev,
                 imageSize * imageSize * outputChannelCount);
-            task.execute();
             outputImage = imageB;
             Swap(imageA, imageB);
-
         }
-        //renderDocEndFrame();
+        auto startTime = std::chrono::high_resolution_clock::now();
+        task.execute();
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+        printf("Inference Time: %lld ms\n", elapsedMs);
+        renderDocEndFrame();
 
         // Read back final image
         List<float> outputImageData;

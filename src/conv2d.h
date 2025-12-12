@@ -5,7 +5,10 @@
 class Conv2DKernel : public RefObject
 {
 private:
-    ComPtr<rhi::IComputePipeline> pipeline;
+    ComPtr<rhi::IComputePipeline> tilePipeline;
+    ComPtr<rhi::IComputePipeline> flatPipeline;
+    ComPtr<rhi::IComputePipeline> flatWaveReducePipeline;
+
     InferencingContext* context;
 public:
     int tileSize;
@@ -14,6 +17,7 @@ public:
     int outChannels;
     int stride;
     ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
+    ComPtr<rhi::IBuffer> weightsTransposedBuffer; // [outChannels, kernelSize, kernelSize, inChannels]
     ActivationFunction activation;
     String name;
     Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation = ActivationFunction::None, String name = "conv2d");

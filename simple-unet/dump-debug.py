@@ -1,10 +1,18 @@
 from diffmodel import *;
 import os
 import numpy as np
+import time
 
 # load model
 model = SimpleDiffusionUNet().to(DEVICE)
 model.load_state_dict(torch.load("model_weights.pth", map_location=DEVICE))
+
+diffusion = DiffusionManager(noise_steps=NOISE_STEPS, img_size=IMG_SIZE, device=DEVICE)
+# get the current system time to benchmark the inferencing performance
+startTime = time.time()
+result = diffusion.sample(model, n=1)
+endTime = time.time()
+print(f"Sampling Time: {endTime - startTime} seconds")
 
 # Create debug folder
 os.makedirs("debug_dump", exist_ok=True)

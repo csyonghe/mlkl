@@ -1,7 +1,7 @@
 
 #include "transposed-conv2d.h"
 
-TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, String name)
+TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation, String name)
     : context(context), tileSize(tileSize), stride(stride), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels), name(name)
 {
     String specArgs[] = {
@@ -9,9 +9,21 @@ TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int 
         String(kernelSize),
         String(stride),
         String(inChannels),
-        String(outChannels)
+        String(outChannels),
+        getActivationFuncName(activation)
     };
-    pipeline = context->createComputePipeline("simpleTransposedConvolution", makeArrayView(specArgs));
+    pipeline = context->createComputePipeline("tiledTransposedConvolution", makeArrayView(specArgs));
+
+    // Create Flat Pipeline
+    String flatArgs[] = {
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+        getActivationFuncName(activation)
+    };
+    // Note: tileSize is NOT needed for flat kernel generic
+    flatPipeline = context->createComputePipeline("flatTransposedConvolution", makeArrayView(flatArgs));
 }
 
 SlangResult TransposedConv2DKernel::loadParams(TorchParamReader& reader)
@@ -72,8 +84,20 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(InferencingTask& task,
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
 
-    static const int batchOutChannels = 32;
-    int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
-    task.dispatchKernel(pipeline, (outputWidth + tileSize - 1) / tileSize, (outputHeight + tileSize - 1) / tileSize, zBlocks, params);
+    if (outputWidth * outputHeight <= 1024)
+    {
+        // Dispatch 1D Grid
+        int totalElements = outputWidth * outputHeight * outChannels;
+        int groupSize = 256;
+        int numGroups = (totalElements + groupSize - 1) / groupSize;
+
+        task.dispatchKernel(flatPipeline, numGroups, 1, 1, params);
+    }
+    else
+    {
+        static const int batchOutChannels = 32;
+        int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
+        task.dispatchKernel(pipeline, (outputWidth + tileSize - 1) / tileSize, (outputHeight + tileSize - 1) / tileSize, zBlocks, params);
+    }
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

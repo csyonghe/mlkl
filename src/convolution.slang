@@ -7,7 +7,7 @@ static const int inputChannelBatchSize = 8;
 static const int outputChannelBatchSize = 32;
 
 // --- Shader Parameters ---
-struct SimpleConvolutionParams
+struct ConvolutionParams
 {
     // CRITICAL CHANGE: Weight layout must be permuted on the host.
     // New Layout: [inChannels, kernelSize, kernelSize, outChannels]
@@ -26,8 +26,8 @@ struct SimpleConvolutionParams
 
 // The shader entry point using generics for compile-time constants needed for array sizing.
 [numthreads(tileSize, tileSize, 1)]
-void simpleConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
-    ConstantBuffer<SimpleConvolutionParams> params,
+void tiledConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
+    ConstantBuffer<ConvolutionParams> params,
     int3 groupThreadId : SV_GroupThreadID,
     int3 groupId : SV_GroupID)
 {
@@ -196,7 +196,235 @@ void simpleConvolution<int tileSize, int kernelSize, int stride, int inChannels,
     }
 }
 
-struct SimpleTransposedConvolutionParams
+// --- FLAT CONVOLUTION (For Low-Res / Bottleneck Layers) ---
+// Discards tiling. Maps GlobalID linear index directly to (OutputPixel, OutputChannel).
+[numthreads(256, 1, 1)]
+void flatConvolution<int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
+    ConstantBuffer<ConvolutionParams> params,
+    uint3 id : SV_DispatchThreadID)
+{
+    uint globalIdx = id.x;
+    uint totalOutputs = params.outputImageWidth * params.outputImageHeight * outChannels;
+    
+    if (globalIdx >= totalOutputs) return;
+
+    // 1. Decompose Index -> (OutY, OutX, OutCh)
+    // We assume Layout: [Height, Width, Channel]
+    uint outCh = globalIdx % outChannels;
+    uint spatialIdx = globalIdx / outChannels;
+    uint outX = spatialIdx % params.outputImageWidth;
+    uint outY = spatialIdx / params.outputImageWidth;
+
+    // 2. Setup Accumulator (Bias)
+    float sum = 0.0;
+    if (outCh < outChannels)
+        sum = params.bias[outCh];
+
+    // 3. Brute Force Convolution Loop
+    // No Shared Memory - Rely on L2 Cache (efficient for small spatial dims)
+    int startX = (int)outX * stride - params.padding;
+    int startY = (int)outY * stride - params.padding;
+
+    for (int ky = 0; ky < kernelSize; ky++)
+    {
+        int inY = startY + ky;
+        if (inY >= 0 && inY < params.inputImageHeight)
+        {
+            for (int kx = 0; kx < kernelSize; kx++)
+            {
+                int inX = startX + kx;
+                if (inX >= 0 && inX < params.inputImageWidth)
+                {
+                    // Linear Input Index
+                    // Input is [H, W, C]
+                    int64_t inPixelOffset = ((int64_t)inY * params.inputImageWidth + inX) * inChannels;
+                    
+                    // Weight Base Index
+                    // Layout: [In, K, K, Out]
+                    int64_t wBase = ((int64_t)ky * kernelSize * outChannels + (int64_t)kx * outChannels + outCh);
+                    int64_t wStride = (int64_t)kernelSize * kernelSize * outChannels;
+
+                    for (int ic = 0; ic < inChannels; ic++)
+                    {
+                        float val = params.inputImage[inPixelOffset + ic];
+                        // Weights stride by 'wStride' as we move through InChannels
+                        float w = params.weights[ic * wStride + wBase];
+                        sum += val * w;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Write
+    params.outputImage[globalIdx] = TActivation.apply(sum);
+}
+
+// --- TINY CONVOLUTION (For Bottlenecks with W*H <= 16) ---
+// Optimization: Each thread computes ALL pixels for ONE output channel.
+// Benefit: Loads weights ONCE and reuses them across all pixels.
+[numthreads(256, 1, 1)]
+void tinyConvolution<int kernelSize, int stride, int inChannels, int outChannels, int maxTotalPixels, TActivation : IActivation>(
+    ConstantBuffer<ConvolutionParams> params,
+    uint3 id : SV_DispatchThreadID)
+{
+    // One thread per Output Channel
+    uint outCh = id.x;
+    if (outCh >= outChannels) return;
+
+    int totalPixels = params.outputImageWidth * params.outputImageHeight;
+
+    // Registers to hold accumulators for all pixels (Max 16 for safety)
+    // If your bottleneck is 4x4, this is perfect. If 2x2, we only use 4.
+    float sums[maxTotalPixels]; 
+    
+    // Initialize with Bias
+    float b = params.bias[outCh];
+    [unroll]
+    for (int i = 0; i < totalPixels; ++i) sums[i] = b;
+
+    // Cache spatial coordinates for all pixels to avoid recomputing in inner loop
+    let pixelCoords = (int i)=>{ return int2(i % params.outputImageWidth, i / params.outputImageWidth); };
+
+    // Main Loop: Iterate over Input Volume
+    for (int ic = 0; ic < inChannels; ++ic)
+    {
+        // 1. Pre-calculate Weight Base Address for this InChannel/OutChannel pair
+        // This is invariant across spatial kernel loop
+        int64_t wBaseIC = (int64_t)ic * kernelSize * kernelSize * outChannels + outCh;
+
+        for (int ky = 0; ky < kernelSize; ++ky)
+        {
+            for (int kx = 0; kx < kernelSize; ++kx)
+            {
+                // 2. Load Weight ONCE (Reuse across all pixels)
+                // Layout: [In, K, K, Out]
+                int64_t wOffset = (int64_t)ky * kernelSize * outChannels + (int64_t)kx * outChannels;
+                float w = params.weights[wBaseIC + wOffset];
+
+                // 3. Update All Pixels
+                [unroll]
+                for (int p = 0; p < totalPixels; ++p)
+                {
+                    // Calculate Input coord
+                    int2 outCoord = int2(p % params.outputImageWidth, p / params.outputImageWidth);
+                    
+                    int inY = outCoord.y * stride - params.padding + ky;
+                    int inX = outCoord.x * stride - params.padding + kx;
+
+                    // Boundary Check & Accumulate
+                    if (inX >= 0 && inX < params.inputImageWidth && 
+                        inY >= 0 && inY < params.inputImageHeight)
+                    {
+                        int64_t inIdx = ((int64_t)inY * params.inputImageWidth + inX) * inChannels + ic;
+                        sums[p] += params.inputImage[inIdx] * w;
+                    }
+                }
+            }
+        }
+    }
+
+    // Write Output
+    [unroll]
+    for (int p = 0; p < totalPixels; ++p)
+    {
+        float val = sums[p];
+        // Linear output index: Pixel * OutChannels + OutCh
+        params.outputImage[p * outChannels + outCh] = TActivation.apply(val);
+    }
+}
+
+// --- WAVE-REDUCED FLAT CONVOLUTION ---
+// Best for Bottlenecks (e.g. 2x2, 4x4, up to 16x16)
+// Mapping: 1 Warp (32 Threads) = 1 Output Pixel
+// The 32 threads split the Input Channels, sum locally, then reduce via Wave Intrinsics.
+[numthreads(256, 1, 1)]
+void flatConvolutionWaveReduce<int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
+    ConstantBuffer<ConvolutionParams> params,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    // Constants
+    uint waveSize = WaveGetLaneCount(); // 32
+    uint warpsPerBlock = 256 / waveSize; // 8
+
+    // 1. Map Warp -> Global Output Value (Pixel + Channel)
+    uint laneId = WaveGetLaneIndex(); // 0..31
+    uint warpId = groupThreadId.x / waveSize; 
+    
+    // Global Index of the (Pixel, Channel) pair we are computing
+    uint globalValueIdx = groupId.x * warpsPerBlock + warpId;
+    
+    uint totalValues = params.outputImageWidth * params.outputImageHeight * outChannels;
+    if (globalValueIdx >= totalValues) return;
+
+    // 2. Decode Coordinates
+    uint outCh = globalValueIdx % outChannels;
+    uint spatialIdx = globalValueIdx / outChannels;
+    uint outX = spatialIdx % params.outputImageWidth;
+    uint outY = spatialIdx / params.outputImageWidth;
+
+    // 3. Convolution Accumulation
+    float partialSum = 0.0;
+    
+    int startX = (int)outX * stride - params.padding;
+    int startY = (int)outY * stride - params.padding;
+
+    // Pre-calculate weight strides to save math in inner loop
+    // Weight Layout: [In, K, K, Out]
+    
+    int wStrideK = (int)inChannels;
+    int wStrideY = (int)kernelSize * inChannels;
+    int wStrideOut = (int)kernelSize * kernelSize * inChannels;
+    for (int ky = 0; ky < kernelSize; ky++)
+    {
+        int inY = startY + ky;
+        if (inY >= 0 && inY < params.inputImageHeight)
+        {
+            for (int kx = 0; kx < kernelSize; kx++)
+            {
+                int inX = startX + kx;
+                if (inX >= 0 && inX < params.inputImageWidth)
+                {
+                    // Calculate offsets for this spatial position
+                    int inPixelOffset = ((int)inY * params.inputImageWidth + inX) * inChannels;
+                    // Weight Base Address for this (OutChannel, ky, kx)
+                    int wBase = (int)outCh * wStrideOut + 
+                                    (int)ky * wStrideY + 
+                                    (int)kx * wStrideK;
+
+                    // Inner Loop: varying 'ic'
+                    // Threads 0..31 read addresses wBase + 0..31
+                    // This is a perfectly coalesced 128-byte read.
+                    for (int ic = laneId; ic < inChannels; ic += waveSize)
+                    {
+                        float val = params.inputImage[inPixelOffset + ic];
+                        
+                        // wStrideIn is effectively 1 now
+                        float w = params.weights[wBase + ic]; 
+                        
+                        partialSum += val * w;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Wave Reduction (Sum partial results from the 32 threads)
+    float totalSum = WaveActiveSum(partialSum);
+
+    // 5. Write Final Result
+    // Only the first lane in the warp performs the write to memory
+    if (laneId == 0)
+    {
+        if (outCh < outChannels) totalSum += params.bias[outCh];
+        
+        // Use Type-based Activation (as defined in your template)
+        params.outputImage[globalValueIdx] = TActivation.apply(totalSum);
+    }
+}
+
+struct TransposedConvolutionParams
 {
     // CRITICAL: Weights must be permuted on Host (CPU) to this layout!
     // Standard PyTorch: [inChannels, outChannels, kernelSize, kernelSize]
@@ -216,8 +444,8 @@ struct SimpleTransposedConvolutionParams
 
 // Generics used for static array sizing
 [numthreads(tileSize, tileSize, 1)]
-void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels>(
-    ConstantBuffer<SimpleTransposedConvolutionParams> params,
+void tiledTransposedConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
+    ConstantBuffer<TransposedConvolutionParams> params,
     int3 groupThreadId : SV_GroupThreadID,
     int3 groupId : SV_GroupID)
 {
@@ -386,8 +614,65 @@ void simpleTransposedConvolution<int tileSize, int kernelSize, int stride, int i
             {
                 // Output Layout: [H, W, OutC]
                 int64_t outIdx = ((int64_t)outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
-                params.outputImage[outIdx] = outputAccumulators[o];
+                params.outputImage[outIdx] = TActivation.apply(outputAccumulators[o]);
             }
         }
     }
+}
+
+// --- FLAT TRANSPOSED CONVOLUTION ---
+[numthreads(256, 1, 1)]
+void flatTransposedConvolution<int kernelSize, int stride, int inChannels, int outChannels, TActivation:IActivation>(
+    ConstantBuffer<TransposedConvolutionParams> params,
+    uint3 id : SV_DispatchThreadID)
+{
+    uint globalIdx = id.x;
+    uint totalOutputs = params.outputImageWidth * params.outputImageHeight * outChannels;
+    if (globalIdx >= totalOutputs) return;
+
+    uint outCh = globalIdx % outChannels;
+    uint spatialIdx = globalIdx / outChannels;
+    uint outX = spatialIdx % params.outputImageWidth;
+    uint outY = spatialIdx / params.outputImageWidth;
+
+    float sum = 0.0;
+    if (outCh < outChannels) sum = params.bias[outCh];
+
+    // Transposed Logic: Loop over kernel to find contributing input pixels
+    // Constraint: (out + pad - k) % stride == 0
+    int startKy = (outY + params.padding) % stride;
+    int startKx = (outX + params.padding) % stride;
+
+    for (int ky = startKy; ky < kernelSize; ky += stride)
+    {
+        int numY = outY + params.padding - ky;
+        int inY = numY < 0 ? (numY - stride + 1) / stride : numY / stride; // Floor div
+
+        if (inY >= 0 && inY < params.inputImageHeight)
+        {
+            for (int kx = startKx; kx < kernelSize; kx += stride)
+            {
+                int numX = outX + params.padding - kx;
+                int inX = numX < 0 ? (numX - stride + 1) / stride : numX / stride;
+
+                if (inX >= 0 && inX < params.inputImageWidth)
+                {
+                    int64_t inIdx = ((int64_t)inY * params.inputImageWidth + inX) * inChannels;
+                    
+                    // Weight Indexing [In, K, K, Out]
+                    int64_t wBase = ((int64_t)ky * kernelSize * outChannels + (int64_t)kx * outChannels + outCh);
+                    int64_t wStride = (int64_t)kernelSize * kernelSize * outChannels;
+
+                    for (int ic = 0; ic < inChannels; ic++)
+                    {
+                        float val = params.inputImage[inIdx + ic];
+                        float w = params.weights[ic * wStride + wBase];
+                        sum += val * w;
+                    }
+                }
+            }
+        }
+    }
+
+    params.outputImage[globalIdx] = TActivation.apply(sum);
 }
