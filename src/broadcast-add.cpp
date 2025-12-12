@@ -1,7 +1,5 @@
 
-#include "kernels.h"
-
-using namespace Slang;
+#include "broadcast-add.h"
 
 BroadcastAddKernel::BroadcastAddKernel(InferencingContext* context)
     : context(context)
@@ -26,7 +24,7 @@ ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(InferencingTask& task, rhi
     {
         outputSize *= shapeA[i];
     }
-    auto outputBuffer = context->createBuffer(nullptr, outputSize * sizeof(float));
+    auto outputBuffer = task.allocateBuffer("broadcast_add_output", outputSize * sizeof(float));
     paramsData.inputLhs = inputA->getDeviceAddress();
     paramsData.inputRhs = inputB->getDeviceAddress();
     paramsData.output = outputBuffer->getDeviceAddress();
@@ -44,5 +42,5 @@ ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(InferencingTask& task, rhi
         1,
         1,
         paramsData);
-    return outputBuffer;
+    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

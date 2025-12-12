@@ -8,7 +8,7 @@ InferencingContext::InferencingContext(rhi::IDevice* inDevice)
     this->slangSession = device->getSlangSession();
 
     ComPtr<ISlangBlob> diagnosticBlob;
-    this->slangModule = slangSession->loadModule("diffusion", diagnosticBlob.writeRef());
+    this->slangModule = slangSession->loadModule("mlkl", diagnosticBlob.writeRef());
     diagnoseIfNeeded(diagnosticBlob);
 }
 
@@ -72,7 +72,7 @@ void InferencingContext::diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 InferencingTask InferencingContext::createTask()
 {
     InferencingTask task = InferencingTask(
-#if INTERMEDIATE_MODE
+#if !INTERMEDIATE_MODE
         device->getQueue(rhi::QueueType::Graphics)->createCommandEncoder(),
 #else
         nullptr,
@@ -145,6 +145,7 @@ void InferencingTask::dispatchKernel(
     pParams.setObject(obj);
     computeEncoder->dispatchCompute(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     computeEncoder->end();
+    encoder->globalBarrier();
 #if INTERMEDIATE_MODE
     if (SLANG_FAILED(queue->submit(encoder->finish())))
     {
@@ -169,10 +170,12 @@ void InferencingTask::execute()
 {
 #if !INTERMEDIATE_MODE
     auto commandBuffer = encoder->finish();
-    auto result = context->getDevice()->getQueue(rhi::QueueType::Graphics)->submit(commandBuffer);
+    auto queue = context->getDevice()->getQueue(rhi::QueueType::Graphics);
+    auto result = queue->submit(commandBuffer);
     if (SLANG_FAILED(result))
     {
         InferencingContext::reportError("Failed to submit command buffer\n");
     }
+    queue->waitOnHost();
 #endif
 }

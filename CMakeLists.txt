@@ -13,68 +13,11 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Function to download and extract a release from GitHub
-function(download_github_release REPO_URL TAG_NAME TARGET_DIR)
-    set(DOWNLOAD_URL "${REPO_URL}/releases/download/${TAG_NAME}")
-    set(ARCHIVE_NAME "${TAG_NAME}.zip")
-    set(DOWNLOAD_PATH "${CMAKE_BINARY_DIR}/downloads/${ARCHIVE_NAME}")
-    
-    # Create downloads directory
-    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/downloads")
-    
-    # Download the release if it doesn't exist
-    if(NOT EXISTS ${DOWNLOAD_PATH})
-        message(STATUS "Downloading ${REPO_URL} release ${TAG_NAME}...")
-        file(DOWNLOAD 
-            "${DOWNLOAD_URL}/${ARCHIVE_NAME}" 
-            ${DOWNLOAD_PATH}
-            SHOW_PROGRESS
-            STATUS DOWNLOAD_STATUS
-        )
-        
-        list(GET DOWNLOAD_STATUS 0 DOWNLOAD_ERROR)
-        if(DOWNLOAD_ERROR)
-            # Try alternative download URLs
-            file(DOWNLOAD 
-                "${REPO_URL}/archive/refs/tags/${TAG_NAME}.zip" 
-                ${DOWNLOAD_PATH}
-                SHOW_PROGRESS
-                STATUS DOWNLOAD_STATUS_ALT
-            )
-            list(GET DOWNLOAD_STATUS_ALT 0 DOWNLOAD_ERROR_ALT)
-            if(DOWNLOAD_ERROR_ALT)
-                message(FATAL_ERROR "Failed to download ${REPO_URL} release ${TAG_NAME}")
-            endif()
-        endif()
-    endif()
-    
-    # Extract the archive if target directory doesn't exist
-    if(NOT EXISTS ${TARGET_DIR})
-        message(STATUS "Extracting ${ARCHIVE_NAME} to ${TARGET_DIR}...")
-        file(ARCHIVE_EXTRACT 
-            INPUT ${DOWNLOAD_PATH}
-            DESTINATION "${CMAKE_BINARY_DIR}/external"
-        )
-        # Find the extracted directory and rename it to target name
-        file(GLOB EXTRACTED_DIRS "${CMAKE_BINARY_DIR}/external/*${TAG_NAME}*")
-        if(EXTRACTED_DIRS)
-            list(GET EXTRACTED_DIRS 0 EXTRACTED_DIR)
-            file(RENAME ${EXTRACTED_DIR} ${TARGET_DIR})
-        endif()
-    endif()
-endfunction()
-
 # Download external dependencies
-set(SLANG_VERSION "v2025.13")  # Adjust version as needed
-
-set(SLANG_DIR "${CMAKE_BINARY_DIR}/external/slang")
 set(SLANG_RHI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-rhi")
 set(LZ4_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/lz4")
 set(MINIZ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/miniz")
 set(UNORDERED_DENSE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/unordered_dense")
-
-# Download Slang release
-download_github_release("https://github.com/shader-slang/slang" ${SLANG_VERSION} ${SLANG_DIR})
 
 # Check if slang-rhi submodule exists and is initialized
 if(NOT EXISTS "${SLANG_RHI_DIR}/CMakeLists.txt")
@@ -113,6 +56,7 @@ if(NOT EXISTS "${UNORDERED_DENSE_DIR}/CMakeLists.txt")
 endif()
 
 # Add slang-rhi as subdirectory (build from source)
+set(SLANG_RHI_FETCH_SLANG_VERSION "2025.24" CACHE STRING "Slang version to fetch" FORCE)
 add_subdirectory(${SLANG_RHI_DIR})
 
 # Set slang-rhi to use C++17 while everything else uses C++20
@@ -136,15 +80,6 @@ set(LZ4_BUILD_CLI OFF CACHE BOOL "Build LZ4 command line tools" FORCE)
 set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "Build legacy lz4c" FORCE)
 add_subdirectory(${LZ4_DIR}/build/cmake)
 
-# Find Slang headers (from downloaded release)
-find_path(SLANG_INCLUDE_DIR 
-    NAMES slang.h 
-    PATHS 
-        ${SLANG_DIR}/include
-        ${SLANG_DIR}/slang/include
-        ${SLANG_DIR}/source/slang/include
-    NO_DEFAULT_PATH
-)
 
 # Set slang-rhi include directory (from submodule)
 set(SLANG_RHI_INCLUDE_DIR "${SLANG_RHI_DIR}/include")
@@ -160,11 +95,6 @@ find_library(SLANG_LIBRARY
     NO_DEFAULT_PATH
 )
 
-# If libraries are not found, we'll need to build them or use header-only approach
-if(NOT SLANG_INCLUDE_DIR)
-    message(WARNING "Slang headers not found, using fallback paths")
-    set(SLANG_INCLUDE_DIR ${SLANG_DIR})
-endif()
 
 # Verify slang-rhi include directory exists
 if(NOT EXISTS ${SLANG_RHI_INCLUDE_DIR})
@@ -207,7 +137,6 @@ target_include_directories(example-base PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/example-base
     ${CMAKE_CURRENT_SOURCE_DIR}/example-base/core
     ${CMAKE_CURRENT_SOURCE_DIR}/example-base/platform
-    ${SLANG_INCLUDE_DIR}
     ${SLANG_RHI_INCLUDE_DIR}
     ${SLANG_RHI_DIR}/include  # Additional fallback
 )
@@ -269,6 +198,57 @@ else()
     )
 endif()
 
+function(add_library_target TARGET_NAME SOURCE_DIR)
+    # Collect source files
+    file(GLOB SOURCES ${SOURCE_DIR}/*.cpp)
+    file(GLOB SLANG_FILES ${SOURCE_DIR}/*.slang)
+    
+    # Create executable
+    add_library(${TARGET_NAME} STATIC ${SOURCES})
+    
+    # Link with example-base library
+    target_link_libraries(${TARGET_NAME} PRIVATE example-base)
+    
+    # Include directories
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/example-base
+        ${SLANG_RHI_INCLUDE_DIR}
+    )
+    
+    # Copy .slang files to output directory
+    foreach(SLANG_FILE ${SLANG_FILES})
+        get_filename_component(SLANG_FILENAME ${SLANG_FILE} NAME)
+        configure_file(${SLANG_FILE} ${CMAKE_BINARY_DIR}/${SLANG_FILENAME} COPYONLY)
+    endforeach()
+    
+    # Set target properties
+    set_target_properties(${TARGET_NAME} PROPERTIES
+        OUTPUT_NAME ${TARGET_NAME}
+        DEBUG_POSTFIX ""
+    )
+    
+    # Platform-specific settings
+    if(WIN32)
+        set_target_properties(${TARGET_NAME} PROPERTIES
+            WIN32_EXECUTABLE FALSE
+        )
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+            _CRT_SECURE_NO_WARNINGS
+        )
+    endif()
+    
+    # Set runtime path for shared libraries
+    if(UNIX)
+        set_target_properties(${TARGET_NAME} PROPERTIES
+            INSTALL_RPATH_USE_LINK_PATH TRUE
+        )
+    endif()
+endfunction()
+
+
 # Function to add executable
 function(add_executable_target TARGET_NAME SOURCE_DIR)
     # Collect source files
@@ -279,13 +259,13 @@ function(add_executable_target TARGET_NAME SOURCE_DIR)
     add_executable(${TARGET_NAME} ${SOURCES})
     
     # Link with example-base library
-    target_link_libraries(${TARGET_NAME} PRIVATE example-base)
+    target_link_libraries(${TARGET_NAME} PRIVATE example-base mlkl)
     
     # Include directories
     target_include_directories(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/example-base
-        ${SLANG_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${SLANG_RHI_INCLUDE_DIR}
     )
     
@@ -323,6 +303,9 @@ function(add_executable_target TARGET_NAME SOURCE_DIR)
     endif()
 endfunction()
 
+# Add the mlkl library
+add_library_target(mlkl src)
+
 # Add the executables
 add_executable_target(unit-test unit-test)
 
@@ -344,7 +327,6 @@ install(DIRECTORY src/
 # Print configuration info
 message(STATUS "Build configuration:")
 message(STATUS "  CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Slang include dir: ${SLANG_INCLUDE_DIR}")
 message(STATUS "  Slang-RHI include dir: ${SLANG_RHI_INCLUDE_DIR}")
 if(SLANG_LIBRARY)
     message(STATUS "  Slang library: ${SLANG_LIBRARY}")

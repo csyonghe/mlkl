@@ -1,4 +1,4 @@
-implementing diffusion;
+implementing mlkl;
 
 interface IActivation
 {

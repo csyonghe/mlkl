@@ -53,7 +53,7 @@ ComPtr<rhi::IBuffer> LinearKernel::queueExecute(InferencingTask& task, rhi::IBuf
         int inputSize;
         int outputSize;
     } paramsData;
-    auto outputBuffer = context->createBuffer(nullptr, outputSize * sizeof(float));
+    auto outputBuffer = task.allocateBuffer("linear_output", outputSize * sizeof(float));
     paramsData.inputVector = inputVector->getDeviceAddress();
     paramsData.outputVector = outputBuffer->getDeviceAddress();
     paramsData.weights = weightsBuffer->getDeviceAddress();
@@ -67,5 +67,5 @@ ComPtr<rhi::IBuffer> LinearKernel::queueExecute(InferencingTask& task, rhi::IBuf
         1,
         1,
         paramsData);
-    return outputBuffer;
+    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

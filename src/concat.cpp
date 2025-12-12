@@ -1,4 +1,4 @@
-#include "kernels.h"
+#include "concat.h"
 
 ConcatKernel::ConcatKernel(InferencingContext* context)
     : context(context)
@@ -39,7 +39,7 @@ ComPtr<rhi::IBuffer> ConcatKernel::queueExecute(
         elementCountB *= shapeB[i];
     }
     size_t outputSize = (elementCountA + elementCountB);
-    auto outputBuffer = context->createBuffer(nullptr, outputSize * sizeof(float));
+    auto outputBuffer = task.allocateBuffer("concat_out", outputSize * sizeof(float));
     params.inputA = inputA->getDeviceAddress();
     params.inputB = inputB->getDeviceAddress();
     params.output = outputBuffer->getDeviceAddress();
@@ -62,5 +62,5 @@ ComPtr<rhi::IBuffer> ConcatKernel::queueExecute(
         1,
         1,
         params);
-    return outputBuffer;
+    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

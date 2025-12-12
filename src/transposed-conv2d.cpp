@@ -1,7 +1,5 @@
 
-#include "kernels.h"
-
-using namespace Slang;
+#include "transposed-conv2d.h"
 
 TransposedConv2DKernel::TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, String name)
     : context(context), tileSize(tileSize), stride(stride), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels), name(name)

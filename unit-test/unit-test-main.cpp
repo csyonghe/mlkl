@@ -171,61 +171,6 @@ public:
     }
 };
 
-class DiffusionReverseStepKernel : public RefObject
-{
-protected:
-    RefPtr<InferencingContext> inferencingCtx;
-    ComPtr<rhi::IComputePipeline> pipeline;
-public:
-    DiffusionReverseStepKernel(RefPtr<InferencingContext> inferencingCtx)
-        : inferencingCtx(inferencingCtx)
-    {
-        slang::TypeLayoutReflection* paramTypeLayout = nullptr;
-        pipeline = inferencingCtx->createComputePipeline("diffusionReverseStep", {});
-    }
-    void forward(
-        InferencingTask& task,
-        float alpha,
-        float alphaCumprod,
-        float beta,
-        rhi::IBuffer* currentImage,
-        rhi::IBuffer* predictedNoise,
-        uint32_t imageWidth,
-        uint32_t imageHeight,
-        uint32_t channelCount,
-        uint32_t seed,
-        uint32_t t)
-    {
-        struct DiffusionStepParams
-        {
-            // Raw Pointers (Buffer Device Address)
-            rhi::DeviceAddress currentImage;   // x_t (Input)
-            rhi::DeviceAddress predictedNoise; // epsilon_theta (Input)
-            rhi::DeviceAddress outputImage;    // x_{t-1} (Output)
-
-            // Scalar Coefficients
-            float coeff1;
-            float coeff2;
-            float coeff3;
-
-            uint32_t totalElements;
-            uint32_t seed;             // Change this every frame/step on CPU!
-        };
-        DiffusionStepParams params;
-        params.coeff1 = 1.0f / sqrtf(alpha);
-        params.coeff2 = (1.0f - alpha) / sqrtf(1.0f - alphaCumprod);
-        if (t > 0)
-            params.coeff3 = sqrtf(beta);
-        else
-            params.coeff3 = 0.0f;
-        params.currentImage = currentImage->getDeviceAddress();
-        params.predictedNoise = predictedNoise->getDeviceAddress();
-        params.outputImage = currentImage->getDeviceAddress(); // In-place
-        params.totalElements = imageWidth * imageHeight * channelCount;
-        params.seed = seed;
-        task.dispatchKernel(pipeline, (params.totalElements + 255) / 256, 1, 1, params);
-    }
-};
 
 void writeImagePNG(
     const char* filename,
@@ -255,17 +200,19 @@ struct UnitTestProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
-        //SLANG_RETURN_ON_FAIL(testUp0());
-        //SLANG_RETURN_ON_FAIL(testBottleneckConcat());
-        //SLANG_RETURN_ON_FAIL(testDown0());
-        //SLANG_RETURN_ON_FAIL(testBroadcastAdd());
-        //SLANG_RETURN_ON_FAIL(testDown0Conv1());
-        //SLANG_RETURN_ON_FAIL(testGlobalTimeEmbed());
-        //SLANG_RETURN_ON_FAIL(testDown0Transform());
-        //SLANG_RETURN_ON_FAIL(testInitialConv());
-        //SLANG_RETURN_ON_FAIL(testSimpleConvolution());
-        //SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
+#if 0
+        SLANG_RETURN_ON_FAIL(testUp0());
+        SLANG_RETURN_ON_FAIL(testBottleneckConcat());
+        SLANG_RETURN_ON_FAIL(testDown0());
+        SLANG_RETURN_ON_FAIL(testBroadcastAdd());
+        SLANG_RETURN_ON_FAIL(testDown0Conv1());
+        SLANG_RETURN_ON_FAIL(testGlobalTimeEmbed());
+        SLANG_RETURN_ON_FAIL(testDown0Transform());
+        SLANG_RETURN_ON_FAIL(testInitialConv());
+        SLANG_RETURN_ON_FAIL(testSimpleConvolution());
+        SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
         SLANG_RETURN_ON_FAIL(testStep495());
+#endif
         SLANG_RETURN_ON_FAIL(testUNetModel());
 
         printf("all tests passed!\n");
@@ -366,13 +313,12 @@ struct UnitTestProgram : public TestBase
     {
         UNetModel model = UNetModel(gInferencingCtx, 1, 1);
 
-        DiffusionReverseStepKernel diffusionKernel = DiffusionReverseStepKernel(gInferencingCtx);
+        DDIMStepKernel diffusionKernel = DDIMStepKernel(gInferencingCtx);
 
         RefPtr<FileStream> fileStream = new FileStream();
         SLANG_RETURN_ON_FAIL(fileStream->init(resourceBase.resolveResource("model_weights.bin"), FileMode::Open));
         TorchParamReader reader(fileStream);
         SLANG_RETURN_ON_FAIL(model.loadParams(reader));
-        auto task = gInferencingCtx->createTask();
 
         uint32_t imageSize = 32;
         int outputChannelCount = 1;
@@ -388,7 +334,7 @@ struct UnitTestProgram : public TestBase
             float alphaCumprod;
         };
         int trainingSteps = 500; // Must match Python NOISE_STEPS
-        int inferenceSteps = 500;
+        int inferenceSteps = 50;
         float betaStart = 1e-4;
         float betaEnd = 0.02f;
         List<NoiseParam> noiseSchedule;
@@ -408,44 +354,59 @@ struct UnitTestProgram : public TestBase
             noiseSchedule[t].beta = betaT;
             noiseSchedule[t].alphaCumprod = currentAlphaCumprod;
         }
-        auto inputImage = gInferencingCtx->createBuffer(
+        auto imageA = gInferencingCtx->createBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
-            "inputImage");
-
+            "imageA");
+        auto imageB = gInferencingCtx->createBuffer(
+            nullptr,
+            inputImageData.getCount() * sizeof(float),
+            "imageB");
+        auto outputImage = imageA;
         static const int largePrime = 15485863;
-
+        //renderDocBeginFrame();
         for (int step = inferenceSteps - 1; step >= 0; step--)
         {
             // Map 0..100 -> 0..500
             // e.g. Step 99 -> t=495
             int t = (step * trainingSteps) / inferenceSteps;
 
+            // B. Previous Training Time (The target we are jumping TO)
+            // e.g., Step 98/100 -> t_prev=490
+            int step_prev = step - 1;
+            int t_prev = (step_prev * trainingSteps) / inferenceSteps;
+
+            // C. Get Alpha Cumprod values
+            float alphaBar_t = noiseSchedule[t].alphaCumprod;
+
+            // Special handling for the final step:
+            // If we are going below t=0, the target is the pure image (AlphaBar = 1.0)
+            float alphaBar_prev = (step_prev < 0) ? 1.0f : noiseSchedule[t_prev].alphaCumprod;
+            auto task = gInferencingCtx->createTask();
+
             // Use 't' for the model, but 'step' for the loop logic
-            auto predictedNoise = model.forward(task, inputImage, imageSize, imageSize, t);
+            auto predictedNoise = model.forward(task, imageA, imageSize, imageSize, t);
 
             auto noiseParam = noiseSchedule[t];
             diffusionKernel.forward(
                 task,
-                noiseParam.alpha,
-                noiseParam.alphaCumprod,
-                noiseParam.beta,
-                inputImage,
+                imageA,
                 predictedNoise,
-                imageSize,
-                imageSize,
-                1,
-                step * largePrime,
-                t);
+                imageB,
+                alphaBar_t,
+                alphaBar_prev,
+                imageSize * imageSize * outputChannelCount);
+            task.execute();
+            outputImage = imageB;
+            Swap(imageA, imageB);
+
         }
-        renderDocBeginFrame();
-        task.execute();
-        renderDocEndFrame();
+        //renderDocEndFrame();
 
         // Read back final image
         List<float> outputImageData;
         outputImageData.setCount(imageSize * imageSize * outputChannelCount);
-        gDevice->readBuffer(inputImage, 0, outputImageData.getCount() * sizeof(float), outputImageData.getBuffer());
+        gDevice->readBuffer(outputImage, 0, outputImageData.getCount() * sizeof(float), outputImageData.getBuffer());
 
         // Save to disk as png
         // Convert to 8-bit

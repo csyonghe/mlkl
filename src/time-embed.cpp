@@ -1,7 +1,5 @@
 
-#include "kernels.h"
-
-using namespace Slang;
+#include "time-embed.h"
 
 TimeEmbedingKernel::TimeEmbedingKernel(InferencingContext* context, int outputChannels)
     : context(context), outputChannels(outputChannels)

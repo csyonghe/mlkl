@@ -1,4 +1,4 @@
-implementing diffusion;
+implementing mlkl;
 
 // --- Constants for Tiling and Batching ---
 // These define the size of the work chunks. 

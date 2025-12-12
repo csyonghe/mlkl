@@ -1,40 +1,12 @@
 #!/bin/bash
-# Build script for Neural Shading Hardware Acceleration
+# Build script for Slang Machine Learning Kernel Library
 
 set -e  # Exit on any error
 
 BUILD_DIR="build"
 CMAKE_GENERATOR="Unix Makefiles"
 
-echo "Building Neural Shading Hardware Acceleration..."
-
-# Check if slang-rhi submodule is initialized
-if [ ! -f "external/slang-rhi/CMakeLists.txt" ]; then
-    echo "Error: slang-rhi submodule not found or not initialized"
-    echo "Please run setup.sh first to initialize submodules"
-    exit 1
-fi
-
-# Check if lz4 submodule is initialized
-if [ ! -f "external/lz4/build/cmake/CMakeLists.txt" ]; then
-    echo "Error: lz4 submodule not found or not initialized"
-    echo "Please run setup.sh first to initialize submodules"
-    exit 1
-fi
-
-# Check if miniz submodule is initialized
-if [ ! -f "external/miniz/CMakeLists.txt" ]; then
-    echo "Error: miniz submodule not found or not initialized"
-    echo "Please run setup.sh first to initialize submodules"
-    exit 1
-fi
-
-# Check if unordered_dense submodule is initialized
-if [ ! -f "external/unordered_dense/CMakeLists.txt" ]; then
-    echo "Error: unordered_dense submodule not found or not initialized"
-    echo "Please run setup.sh first to initialize submodules"
-    exit 1
-fi
+echo "Building Slang Machine Learning Kernel Library..."
 
 # Create build directory if it doesn't exist
 if [ ! -d "$BUILD_DIR" ]; then

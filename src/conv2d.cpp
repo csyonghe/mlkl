@@ -1,7 +1,5 @@
 
-#include "kernels.h"
-
-using namespace Slang;
+#include "conv2d.h"
 
 Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation, String name)
     : context(context), tileSize(tileSize), kernelSize(kernelSize), stride(stride), inChannels(inChannels), outChannels(outChannels), activation(activation), name(name)
