@@ -33,7 +33,7 @@ struct TimeEmbeddingKernelParams
     float maxPeriod;   // Default 10000.0
 };
 
-ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uint32_t timeStepsBuffer)
+ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uint32_t timeStep)
 {
     auto outputBuffer = task.allocateBuffer("time-embed", outputChannels * sizeof(float));
 
@@ -43,6 +43,7 @@ ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uin
     params.biases = biasesBuffer->getDeviceAddress();
     params.embeddingDim = outputChannels;
     params.maxPeriod = 10000.0f;
+    params.timeStep = timeStep;
     task.dispatchKernel(pipeline, 1, 1, 1, params);
 
     return ComPtr<rhi::IBuffer>(outputBuffer);

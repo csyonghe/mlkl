@@ -33,13 +33,13 @@ const char* getActivationFuncName(ActivationFunction func);
 class LinearKernel : public RefObject
 {
 private:
-    ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
     int inputSize;
     int outputSize;
     int tileSize;
 public:
+    ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
     LinearKernel(InferencingContext* context, ActivationFunction activation, int tileSize, int inputSize, int outputSize);
     SlangResult loadParams(TorchParamReader& reader);
     ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, rhi::IBuffer* inputVector);
@@ -68,7 +68,6 @@ public:
 class Conv2DKernel : public RefObject
 {
 private:
-    ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
 public:
@@ -76,13 +75,16 @@ public:
     int kernelSize;
     int inChannels;
     int outChannels;
+    int stride;
+    ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
+    ActivationFunction activation;
     String name;
-    Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels, String name = "conv2d");
+    Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation = ActivationFunction::None, String name = "conv2d");
 
     SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
     SlangResult loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData);
 
-    ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int stride, int padding);
+    ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int padding);
 };
 
 class TransposedConv2DKernel : public RefObject

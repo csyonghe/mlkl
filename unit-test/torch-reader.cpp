@@ -6,6 +6,13 @@ TorchParamReader::TorchParamReader(RefPtr<Stream> inputStream)
 {
 }
 
+TorchParamReader::TorchParamReader(String path)
+{
+    RefPtr<FileStream> fileStream = new FileStream();
+    if (SLANG_SUCCEEDED(fileStream->init(path, FileMode::Open)))
+        stream = fileStream;
+}
+
 SlangResult TorchParamReader::readParams(List<float>& result, int count)
 {
     result.setCount(count);

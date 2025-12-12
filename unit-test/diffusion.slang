@@ -25,7 +25,7 @@ uint hash(uint s)
 float getGaussianNoise(uint tid, uint seed)
 {
     // Generate two uniform random numbers
-    uint h1 = hash(tid + seed);
+    uint h1 = hash(tid ^ seed);
     uint h2 = hash(h1);
     
     // Convert to float [0, 1)
@@ -90,7 +90,7 @@ void diffusionReverseStep(
     float result = scaled + (params.coeff3 * z);
 
     // 4. Write Output
-    params.outputImage[idx] = result;
+    params.currentImage[idx] = result;
 }
 
 /*

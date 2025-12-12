@@ -3,7 +3,7 @@ implementing diffusion;
 // --- Constants for Tiling and Batching ---
 // These define the size of the work chunks. 
 // 32 is chosen to align with typical GPU warp/wavefront sizes.
-static const int inputChannelBatchSize = 32;
+static const int inputChannelBatchSize = 8;
 static const int outputChannelBatchSize = 32;
 
 // --- Shader Parameters ---
@@ -21,13 +21,12 @@ struct SimpleConvolutionParams
     int inputImageHeight;
     int outputImageWidth;
     int outputImageHeight;
-    int stride;
     int padding;
 };
 
 // The shader entry point using generics for compile-time constants needed for array sizing.
 [numthreads(tileSize, tileSize, 1)]
-void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChannels>(
+void simpleConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels, TActivation : IActivation>(
     ConstantBuffer<SimpleConvolutionParams> params,
     int3 groupThreadId : SV_GroupThreadID,
     int3 groupId : SV_GroupID)
@@ -38,7 +37,7 @@ void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChan
     const int2 outPos = groupId.xy * int2(tileSize) + groupThreadId.xy;
     
     // Top-left corner of the input area required for this thread group (the anchor)
-    const int2 tileOrigin = groupId.xy * int2(tileSize) * params.stride - int2(params.padding);
+    const int2 tileOrigin = groupId.xy * int2(tileSize) * stride - int2(params.padding);
     
     // Determine which batch of output channels this thread group is responsible for
     const int outChannelStart = groupId.z * outputChannelBatchSize;
@@ -46,8 +45,7 @@ void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChan
     // --- 2. Shared Memory Allocation ---
     
     // The shared memory tile must hold the data for the threads plus the required "halo" (apron).
-    // Dimension = TileSize + (KernelSize - 1)
-    static const int sharedDim = tileSize + kernelSize - 1;
+    static const int sharedDim = (tileSize - 1) * stride + kernelSize;
     
     // Layout: [ChannelBatch][Row][Col] used to minimize bank conflicts during loading/reading.
     static groupshared float s_inputTile[inputChannelBatchSize][sharedDim * sharedDim];
@@ -134,8 +132,8 @@ void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChan
                     // Calculate the index in shared memory corresponding to the input pixel
                     // needed for this kernel weight location.
                     // Local pixel index = (threadY * stride + ky) * sharedDim + (threadX * stride + kx)
-                    int sY = groupThreadId.y * params.stride + ky;
-                    int sX = groupThreadId.x * params.stride + kx;
+                    int sY = groupThreadId.y * stride + ky;
+                    int sX = groupThreadId.x * stride + kx;
                     int sharedIdx = sY * sharedDim + sX;
 
                     // Iterate over the current batch of Input Channels sitting in LDS
@@ -192,7 +190,7 @@ void simpleConvolution<int tileSize, int kernelSize, int inChannels, int outChan
             {
                 // Output Layout: [H, W, OutC] (Channels Last)
                 int64_t outIdx = ((int64_t)outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
-                params.outputImage[outIdx] = outputAccumulators[o];
+                params.outputImage[outIdx] = TActivation.apply(outputAccumulators[o]);
             }
         }
     }

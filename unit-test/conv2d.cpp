@@ -3,14 +3,16 @@
 
 using namespace Slang;
 
-Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int inChannels, int outChannels, String name)
-    : context(context), tileSize(tileSize), kernelSize(kernelSize), inChannels(inChannels), outChannels(outChannels), name(name)
+Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation, String name)
+    : context(context), tileSize(tileSize), kernelSize(kernelSize), stride(stride), inChannels(inChannels), outChannels(outChannels), activation(activation), name(name)
 {
     String specArgs[] = {
         String(tileSize),
         String(kernelSize),
+        String(stride),
         String(inChannels),
-        String(outChannels)
+        String(outChannels),
+        getActivationFuncName(activation)
     };
     pipeline = context->createComputePipeline("simpleConvolution", makeArrayView(specArgs));
 }
@@ -57,11 +59,10 @@ struct Conv2DKernelParams
     int inputImageHeight;
     int outputImageWidth;
     int outputImageHeight;
-    int stride;
     int padding;
 };
 
-ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int stride, int padding)
+ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int padding)
 {
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
@@ -76,7 +77,6 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuf
     params.inputImageHeight = inputHeight;
     params.outputImageWidth = outputWidth;
     params.outputImageHeight = outputHeight;
-    params.stride = stride;
     params.padding = padding;
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();

@@ -36,9 +36,6 @@ struct ExampleResources
     Slang::String resolveResource(const char* fileName) const
     {
         static const Slang::List<Slang::String> directories{
-            "hardware-acceleration",
-            "../hardware-acceleration",
-            "../../hardware-acceleration",
             "../",
             "../../",
             "../../../"
@@ -46,10 +43,18 @@ struct ExampleResources
 
         for (const Slang::String& dir : directories)
         {
-            Slang::StringBuilder pathSb;
-            pathSb << dir << "/" << baseDir << "/" << fileName;
-            if (Slang::File::exists(pathSb.getBuffer()))
-                return pathSb.toString();
+            {
+                Slang::StringBuilder pathSb;
+                pathSb << dir << "/" << baseDir << "/" << fileName;
+                if (Slang::File::exists(pathSb.getBuffer()))
+                    return pathSb.toString();
+            }
+            {
+                Slang::StringBuilder pathSb;
+                pathSb << dir << "/" << fileName;
+                if (Slang::File::exists(pathSb.getBuffer()))
+                    return pathSb.toString();
+            }
         }
 
         return fileName;

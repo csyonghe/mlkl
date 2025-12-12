@@ -42,3 +42,7 @@ Thumbs.db
 *.log
 log-*.txt
 *.bin
+
+/data/
+__pycache__/
+*.pth
