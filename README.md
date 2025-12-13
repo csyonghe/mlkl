@@ -1,8 +1,10 @@
-# Slang Machine Learning Kernel Library
+# (Unofficial) Slang Machine Learning Kernel Library
 
 This repository hosts a collection of machine learning kernels implemented in Slang,
 a shading language designed for high-performance computing on GPUs.
 These kernels can be used for various machine learning inferencing tasks.
+
+**Disclaimer**: This work is exploratory, and is not a part of the Slang project. Use at your own risk.
 
 ## File Structure
 
