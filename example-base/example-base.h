@@ -99,3 +99,6 @@ inline void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 
 void renderDocBeginFrame();
 void renderDocEndFrame();
+
+void writeImagePNG(const char *filename, int width, int height, int numChannels,
+                   const void *data);
