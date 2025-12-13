@@ -18,18 +18,16 @@ const char* getActivationFuncName(ActivationFunction func)
     }
 }
 
-LinearKernel::LinearKernel(InferencingContext* context, ActivationFunction activation, int tileSize, int inputSize, int outputSize)
-    : context(context)
-    , tileSize(tileSize)
-    , inputSize(inputSize)
-    , outputSize(outputSize)
+LinearKernel::LinearKernel(
+    InferencingContext* context,
+    ActivationFunction activation,
+    int tileSize,
+    int inputSize,
+    int outputSize)
+    : context(context), tileSize(tileSize), inputSize(inputSize), outputSize(outputSize)
 {
-    String specArgs[] = {
-        String(tileSize),
-        getActivationFuncName(activation)
-    };
-    pipeline = context->createComputePipeline("linearLayer",
-        makeConstArrayView(specArgs));
+    String specArgs[] = {String(tileSize), getActivationFuncName(activation)};
+    pipeline = context->createComputePipeline("linearLayer", makeConstArrayView(specArgs));
 }
 
 SlangResult LinearKernel::loadParams(TorchParamReader& reader)
@@ -61,11 +59,6 @@ ComPtr<rhi::IBuffer> LinearKernel::queueExecute(InferencingTask& task, rhi::IBuf
     paramsData.inputSize = inputSize;
     paramsData.outputSize = outputSize;
     uint32_t threadGroupCountX = (uint32_t)((outputSize + tileSize - 1) / tileSize);
-    task.dispatchKernel(
-        pipeline,
-        threadGroupCountX,
-        1,
-        1,
-        paramsData);
+    task.dispatchKernel(pipeline, threadGroupCountX, 1, 1, paramsData);
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

@@ -7,9 +7,17 @@ DDIMStepKernel::DDIMStepKernel(RefPtr<InferencingContext> inferencingCtx)
     pipeline = inferencingCtx->createComputePipeline("ddimStep", {});
 }
 
-void DDIMStepKernel::forward(InferencingTask& task, rhi::IBuffer* currentImage, rhi::IBuffer* predictedNoise, rhi::IBuffer* outputImage, float alphaBar_t, float alphaBar_prev, uint32_t totalPixels)
+void DDIMStepKernel::forward(
+    InferencingTask& task,
+    rhi::IBuffer* currentImage,
+    rhi::IBuffer* predictedNoise,
+    rhi::IBuffer* outputImage,
+    float alphaBar_t,
+    float alphaBar_prev,
+    uint32_t totalPixels)
 {
-    struct DDIMParams {
+    struct DDIMParams
+    {
         rhi::DeviceAddress currentImage;
         rhi::DeviceAddress predictedNoise;
         rhi::DeviceAddress outputImage;

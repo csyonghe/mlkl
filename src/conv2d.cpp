@@ -3,8 +3,23 @@
 
 static const int kTinyKernelMaxOutputPixels = 4;
 
-Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation, String name)
-    : context(context), tileSize(tileSize), kernelSize(kernelSize), stride(stride), inChannels(inChannels), outChannels(outChannels), activation(activation), name(name)
+Conv2DKernel::Conv2DKernel(
+    InferencingContext* context,
+    int tileSize,
+    int kernelSize,
+    int stride,
+    int inChannels,
+    int outChannels,
+    ActivationFunction activation,
+    String name)
+    : context(context)
+    , tileSize(tileSize)
+    , kernelSize(kernelSize)
+    , stride(stride)
+    , inChannels(inChannels)
+    , outChannels(outChannels)
+    , activation(activation)
+    , name(name)
 {
     String specArgs[] = {
         String(tileSize),
@@ -12,8 +27,7 @@ Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernel
         String(stride),
         String(inChannels),
         String(outChannels),
-        getActivationFuncName(activation)
-    };
+        getActivationFuncName(activation)};
     tilePipeline = context->createComputePipeline("tiledConvolution", makeArrayView(specArgs));
 
     // Create Flat Pipeline
@@ -22,16 +36,20 @@ Conv2DKernel::Conv2DKernel(InferencingContext* context, int tileSize, int kernel
         String(stride),
         String(inChannels),
         String(outChannels),
-        getActivationFuncName(activation)
-    };
+        getActivationFuncName(activation)};
     // Note: tileSize is NOT needed for flat kernel generic
     flatPipeline = context->createComputePipeline("flatConvolution", makeArrayView(flatArgs));
-    flatWaveReducePipeline = context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
+    flatWaveReducePipeline =
+        context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
 }
 
 SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseBNorm)
 {
-    logInfo("Loading Conv2D Layer: inChannels=%d, outChannels=%d, kernelSize=%d\n", inChannels, outChannels, kernelSize);
+    logInfo(
+        "Loading Conv2D Layer: inChannels=%d, outChannels=%d, kernelSize=%d\n",
+        inChannels,
+        outChannels,
+        kernelSize);
     Conv2DLayerParams convParams;
     SLANG_RETURN_ON_FAIL(reader.readConv2DLayer(inChannels, outChannels, kernelSize, convParams));
     if (loadAndFuseBNorm)
@@ -41,12 +59,20 @@ SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseB
         SLANG_RETURN_ON_FAIL(reader.readBatchNorm2DLayer(outChannels, bnParams));
         convParams.fuseBatchNorm(bnParams);
     }
-    
-    SLANG_RETURN_ON_FAIL(loadParams(kernelSize, outChannels, convParams.weights.getBuffer(), convParams.biases.getBuffer()));
+
+    SLANG_RETURN_ON_FAIL(loadParams(
+        kernelSize,
+        outChannels,
+        convParams.weights.getBuffer(),
+        convParams.biases.getBuffer()));
     return SLANG_OK;
 }
 
-SlangResult Conv2DKernel::loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData)
+SlangResult Conv2DKernel::loadParams(
+    int kernelSize,
+    int outputChannelCount,
+    float* weightsData,
+    float* biasesData)
 {
     int weightsCount = kernelSize * kernelSize * inChannels * outputChannelCount;
     weightsBuffer = context->createBuffer(weightsData, weightsCount * sizeof(float));
@@ -82,11 +108,13 @@ SlangResult Conv2DKernel::loadParams(int kernelSize, int outputChannelCount, flo
                     {
                         // Source Index (Standard): [i, ky, kx, o]
                         // Stride Logic: i * (K*K*O) + ky * (K*O) + kx * O + o
-                        int64_t srcIdx = (int64_t)i * (K * K * O) + (int64_t)ky * (K * O) + (int64_t)kx * O + o;
+                        int64_t srcIdx =
+                            (int64_t)i * (K * K * O) + (int64_t)ky * (K * O) + (int64_t)kx * O + o;
 
                         // Dest Index (Transposed): [o, ky, kx, i]
                         // Stride Logic: o * (K*K*I) + ky * (K*I) + kx * I + i
-                        int64_t dstIdx = (int64_t)o * (K * K * I) + (int64_t)ky * (K * I) + (int64_t)kx * I + i;
+                        int64_t dstIdx =
+                            (int64_t)o * (K * K * I) + (int64_t)ky * (K * I) + (int64_t)kx * I + i;
 
                         dst[dstIdx] = src[srcIdx];
                     }
@@ -96,7 +124,8 @@ SlangResult Conv2DKernel::loadParams(int kernelSize, int outputChannelCount, flo
 
         // 4. Create the Transposed Buffer
         weightsTransposedBuffer = context->createBuffer(transposedWeights);
-        if (!weightsTransposedBuffer) return SLANG_FAIL;
+        if (!weightsTransposedBuffer)
+            return SLANG_FAIL;
     }
     return SLANG_OK;
 }
@@ -114,12 +143,20 @@ struct Conv2DKernelParams
     int padding;
 };
 
-ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int padding)
+ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
+    InferencingTask& task,
+    rhi::IBuffer* inputImage,
+    int inputWidth,
+    int inputHeight,
+    int padding)
 {
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
-    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
-    auto outputBuffer = task.allocateBuffer(resultBufferName.getBuffer(), outputWidth * outputHeight * outChannels * sizeof(float));
+    String resultBufferName =
+        name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
+    auto outputBuffer = task.allocateBuffer(
+        resultBufferName.getBuffer(),
+        outputWidth * outputHeight * outChannels * sizeof(float));
     auto expectedInputSize = inputWidth * inputHeight * inChannels * sizeof(float);
     SLANG_ASSERT(inputImage->getDesc().size == expectedInputSize);
     Conv2DKernelParams params = {};
@@ -136,7 +173,7 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuf
     int totalOutputValues = outputWidth * outputHeight * outChannels;
 
     // Depending on input/output shape, we will dispatch different kernels for better performance.
-    
+
     if (outputWidth * outputHeight <= 16 && inChannels >= 32)
     {
         // 1. How many output values can one block handle?
@@ -148,8 +185,8 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuf
 
         params.weights = weightsTransposedBuffer->getDeviceAddress();
         task.dispatchKernel(flatWaveReducePipeline, numGroups, 1, 1, params);
-    } 
-    else if(outputWidth * outputHeight <= 1024)
+    }
+    else if (outputWidth * outputHeight <= 1024)
     {
         int numGroups = (totalOutputValues + 255) / 256;
         task.dispatchKernel(flatPipeline, numGroups, 1, 1, params);
@@ -158,7 +195,12 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(InferencingTask& task, rhi::IBuf
     {
         static const int batchOutChannels = 32;
         int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
-        task.dispatchKernel(tilePipeline, (outputWidth + tileSize - 1) / tileSize, (outputHeight + tileSize - 1) / tileSize, zBlocks, params);
+        task.dispatchKernel(
+            tilePipeline,
+            (outputWidth + tileSize - 1) / tileSize,
+            (outputHeight + tileSize - 1) / tileSize,
+            zBlocks,
+            params);
     }
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

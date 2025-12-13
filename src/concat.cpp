@@ -56,11 +56,6 @@ ComPtr<rhi::IBuffer> ConcatKernel::queueExecute(
         params.outerStride *= params.shapeA[j];
     }
     uint32_t threadGroupCount = (uint32_t)((outputSize + 255) / 256);
-    task.dispatchKernel(
-        pipeline,
-        threadGroupCount,
-        1,
-        1,
-        params);
+    task.dispatchKernel(pipeline, threadGroupCount, 1, 1, params);
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

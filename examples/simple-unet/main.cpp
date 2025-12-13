@@ -3,183 +3,15 @@
 
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
-#include "kernels.h"
 #include "inference-context.h"
+#include "kernels.h"
+#include "simple-unet.h"
 #include "torch-reader.h"
-#include <random>
-#include <chrono>
 
-using Slang::ComPtr;
+#include <chrono>
+#include <random>
 
 static const ExampleResources resourceBase("simple-unet");
-
-enum class UNetBlockKind
-{
-    Down,
-    Up
-};
-
-class UNetBlock : public RefObject
-{
-public:
-    RefPtr<InferencingContext> inferencingCtx;
-    RefPtr<Conv2DKernel> conv1, conv2;
-    RefPtr<Conv2DKernel> downTransform;
-    RefPtr<TransposedConv2DKernel> upTransform;
-    RefPtr<LinearKernel> timeEmbedTransform;
-    RefPtr<BroadcastAddKernel> broadcastAdd;
-public:
-    int inChannels;
-    int outChannels;
-    UNetBlock(RefPtr<InferencingContext> inferencingCtx, UNetBlockKind kind, int inChannels, int outChannels, int timeEmbedDim)
-        : inferencingCtx(inferencingCtx), inChannels(inChannels), outChannels(outChannels)
-    {
-        if (kind == UNetBlockKind::Down)
-        {
-            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 1, inChannels, outChannels, ActivationFunction::ReLU, "conv1");
-            downTransform = new Conv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels, ActivationFunction::None, "transformDown");
-        }
-        else
-        {
-            conv1 = new Conv2DKernel(inferencingCtx, 16, 3, 1, 2 * inChannels, outChannels, ActivationFunction::ReLU, "conv1");
-            upTransform = new TransposedConv2DKernel(inferencingCtx, 16, 4, 2, outChannels, outChannels, ActivationFunction::None, "transformUp");
-        }
-        conv2 = new Conv2DKernel(inferencingCtx, 16, 3, 1, outChannels, outChannels, ActivationFunction::ReLU, "conv2");
-        timeEmbedTransform = new LinearKernel(inferencingCtx, ActivationFunction::ReLU, 128, timeEmbedDim, outChannels);
-        broadcastAdd = new BroadcastAddKernel(inferencingCtx);
-    }
-
-    SlangResult loadParams(TorchParamReader& reader)
-    {
-        SLANG_RETURN_ON_FAIL(timeEmbedTransform->loadParams(reader));
-        SLANG_RETURN_ON_FAIL(conv1->loadParams(reader, true));
-        if (downTransform)
-            SLANG_RETURN_ON_FAIL(downTransform->loadParams(reader, false));
-        if (upTransform)
-            SLANG_RETURN_ON_FAIL(upTransform->loadParams(reader));
-        SLANG_RETURN_ON_FAIL(conv2->loadParams(reader, true));
-        return SLANG_OK;
-    }
-
-    void writeResult(const char* name, rhi::IBuffer* buffer)
-    {
-        ComPtr<ISlangBlob> blob;
-        inferencingCtx->getDevice()->readBuffer(buffer, 0, buffer->getDesc().size, blob.writeRef());
-        File::writeAllBytes(String(name) + ".bin", blob->getBufferPointer(), blob->getBufferSize());
-    }
-
-    ComPtr<rhi::IBuffer> forward(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, rhi::IBuffer* timeEmbedding)
-    {
-        auto transformedTimeEmbedding = timeEmbedTransform->queueExecute(task, timeEmbedding);
-        writeResult("time_embed_out", transformedTimeEmbedding);
-        auto conv1Result = conv1->queueExecute(task, inputImage, inputWidth, inputHeight, 1);
-        writeResult("conv1_fused_out", conv1Result);
-
-        int shapeA[] = { inputHeight, inputWidth, outChannels };
-        int shapeB[] = { 1, 1, outChannels };
-        auto added = broadcastAdd->queueExecute(task, conv1Result, makeArrayView(shapeA), transformedTimeEmbedding, makeArrayView(shapeB));
-        auto conv2Result = conv2->queueExecute(task, added, inputWidth, inputHeight, 1);
-        writeResult("conv2_fused_out", conv2Result);
-
-        rhi::IBuffer* finalResult = conv2Result;
-        if (downTransform)
-            finalResult = downTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 1);
-        else
-            finalResult = upTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 1);
-        return ComPtr<rhi::IBuffer>(finalResult);
-    }
-};
-
-class UNetModel : public RefObject
-{
-protected:
-    RefPtr<InferencingContext> inferencingCtx;
-    RefPtr<TimeEmbedingKernel> timeEmbedKernel;
-    RefPtr<Conv2DKernel> initialConv;
-    RefPtr<Conv2DKernel> finalConv;
-    RefPtr<ConcatKernel> concat;
-public:
-    List<RefPtr<UNetBlock>> downBlocks;
-    List<RefPtr<UNetBlock>> upBlocks;
-    UNetModel(RefPtr<InferencingContext> inferencingCtx, int inputChannels, int outputChannels)
-        : inferencingCtx(inferencingCtx)
-    {
-        static const int timeEmbedDim = 32;
-        timeEmbedKernel = new TimeEmbedingKernel(inferencingCtx, timeEmbedDim);
-        int channelSizes[] = { 64, 128, 256, 512, 1024 };
-        for (Index i = 0; i < SLANG_COUNT_OF(channelSizes) - 1; i++)
-        {
-            downBlocks.add(new UNetBlock(
-                inferencingCtx,
-                UNetBlockKind::Down,
-                channelSizes[i],
-                channelSizes[i + 1],
-                timeEmbedDim));
-            upBlocks.add(new UNetBlock(
-                inferencingCtx,
-                UNetBlockKind::Up,
-                channelSizes[SLANG_COUNT_OF(channelSizes) - 1 - i],
-                channelSizes[SLANG_COUNT_OF(channelSizes) - 2 - i],
-                timeEmbedDim));
-        }
-        initialConv = new Conv2DKernel(inferencingCtx, 16, 3, 1, inputChannels, channelSizes[0], ActivationFunction::None, "initialConv");
-        finalConv = new Conv2DKernel(inferencingCtx, 16, 1, 1, channelSizes[0], outputChannels, ActivationFunction::None, "predictedNoiseConv");
-        concat = new ConcatKernel(inferencingCtx);
-    }
-
-    SlangResult loadParams(TorchParamReader& reader)
-    {
-        SLANG_RETURN_ON_FAIL(timeEmbedKernel->loadParams(reader));
-        SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader, false));
-        for (auto& block : downBlocks)
-        {
-            SLANG_RETURN_ON_FAIL(block->loadParams(reader));
-        }
-        for (auto& block : upBlocks)
-        {
-            SLANG_RETURN_ON_FAIL(block->loadParams(reader));
-        }
-        SLANG_RETURN_ON_FAIL(finalConv->loadParams(reader, false));
-        return SLANG_OK;
-    }
-
-    ComPtr<rhi::IBuffer> forward(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int timeStep)
-    {
-        auto timeEmbedding = timeEmbedKernel->queueExecute(task, timeStep);
-        auto x = initialConv->queueExecute(task, inputImage, inputWidth, inputHeight, 1);
-        List<ComPtr<rhi::IBuffer>> skipConnections;
-        for (auto& block : downBlocks)
-        {
-            x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
-            skipConnections.add(x);
-            inputWidth /= 2;
-            inputHeight /= 2;
-        }
-        for (Index i = 0; i < upBlocks.getCount(); i++)
-        {
-            auto& block = upBlocks[i];
-            // Concat skip connection
-            auto skipConnection = skipConnections[skipConnections.getCount() - 1 - i];
-            int shape[] = { inputHeight, inputWidth, block->inChannels };
-            auto shapeView = makeArrayView(shape);
-            x = concat->queueExecute(task, x, shapeView, skipConnection, shapeView, 2);
-            // Up block
-            x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
-            inputWidth *= 2;
-            inputHeight *= 2;
-        }
-        x = finalConv->queueExecute(task, x, inputWidth, inputHeight, 0);
-        return ComPtr<rhi::IBuffer>(x);
-    }
-};
-
-
-void writeImagePNG(
-    const char* filename,
-    int width,
-    int height,
-    int numChannels,
-    const void* data);
 
 struct SimpleUNetProgram : public TestBase
 {
@@ -193,7 +25,7 @@ struct SimpleUNetProgram : public TestBase
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
-        //rhi::getRHI()->enableDebugLayers();
+        // rhi::getRHI()->enableDebugLayers();
         gDevice = rhi::getRHI()->createDevice(deviceDesc);
         if (!gDevice)
             return SLANG_FAIL;
@@ -227,7 +59,8 @@ struct SimpleUNetProgram : public TestBase
         return SLANG_OK;
     }
 
-#define TEST_CHECK(testName, condition) SLANG_RETURN_ON_FAIL(testCheck((condition), (testName), #condition)) 
+#define TEST_CHECK(testName, condition) \
+    SLANG_RETURN_ON_FAIL(testCheck((condition), (testName), #condition))
 
     void initImage(List<float>& imageData, int width, int height, int channels = 1)
     {
@@ -250,7 +83,9 @@ struct SimpleUNetProgram : public TestBase
         RefPtr<FileStream> fileStream = new FileStream();
         if (!File::exists(modelWeightsPath))
         {
-            printf("Model weights not found at %s, make sure to run train.py to generate the model!\n", modelWeightsPath.getBuffer());
+            printf(
+                "Model weights not found at %s, make sure to run train.py to generate the model!\n",
+                modelWeightsPath.getBuffer());
             return SLANG_FAIL;
         }
         SLANG_RETURN_ON_FAIL(fileStream->init(modelWeightsPath, FileMode::Open));
@@ -348,14 +183,19 @@ struct SimpleUNetProgram : public TestBase
         auto startTime = std::chrono::high_resolution_clock::now();
         task.execute();
         auto endTime = std::chrono::high_resolution_clock::now();
-        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+        auto elapsedMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
         printf("Inference Time: %lld ms\n", elapsedMs);
         renderDocEndFrame();
 
         // Read back final image
         List<float> outputImageData;
         outputImageData.setCount(imageSize * imageSize * outputChannelCount);
-        gDevice->readBuffer(outputImage, 0, outputImageData.getCount() * sizeof(float), outputImageData.getBuffer());
+        gDevice->readBuffer(
+            outputImage,
+            0,
+            outputImageData.getCount() * sizeof(float),
+            outputImageData.getBuffer());
 
         // Save to disk as png
         // Convert to 8-bit
@@ -367,35 +207,13 @@ struct SimpleUNetProgram : public TestBase
             v = (Slang::Math::Clamp(v, -1.0f, 1.0f) + 1.0) * 0.5f;
             outputImageData8Bit[i] = static_cast<uint8_t>(v * 255.0f);
         }
-        writeImagePNG("output.png", imageSize, imageSize, outputChannelCount, outputImageData8Bit.getBuffer());
+        writeImagePNG(
+            "output.png",
+            imageSize,
+            imageSize,
+            outputChannelCount,
+            outputImageData8Bit.getBuffer());
         return SLANG_OK;
-    }
-
-    inline unsigned short floatToHalf(float val)
-    {
-        uint32_t x = 0;
-        memcpy(&x, &val, sizeof(float));
-
-        unsigned short bits = (x >> 16) & 0x8000;
-        unsigned short m = (x >> 12) & 0x07ff;
-        unsigned int e = (x >> 23) & 0xff;
-        if (e < 103)
-            return bits;
-        if (e > 142)
-        {
-            bits |= 0x7c00u;
-            bits |= e == 255 && (x & 0x007fffffu);
-            return bits;
-        }
-        if (e < 113)
-        {
-            m |= 0x0800u;
-            bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1);
-            return bits;
-        }
-        bits |= ((e - 112) << 10) | (m >> 1);
-        bits += m & 1;
-        return bits;
     }
 
     List<float> loadRawFloats(String path)
@@ -417,7 +235,11 @@ struct SimpleUNetProgram : public TestBase
         outputData.setCount(expectedOutput.getCount());
         if (outputBuffer->getDesc().size < outputData.getCount() * sizeof(float))
             return false;
-        gDevice->readBuffer(outputBuffer, 0, outputData.getCount() * sizeof(float), outputData.getBuffer());
+        gDevice->readBuffer(
+            outputBuffer,
+            0,
+            outputData.getCount() * sizeof(float),
+            outputData.getBuffer());
         for (Index i = 0; i < outputData.getCount(); i++)
         {
             if (isnan(outputData[i]))
@@ -439,7 +261,8 @@ struct SimpleUNetProgram : public TestBase
             return SLANG_FAIL;
 
         TimeEmbedingKernel glboalTimeEmbedKernel = TimeEmbedingKernel(gInferencingCtx, 32);
-        TorchParamReader reader = TorchParamReader(resourceBase.resolveResource("debug_dump/global_time_linear1.bin"));
+        TorchParamReader reader =
+            TorchParamReader(resourceBase.resolveResource("debug_dump/global_time_linear1.bin"));
         SLANG_RETURN_ON_FAIL(glboalTimeEmbedKernel.loadParams(reader));
 
         auto task = gInferencingCtx->createTask();
@@ -455,8 +278,10 @@ struct SimpleUNetProgram : public TestBase
         auto expectedOutput = loadRawFloats("debug_dump/conv0_output.bin");
         if (expectedOutput.getCount() == 0)
             return SLANG_FAIL;
-        Conv2DKernel initialConvKernel = Conv2DKernel(gInferencingCtx, 16, 3, 1, 1, 64, ActivationFunction::None, "initialConv");
-        TorchParamReader reader = TorchParamReader(resourceBase.resolveResource("debug_dump/conv0.bin"));
+        Conv2DKernel initialConvKernel =
+            Conv2DKernel(gInferencingCtx, 16, 3, 1, 1, 64, ActivationFunction::None, "initialConv");
+        TorchParamReader reader =
+            TorchParamReader(resourceBase.resolveResource("debug_dump/conv0.bin"));
         SLANG_RETURN_ON_FAIL(initialConvKernel.loadParams(reader, false));
         List<float> inputImageData = loadRawFloats("debug_dump/initial_x_input.bin");
         auto inputImage = gInferencingCtx->createBuffer(
@@ -480,10 +305,19 @@ struct SimpleUNetProgram : public TestBase
         // 2. Initialize Kernel
         // Config: Kernel=4, InChannels=128, OutChannels=128
         // Note: The previous layers in Block 0 (conv1/conv2) expanded the channels from 64 to 128.
-        Conv2DKernel transformKernel = Conv2DKernel(gInferencingCtx, 16, 4, 2, 128, 128, ActivationFunction::None, "down0Transform");
+        Conv2DKernel transformKernel = Conv2DKernel(
+            gInferencingCtx,
+            16,
+            4,
+            2,
+            128,
+            128,
+            ActivationFunction::None,
+            "down0Transform");
 
         // 3. Load Weights (No BatchNorm fusion for transform layers)
-        TorchParamReader reader = TorchParamReader(resourceBase.resolveResource("debug_dump/down0_transform.bin"));
+        TorchParamReader reader =
+            TorchParamReader(resourceBase.resolveResource("debug_dump/down0_transform.bin"));
         SLANG_RETURN_ON_FAIL(transformKernel.loadParams(reader, false));
 
         // 4. Load Input
@@ -514,21 +348,27 @@ struct SimpleUNetProgram : public TestBase
             return SLANG_FAIL;
         // 2. Initialize Kernel
         // Config: Kernel=3, InChannels=64, OutChannels=128
-        Conv2DKernel conv1Kernel = Conv2DKernel(gInferencingCtx, 16, 3, 1, 64, 128, ActivationFunction::ReLU, "conv1");
+        Conv2DKernel conv1Kernel =
+            Conv2DKernel(gInferencingCtx, 16, 3, 1, 64, 128, ActivationFunction::ReLU, "conv1");
         // 3. Load Weights (With BatchNorm fusion)
         Conv2DLayerParams convParams;
         {
-            TorchParamReader reader = TorchParamReader(resourceBase.resolveResource("debug_dump/down0_conv1.bin"));
+            TorchParamReader reader =
+                TorchParamReader(resourceBase.resolveResource("debug_dump/down0_conv1.bin"));
             reader.readConv2DLayer(64, 128, 3, convParams);
         }
         BatchNorm2DLayerParams bnParams;
         {
-            TorchParamReader reader = TorchParamReader(resourceBase.resolveResource("debug_dump/down0_bn1.bin"));
+            TorchParamReader reader =
+                TorchParamReader(resourceBase.resolveResource("debug_dump/down0_bn1.bin"));
             reader.readBatchNorm2DLayer(128, bnParams);
         }
         convParams.fuseBatchNorm(bnParams);
         SLANG_RETURN_ON_FAIL(conv1Kernel.loadParams(
-            3, 128, convParams.weights.getBuffer(), convParams.biases.getBuffer()));
+            3,
+            128,
+            convParams.weights.getBuffer(),
+            convParams.biases.getBuffer()));
         // 4. Load Input
         // Input size should be 32x32x64
         List<float> inputImageData = loadRawFloats("debug_dump/down0_conv1_input.bin");
@@ -566,8 +406,8 @@ struct SimpleUNetProgram : public TestBase
             "broadcastAddInputB");
         // 4. Execute
         auto task = gInferencingCtx->createTask();
-        int shapeA[] = { 32, 32, 128 };
-        int shapeB[] = { 1, 1, 128 };
+        int shapeA[] = {32, 32, 128};
+        int shapeB[] = {1, 1, 128};
         auto output = broadcastAddKernel.queueExecute(
             task,
             inputABuffer,
@@ -591,12 +431,15 @@ struct SimpleUNetProgram : public TestBase
 
         // Verify loaded weights.
         {
-            TorchParamReader reader1 = TorchParamReader(resourceBase.resolveResource("debug_dump/down0_time_proj.bin"));
+            TorchParamReader reader1 =
+                TorchParamReader(resourceBase.resolveResource("debug_dump/down0_time_proj.bin"));
             LinearLayerParams linearParams;
             reader1.readLinearLayer(32, 128, linearParams);
-            TEST_CHECK("testDown0_timeProjWeights",
-                checkOutput(model.downBlocks[0]->timeEmbedTransform->weightsBuffer, linearParams.weights));
-
+            TEST_CHECK(
+                "testDown0_timeProjWeights",
+                checkOutput(
+                    model.downBlocks[0]->timeEmbedTransform->weightsBuffer,
+                    linearParams.weights));
         }
 
         List<float> imageInputData = loadRawFloats("debug_dump/down0_conv1_input.bin");
@@ -619,11 +462,14 @@ struct SimpleUNetProgram : public TestBase
     SlangResult testBottleneckConcat()
     {
         // 1. Load the input (Output of the last encoder block)
-        // Note: You might need to add a hook in Python to dump 'down3_output' or 
+        // Note: You might need to add a hook in Python to dump 'down3_output' or
         // just use the 'up0_concat_output' and slice it in half if you want to be clever.
         // Better: Add hook for 'model.downs[-1]' output in Python -> 'down3_output.bin'
         auto down3Out = loadRawFloats("debug_dump/down3_transform_output.bin");
-        auto buffer = gInferencingCtx->createBuffer(down3Out.getBuffer(), down3Out.getCount() * sizeof(float), "down3Out");
+        auto buffer = gInferencingCtx->createBuffer(
+            down3Out.getBuffer(),
+            down3Out.getCount() * sizeof(float),
+            "down3Out");
 
         // 2. Load Expected Result (The input to UpBlock0)
         auto expected = loadRawFloats("debug_dump/up0_concat_output.bin");
@@ -634,8 +480,10 @@ struct SimpleUNetProgram : public TestBase
 
         // In this specific model, down3 outputs [2, 2, 1024] (assuming 32x32 -> 2x2)
         // Concatenating two of them -> [2, 2, 2048]
-        int shape[] = { 2, 2, 1024 };
-        auto result = concat.queueExecute(task, buffer, makeArrayView(shape), buffer, makeArrayView(shape), 2);
+        int shape[] = {2, 2, 1024};
+        auto result =
+            concat
+                .queueExecute(task, buffer, makeArrayView(shape), buffer, makeArrayView(shape), 2);
 
         task.execute();
         TEST_CHECK("testBottleneckConcat", checkOutput(result, expected));
@@ -646,15 +494,20 @@ struct SimpleUNetProgram : public TestBase
     {
         // 1. Input: The Concatenated tensor (2048 channels)
         auto inputData = loadRawFloats("debug_dump/up0_concat_output.bin");
-        auto inputBuf = gInferencingCtx->createBuffer(inputData.getBuffer(), inputData.getCount() * sizeof(float));
+        auto inputBuf = gInferencingCtx->createBuffer(
+            inputData.getBuffer(),
+            inputData.getCount() * sizeof(float));
 
         // 2. Time Input
         auto timeData = loadRawFloats("debug_dump/down0_time_proj_input.bin");
-        auto timeBuf = gInferencingCtx->createBuffer(timeData.getBuffer(), timeData.getCount() * sizeof(float));
+        auto timeBuf = gInferencingCtx->createBuffer(
+            timeData.getBuffer(),
+            timeData.getCount() * sizeof(float));
 
         // 3. Setup Block
-        // InChannels=1024, OutChannels=512. 
-        // Note: The block constructor automatically doubles inChannels for conv1 logic (1024*2 = 2048).
+        // InChannels=1024, OutChannels=512.
+        // Note: The block constructor automatically doubles inChannels for conv1 logic (1024*2 =
+        // 2048).
         UNetModel model = UNetModel(gInferencingCtx, 1, 1);
         SLANG_RETURN_ON_FAIL(loadModel(model, "model_weights.bin"));
 
@@ -684,13 +537,13 @@ struct SimpleUNetProgram : public TestBase
 
         // 2. Load Inputs
         List<float> inputData = loadRawFloats("debug_dump/step495_input.bin");
-        if (inputData.getCount() == 0) return SLANG_FAIL;
+        if (inputData.getCount() == 0)
+            return SLANG_FAIL;
 
         auto inputImage = gInferencingCtx->createBuffer(
             inputData.getBuffer(),
             inputData.getCount() * sizeof(float),
-            "step495_input"
-        );
+            "step495_input");
 
         // 3. Run Forward Pass
         int t = 495;

@@ -1,4 +1,5 @@
 #include "torch-reader.h"
+
 #include "inference-context.h"
 
 TorchParamReader::TorchParamReader(RefPtr<Stream> inputStream)
@@ -21,7 +22,10 @@ SlangResult TorchParamReader::readParams(List<float>& result, int count)
     return SLANG_OK;
 }
 
-SlangResult TorchParamReader::readLinearLayer(int inFeatures, int outFeatures, LinearLayerParams& params)
+SlangResult TorchParamReader::readLinearLayer(
+    int inFeatures,
+    int outFeatures,
+    LinearLayerParams& params)
 {
     params.inputFeatures = inFeatures;
     params.outputFeatures = outFeatures;
@@ -33,7 +37,11 @@ SlangResult TorchParamReader::readLinearLayer(int inFeatures, int outFeatures, L
     return SLANG_OK;
 }
 
-SlangResult TorchParamReader::readConv2DLayer(int inChannels, int outChannels, int kernelSize, Conv2DLayerParams& params)
+SlangResult TorchParamReader::readConv2DLayer(
+    int inChannels,
+    int outChannels,
+    int kernelSize,
+    Conv2DLayerParams& params)
 {
     params.inChannels = inChannels;
     params.outChannels = outChannels;
@@ -47,7 +55,11 @@ SlangResult TorchParamReader::readConv2DLayer(int inChannels, int outChannels, i
     return SLANG_OK;
 }
 
-SlangResult TorchParamReader::readTransposedConv2DLayer(int inChannels, int outChannels, int kernelSize, TransposedConv2DLayerParams& params)
+SlangResult TorchParamReader::readTransposedConv2DLayer(
+    int inChannels,
+    int outChannels,
+    int kernelSize,
+    TransposedConv2DLayerParams& params)
 {
     params.inChannels = inChannels;
     params.outChannels = outChannels;
@@ -119,7 +131,9 @@ void Conv2DLayerParams::fuseBatchNorm(const BatchNorm2DLayerParams& bnParams, fl
     fuseBatchNormUnified(weights, biases, bnParams, outChannels, epsilon);
 }
 
-void TransposedConv2DLayerParams::fuseBatchNorm(const BatchNorm2DLayerParams& bnParams, float epsilon)
+void TransposedConv2DLayerParams::fuseBatchNorm(
+    const BatchNorm2DLayerParams& bnParams,
+    float epsilon)
 {
     fuseBatchNormUnified(weights, biases, bnParams, outChannels, epsilon);
 }

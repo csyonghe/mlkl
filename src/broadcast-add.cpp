@@ -7,7 +7,12 @@ BroadcastAddKernel::BroadcastAddKernel(InferencingContext* context)
     pipeline = context->createComputePipeline("broadcastAdd", ArrayView<String>());
 }
 
-ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(InferencingTask& task, rhi::IBuffer* inputA, ArrayView<int> shapeA, rhi::IBuffer* inputB, ArrayView<int> shapeB)
+ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(
+    InferencingTask& task,
+    rhi::IBuffer* inputA,
+    ArrayView<int> shapeA,
+    rhi::IBuffer* inputB,
+    ArrayView<int> shapeB)
 {
     struct BroadcastAddParamsData
     {
@@ -36,11 +41,6 @@ ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(InferencingTask& task, rhi
         paramsData.rhsShape[i] = (i < shapeB.getCount()) ? shapeB[i] : 1;
     }
     uint32_t threadGroupCountX = (uint32_t)((outputSize + 256 - 1) / 256);
-    task.dispatchKernel(
-        pipeline,
-        threadGroupCountX,
-        1,
-        1,
-        paramsData);
+    task.dispatchKernel(pipeline, threadGroupCountX, 1, 1, paramsData);
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

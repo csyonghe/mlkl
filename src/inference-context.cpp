@@ -1,5 +1,6 @@
 #include "inference-context.h"
 
+#include "example-base.h"
 #include "slang-rhi/shader-cursor.h"
 
 InferencingContext::InferencingContext(rhi::IDevice* inDevice)
@@ -12,7 +13,9 @@ InferencingContext::InferencingContext(rhi::IDevice* inDevice)
     diagnoseIfNeeded(diagnosticBlob);
 }
 
-ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(const char* entryPointName, Slang::ConstArrayView<String> specArgs)
+ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(
+    const char* entryPointName,
+    Slang::ConstArrayView<String> specArgs)
 {
     ComPtr<slang::IEntryPoint> entryPoint;
     slangModule->findEntryPointByName(entryPointName, entryPoint.writeRef());
@@ -81,14 +84,17 @@ InferencingTask InferencingContext::createTask()
     return task;
 }
 
-ComPtr<rhi::IBuffer> InferencingContext::createBuffer(const void* data, size_t size, const char* label)
+ComPtr<rhi::IBuffer> InferencingContext::createBuffer(
+    const void* data,
+    size_t size,
+    const char* label)
 {
     rhi::BufferDesc bufferDesc = {};
     bufferDesc.size = size;
     bufferDesc.label = label;
     bufferDesc.defaultState = rhi::ResourceState::UnorderedAccess;
     bufferDesc.usage = rhi::BufferUsage::CopySource | rhi::BufferUsage::CopyDestination |
-        rhi::BufferUsage::UnorderedAccess;
+                       rhi::BufferUsage::UnorderedAccess;
     bufferDesc.memoryType = rhi::MemoryType::DeviceLocal;
     auto buffer = device->createBuffer(bufferDesc, data);
     if (!buffer)
@@ -99,13 +105,14 @@ ComPtr<rhi::IBuffer> InferencingContext::createBuffer(const void* data, size_t s
     return buffer;
 }
 
-ComPtr<rhi::IShaderObject> InferencingTask::createKernelParamObject(slang::TypeLayoutReflection* typeLayout)
+ComPtr<rhi::IShaderObject> InferencingTask::createKernelParamObject(
+    slang::TypeLayoutReflection* typeLayout)
 {
     ComPtr<rhi::IShaderObject> obj;
     context->getDevice()->createShaderObjectFromTypeLayout(typeLayout, obj.writeRef());
     if (!obj)
     {
-        InferencingContext::reportError("Failed to create kernel parameter object\n");
+        reportError("Failed to create kernel parameter object\n");
         return nullptr;
     }
     kernelParamObjects.add(obj);
@@ -131,14 +138,18 @@ void InferencingTask::dispatchKernel(
     auto typeLayout = pParams.getTypeLayout();
     if (!typeLayout)
     {
-        InferencingContext::reportError("Failed to get kernel parameter type layout, kernel must have only one uniform parameter named 'params'\n");
+        reportError("Failed to get kernel parameter type layout, kernel must have only one uniform "
+                    "parameter named 'params'\n");
         return;
     }
     auto paramsTypeLayout = typeLayout->getElementTypeLayout();
     auto obj = createKernelParamObject(paramsTypeLayout);
     if (paramsTypeLayout->getStride() != paramDataSize)
     {
-        InferencingContext::reportError("Kernel parameter size mismatch: expected %zu, got %zu\n", paramsTypeLayout->getSize(), paramDataSize);
+        reportError(
+            "Kernel parameter size mismatch: expected %zu, got %zu\n",
+            paramsTypeLayout->getSize(),
+            paramDataSize);
         return;
     }
     obj->setData(rhi::ShaderOffset(), paramData, paramDataSize);
@@ -174,7 +185,7 @@ void InferencingTask::execute()
     auto result = queue->submit(commandBuffer);
     if (SLANG_FAILED(result))
     {
-        InferencingContext::reportError("Failed to submit command buffer\n");
+        reportError("Failed to submit command buffer\n");
     }
     queue->waitOnHost();
 #endif
