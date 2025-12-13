@@ -308,7 +308,7 @@ add_library_target(mlkl src)
 
 # Add the executables
 add_executable_target(unit-test unit-test)
-add_executable_target(simple-unet simple-unet)
+add_executable_target(simple-unet examples/simple-unet)
 
 
 
