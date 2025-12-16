@@ -23,6 +23,31 @@ struct Reg<let ID : int> : IExpr
     }
 }
 
+// Assignment: %ID = Expr
+struct Eval<let ID : int, E : IExpr> : IStmt
+{
+    E expr;
+
+    void execute(uint tid)
+    {
+        // Write to the static storage for this ID
+        Reg<ID>.value = expr.eval(tid);
+    }
+}
+
+struct Program<int resultReg, each S : IStmt> : IExpr
+{
+    Tuple<expand each S> stmts;
+
+    float eval(uint tid)
+    {
+        // Execute each statement in order
+        expand (each stmts).execute(tid);
+        // Return the value of the result register
+        return Reg<resultReg>.value;
+    }
+}
+
 struct BufferView : IExpr
 {
     float* data;
@@ -270,31 +295,6 @@ struct Gelu<I : IExpr> : IExpr
         float x = inner.eval(tid);
         // Tanh approximation
         return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
-    }
-}
-
-// Assignment: %ID = Expr
-struct Eval<let ID : int, E : IExpr> : IStmt
-{
-    E expr;
-
-    void execute(uint tid)
-    {
-        // Write to the static storage for this ID
-        Reg<ID>.value = expr.eval(tid);
-    }
-}
-
-struct Program<int resultReg, each S : IStmt> : IExpr
-{
-    Tuple<expand each S> stmts;
-
-    float eval(uint tid)
-    {
-        // Execute each statement in order
-        expand (each stmts).execute(tid);
-        // Return the value of the result register
-        return Reg<resultReg>.value;
     }
 }
 
