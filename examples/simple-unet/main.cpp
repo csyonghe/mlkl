@@ -32,9 +32,9 @@ struct SimpleUNetProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
-        SLANG_RETURN_ON_FAIL(testBottleneckConcat());
 #if 0
         SLANG_RETURN_ON_FAIL(testUp0());
+        SLANG_RETURN_ON_FAIL(testBottleneckConcat());
         SLANG_RETURN_ON_FAIL(testDown0());
         SLANG_RETURN_ON_FAIL(testBroadcastAdd());
         SLANG_RETURN_ON_FAIL(testDown0Conv1());

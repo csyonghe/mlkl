@@ -327,6 +327,14 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
 };
 
+class KernelOutputNode : public ExprNode
+{
+public:
+    Shape resolveShape(const EvalContext&) const override { return Shape(); }
+    String getSlangTypeName() const override { return "KernelOutput"; }
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
+};
+
 // =========================================================================
 // 5. Builder API
 // =========================================================================
@@ -336,6 +344,7 @@ Expr constant(float v);
 Expr broadcast(Expr inner, Expr shapeOf);
 Expr concat(Expr left, Expr right, Expr axis);
 Expr uniformConstant();
+Expr kernelOutput();
 
 Expr min(Expr l, Expr r);
 Expr max(Expr l, Expr r);

@@ -487,6 +487,10 @@ Expr uniformConstant()
 {
     return Expr(new UniformConstantNode());
 }
+Expr kernelOutput()
+{
+    return Expr(new KernelOutputNode());
+}
 Expr broadcast(Expr inner, Expr shapeOf)
 {
     return Expr(new BroadcastNode(inner, shapeOf));

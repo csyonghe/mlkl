@@ -1,13 +1,18 @@
 implementing mlkl;
 
+struct Input
+{
+    float value;
+}
+
 interface IExpr
 {
-    float eval(uint tid);
+    float eval(uint tid, Input input);
 }
 
 interface IStmt
 {
-    void execute(uint tid);
+    void execute(uint tid, Input input);
 }
 
 // Acts as both the Storage and the Expression
@@ -17,7 +22,7 @@ struct Reg<let ID : int> : IExpr
     static float value;
 
     // IExpr implementation: Read the value
-    float eval(uint tid)
+    float eval(uint tid, Input input)
     {
         return value;
     }
@@ -28,10 +33,10 @@ struct Eval<let ID : int, E : IExpr> : IStmt
 {
     E expr;
 
-    void execute(uint tid)
+    void execute(uint tid, Input input)
     {
         // Write to the static storage for this ID
-        Reg<ID>.value = expr.eval(tid);
+        Reg<ID>.value = expr.eval(tid, input);
     }
 }
 
@@ -39,10 +44,10 @@ struct Program<int resultReg, each S : IStmt> : IExpr
 {
     Tuple<expand each S> stmts;
 
-    float eval(uint tid)
+    float eval(uint tid, Input input)
     {
         // Execute each statement in order
-        expand (each stmts).execute(tid);
+        expand (each stmts).execute(tid, input);
         // Return the value of the result register
         return Reg<resultReg>.value;
     }
@@ -51,13 +56,17 @@ struct Program<int resultReg, each S : IStmt> : IExpr
 struct BufferView : IExpr
 {
     float* data;
-    float eval(uint tid) { return data[tid]; }
+    float eval(uint tid, Input input) { return data[tid]; }
 }
 
 struct ConstantView : IExpr
 {
     float value;
-    float eval(uint tid) { return value; }
+    float eval(uint tid, Input input) { return value; }
+}
+struct KernelOutput : IExpr
+{
+    float eval(uint tid, Input input) { return input.value; }
 }
 
 struct Broadcast<Inner : IExpr> : IExpr
@@ -67,7 +76,7 @@ struct Broadcast<Inner : IExpr> : IExpr
     uint outputShape[8];
     uint innerStrides[8];
 
-    float eval(uint tid)
+    float eval(uint tid, Input input)
     {
         uint innerLinear = 0;
         uint temp = tid;
@@ -83,7 +92,7 @@ struct Broadcast<Inner : IExpr> : IExpr
                 innerLinear += coord * innerStrides[i];
             }
         }
-        return inner.eval(innerLinear);
+        return inner.eval(innerLinear, input);
     }
 }
 
@@ -101,7 +110,7 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
     uint leftStrides[8];   // To compose coords -> tid_L
     uint rightStrides[8];  // To compose coords -> tid_R
 
-    float eval(uint tid)
+    float eval(uint tid, Input input)
     {
         // 1. Decompose Linear Output ID -> N-D Coordinates
         uint coord[8];
@@ -135,7 +144,7 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
             for (int i = 0; i < 8; ++i) {
                 if (i < int(rank)) idx += coord[i] * leftStrides[i];
             }
-            return left.eval(idx);
+            return left.eval(idx, input);
         }
         else
         {
@@ -149,7 +158,7 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
             for (int i = 0; i < 8; ++i) {
                  if (i < int(rank)) idx += coord[i] * rightStrides[i];
             }
-            return right.eval(idx);
+            return right.eval(idx, input);
         }
     }
 }
@@ -157,31 +166,31 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
 // Binary Ops
 struct Add<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid) { return l.eval(tid) + r.eval(tid); }
+    float eval(uint tid, Input input) { return l.eval(tid, input) + r.eval(tid, input); }
 }
 struct Sub<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid) { return l.eval(tid) - r.eval(tid); }
+    float eval(uint tid, Input input) { return l.eval(tid, input) - r.eval(tid, input); }
 }
 struct Mul<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid) { return l.eval(tid) * r.eval(tid); }
+    float eval(uint tid, Input input) { return l.eval(tid, input) * r.eval(tid, input); }
 }
 struct Div<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid) { return l.eval(tid) / r.eval(tid); }
+    float eval(uint tid, Input input) { return l.eval(tid, input) / r.eval(tid, input); }
 }
 
 struct Min<L : IExpr, R : IExpr> : IExpr
 {
     L left; R right;
-    float eval(uint tid) { return min(left.eval(tid), right.eval(tid)); }
+    float eval(uint tid, Input input) { return min(left.eval(tid, input), right.eval(tid, input)); }
 }
 
 struct Max<L : IExpr, R : IExpr> : IExpr
 {
     L left; R right;
-    float eval(uint tid) { return max(left.eval(tid), right.eval(tid)); }
+    float eval(uint tid, Input input) { return max(left.eval(tid, input), right.eval(tid, input)); }
 }
 
 // --- Unary Operations ---
@@ -189,67 +198,67 @@ struct Max<L : IExpr, R : IExpr> : IExpr
 struct Neg<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return -inner.eval(tid); }
+    float eval(uint tid, Input input) { return -inner.eval(tid, input); }
 }
 
 struct Exp<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return exp(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return exp(inner.eval(tid, input)); }
 }
 
 struct Log<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return log(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return log(inner.eval(tid, input)); }
 }
 
 struct Sin<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return sin(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return sin(inner.eval(tid, input)); }
 }
 
 struct Cos<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return cos(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return cos(inner.eval(tid, input)); }
 }
 
 struct Abs<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return abs(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return abs(inner.eval(tid, input)); }
 }
 
 struct Sqrt<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return sqrt(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return sqrt(inner.eval(tid, input)); }
 }
 
 struct Pow<L : IExpr, R : IExpr> : IExpr
 {
     L base; R exp;
     // HLSL pow(x, y)
-    float eval(uint tid) { return pow(base.eval(tid), exp.eval(tid)); }
+    float eval(uint tid, Input input) { return pow(base.eval(tid, input), exp.eval(tid, input)); }
 }
 struct Floor<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return floor(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return floor(inner.eval(tid, input)); }
 }
 
 struct Ceil<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return ceil(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return ceil(inner.eval(tid, input)); }
 }
 
 struct Rsqrt<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return rsqrt(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return rsqrt(inner.eval(tid, input)); }
 }
 
 // --- Activations ---
@@ -257,15 +266,15 @@ struct Rsqrt<I : IExpr> : IExpr
 struct Relu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return max(0.0, inner.eval(tid)); }
+    float eval(uint tid, Input input) { return max(0.0, inner.eval(tid, input)); }
 }
 
 struct Sigmoid<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) 
+    float eval(uint tid, Input input) 
     { 
-        float v = inner.eval(tid);
+        float v = inner.eval(tid, input);
         return 1.0 / (1.0 + exp(-v)); 
     }
 }
@@ -273,15 +282,15 @@ struct Sigmoid<I : IExpr> : IExpr
 struct Tanh<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) { return tanh(inner.eval(tid)); }
+    float eval(uint tid, Input input) { return tanh(inner.eval(tid, input)); }
 }
 
 struct Silu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) 
+    float eval(uint tid, Input input) 
     { 
-        float x = inner.eval(tid);
+        float x = inner.eval(tid, input);
         // x * sigmoid(x)
         return x * (1.0 / (1.0 + exp(-x)));
     }
@@ -290,9 +299,9 @@ struct Silu<I : IExpr> : IExpr
 struct Gelu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid) 
+    float eval(uint tid, Input input) 
     { 
-        float x = inner.eval(tid);
+        float x = inner.eval(tid, input);
         // Tanh approximation
         return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
     }
@@ -313,8 +322,10 @@ void materialize<P:IExpr>(
     uint tid = id.x;
     if (tid >= params.count) return;
 
+    Input input = {};
+
     // 1. Execute Program
-    let result = params.program.eval(tid);
+    let result = params.program.eval(tid, input);
 
     // 2. Write Output
     params.outputBuffer[tid] = result;
