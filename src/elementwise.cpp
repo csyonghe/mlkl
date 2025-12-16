@@ -164,7 +164,8 @@ Shape BroadcastNode::resolveShape(const EvalContext& ctx) const
 
 void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
-    // Inner is Reg<ID>, so it packs 0 bytes.
+    // Use pack inlined to deeply inline the inner nodes.
+    inner.node->packInlined(writer, ctx);
 
     // We compute metadata at runtime based on shapes
     Shape innerShape = inner.node->resolveShape(ctx);
@@ -247,6 +248,12 @@ void BinaryNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     // Operands are Reg<ID>, size 0. Nothing to pack!
 }
 
+void BinaryNode::packInlined(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    left.node->packInlined(writer, ctx);
+    right.node->packInlined(writer, ctx);
+}
+
 // [Factories]
 Expr buffer()
 {
@@ -307,7 +314,7 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
     }
     else if (auto br = dynamic_cast<BroadcastNode*>(node))
     {
-        topoVisit(br->inner.node, ctx);
+        // Stop recursion here to inline inner nodes.
     }
 
     ctx.visited.insert(node);
@@ -315,13 +322,7 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
     ctx.regIDs[node] = ctx.regCounter++;
 }
 
-String genExprType(ExprNode* node, SSAGenContext& ctx)
-{
-    // Even Buffers and Constants are visited first and assigned a Register ID.
-    std::stringstream ss;
-    ss << "Reg<" << ctx.regIDs[node] << ">";
-    return ss.str().c_str();
-}
+String genExprType(ExprNode* node, SSAGenContext& ctx);
 
 String genDefType(ExprNode* node, SSAGenContext& ctx)
 {
@@ -341,6 +342,20 @@ String genDefType(ExprNode* node, SSAGenContext& ctx)
     else if (dynamic_cast<UniformConstantNode*>(node))
         return "ConstantView";
     return "Error";
+}
+
+String genExprType(ExprNode* node, SSAGenContext& ctx)
+{
+    auto it = ctx.regIDs.find(node);
+    if (it != ctx.regIDs.end())
+    {
+        // Visited node -> Use Register
+        std::stringstream ss;
+        ss << "Reg<" << it->second << ">";
+        return ss.str().c_str();
+    }
+    // CHANGE: Not visited (child of Broadcast) -> Generate full definition (Inline)
+    return genDefType(node, ctx);
 }
 
 // =========================================================================

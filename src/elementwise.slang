@@ -55,12 +55,6 @@ struct Broadcast<Inner : IExpr> : IExpr
         [unroll]
         for (int i = 7; i >= 0; i--) 
         {
-            if (tid == 0)
-            {
-                printf("rank = %d\n", rank);
-                printf("outputShape[%d] = %d\n", i, outputShape[i]);
-                printf("innerStrides[%d] = %d\n", i, innerStrides[i]);
-            }
             if (i < int(rank))
             {
                 uint dimSize = outputShape[i];

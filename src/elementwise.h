@@ -170,6 +170,10 @@ public:
     // - BroadcastNode: Packs Rank/Shape/Strides (Inner is Reg<ID>, so size 0)
     // - BinaryNode: Packs NOTHING (Operands are Reg<ID>, so size 0)
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
+    virtual void packInlined(ParameterWriter& writer, const EvalContext& ctx) const
+    {
+        this->pack(writer, ctx);
+    }
 };
 
 class BufferNode : public ExprNode
@@ -235,6 +239,7 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    void packInlined(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
 // =========================================================================
