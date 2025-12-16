@@ -30,7 +30,11 @@ struct UnitTestProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
+        SLANG_RETURN_ON_FAIL(testMultiConcat());
         SLANG_RETURN_ON_FAIL(testBroadcastAdd());
+        SLANG_RETURN_ON_FAIL(testLeakyReluComposite());
+        SLANG_RETURN_ON_FAIL(testReluNegSin());
+        SLANG_RETURN_ON_FAIL(testClassifierFreeGuidance());
         SLANG_RETURN_ON_FAIL(testMaterialize());
         SLANG_RETURN_ON_FAIL(testSimpleConvolution());
         SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
@@ -178,6 +182,73 @@ struct UnitTestProgram : public TestBase
         return SLANG_OK;
     }
 
+    SlangResult testClassifierFreeGuidance()
+    {
+        // 1. Setup Data
+        int width = 2;
+        int height = 2;
+        int channels = 1;
+        int count = width * height * channels; // 4 elements per image
+
+        // We pack both batches into a single buffer
+        // [Batch 0 (Uncond), Batch 1 (Cond)]
+        float inputData[] = {
+            1.0f,
+            2.0f,
+            3.0f,
+            4.0f, // Uncond
+            10.0f,
+            20.0f,
+            30.0f,
+            40.0f // Cond
+        };
+
+        float guidanceScale = 2.0f;
+
+        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+
+        // 2. Prepare Kernel
+        ClassifierFreeGuidanceKernel kernel(gInferencingCtx);
+        auto task = gInferencingCtx->createTask();
+
+        // 3. Execute
+        // The kernel should:
+        //  - Treat the first 4 floats as 'Uncond'
+        //  - Treat the next 4 floats as 'Cond'
+        //  - Apply the formula
+        auto outputBuffer =
+            kernel.queueExecute(task, inputBuf, width, height, channels, guidanceScale);
+
+        // 4. Readback
+        renderDocBeginFrame();
+        task.execute();
+
+        float output[4]; // Output should be a single image (size 4)
+        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
+        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        renderDocEndFrame();
+
+        // 5. Verify
+        // Formula: uncond + (cond - uncond) * scale
+        float expected[] = {
+            19.0f, // 1 + (10-1)*2
+            38.0f, // 2 + (20-2)*2
+            57.0f, // 3 + (30-3)*2
+            76.0f  // 4 + (40-4)*2
+        };
+
+        for (int i = 0; i < 4; i++)
+        {
+            if (fabs(output[i] - expected[i]) > 1e-3f)
+            {
+                printf("CFG Mismatch at %d: Got %f, Expected %f\n", i, output[i], expected[i]);
+                return SLANG_FAIL;
+            }
+        }
+
+        return SLANG_OK;
+    }
+
     SlangResult testMaterialize()
     {
         // 1. Setup Input Data
@@ -242,6 +313,174 @@ struct UnitTestProgram : public TestBase
             TEST_CHECK("materialize", fabs(outputData[i] - expected) < 1e-3f);
         }
 
+        return SLANG_OK;
+    }
+
+    SlangResult testReluNegSin()
+    {
+        // Scenario: Compute relu(-sin(x))
+        // We pick values of x where sin(x) is positive, negative, and zero.
+
+        // 0. Setup Data
+        // x = 0        -> sin(0)=0          -> -0=0           -> relu(0) = 0
+        // x = PI/2     -> sin(1.57)=1       -> -1             -> relu(-1) = 0
+        // x = PI       -> sin(3.14)=~0      -> -0             -> relu(0) = 0
+        // x = 3PI/2    -> sin(4.71)=-1      -> -(-1)=1        -> relu(1) = 1
+
+        float PI = 3.14159265f;
+        float inputData[] = {0.0f, PI / 2.0f, PI, 3.0f * PI / 2.0f};
+        int count = 4;
+        Shape shape = {count}; // [4]
+
+        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+
+        // 1. Build Expression Tree
+        // Expr = relu( -sin(x) )
+        auto x = buffer();
+        auto resultExpr = relu(-sin(x)); // Uses operator- overload for neg()
+
+        // 2. Create Kernel
+        ElementwiseKernel kernel(gInferencingCtx, resultExpr);
+        auto task = gInferencingCtx->createTask();
+
+        // 3. Bind Inputs & Execute
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(x, InputInfo(shape, inputBuf, 0));
+
+        // Execute
+        // Since it's a simple elementwise op, output shape matches input shape
+        auto outputBuffer = kernel.eval(task, inputs);
+
+        // 4. Readback
+        renderDocBeginFrame();
+        task.execute();
+
+        float output[4];
+        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
+        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        renderDocEndFrame();
+
+        // 5. Verify
+        // Expected values calculation
+        float expected[4];
+        for (int i = 0; i < 4; i++)
+        {
+            float s = sin(inputData[i]);
+            float n = -s;
+            expected[i] = std::max(0.0f, n);
+        }
+
+        // Check (with tolerance for trig approximation)
+        for (int i = 0; i < 4; i++)
+        {
+            if (fabs(output[i] - expected[i]) > 1e-3f)
+            {
+                printf(
+                    "ReluNegSin Mismatch at %d (Input %f): Got %f, Expected %f\n",
+                    i,
+                    inputData[i],
+                    output[i],
+                    expected[i]);
+                return SLANG_FAIL;
+            }
+        }
+
+        return SLANG_OK;
+    }
+
+    SlangResult testLeakyReluComposite()
+    {
+        // Test LeakyRelu(x, alpha=0.1)
+        // x = 10.0  -> max(10, 1.0)  -> 10.0
+        // x = -10.0 -> max(-10, -1.0) -> -1.0
+
+        float inputData[] = {10.0f, -10.0f};
+        float alpha = 0.1f;
+        int count = 2;
+        Shape shape = {count};
+
+        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+
+        auto x = buffer();
+        // Use the C++ helper function
+        auto resultExpr = leakyRelu(x, alpha);
+
+        ElementwiseKernel kernel(gInferencingCtx, resultExpr);
+        auto task = gInferencingCtx->createTask();
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(x, InputInfo(shape, inputBuf, 0));
+
+        auto outputBuffer = kernel.eval(task, inputs);
+
+        // Readback
+        renderDocBeginFrame();
+        task.execute();
+
+        float output[2];
+        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
+        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        renderDocEndFrame();
+
+        // Verify
+        float expected[] = {10.0f, -1.0f};
+        for (int i = 0; i < 2; i++)
+        {
+            if (fabs(output[i] - expected[i]) > 1e-3f)
+            {
+                printf(
+                    "LeakyRelu Mismatch at %d: Got %f, Expected %f\n",
+                    i,
+                    output[i],
+                    expected[i]);
+                return SLANG_FAIL;
+            }
+        }
+        return SLANG_OK;
+    }
+
+    SlangResult testMultiConcat()
+    {
+        // Scenario: Concat 3 vectors along axis 0
+        // A: [1, 2]
+        // B: [3, 4, 5]
+        // C: [6]
+        // Result: [1, 2, 3, 4, 5, 6] (Shape [6])
+
+        float dataA[] = {1, 2};
+        float dataB[] = {3, 4, 5};
+        float dataC[] = {6};
+
+        auto bufA = gInferencingCtx->createBuffer(dataA, sizeof(dataA));
+        auto bufB = gInferencingCtx->createBuffer(dataB, sizeof(dataB));
+        auto bufC = gInferencingCtx->createBuffer(dataC, sizeof(dataC));
+
+        rhi::IBuffer* inputs[] = {bufA, bufB, bufC};
+        Shape shapes[] = {Shape({2}), Shape({3}), Shape({1})};
+
+        ConcatKernel kernel(gInferencingCtx, 3);
+        auto task = gInferencingCtx->createTask();
+
+        auto outputBuf = kernel.queueExecute(task, makeArrayView(inputs), makeArrayView(shapes), 0);
+
+        // Readback
+        renderDocBeginFrame();
+        task.execute();
+        float output[6];
+        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
+        gDevice->readBuffer(outputBuf, 0, sizeof(output), output);
+        renderDocEndFrame();
+
+        // Verify
+        float expected[] = {1, 2, 3, 4, 5, 6};
+        for (int i = 0; i < 6; i++)
+        {
+            if (output[i] != expected[i])
+            {
+                printf("Concat Mismatch at %d: %f != %f\n", i, output[i], expected[i]);
+                return SLANG_FAIL;
+            }
+        }
         return SLANG_OK;
     }
 };

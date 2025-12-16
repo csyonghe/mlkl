@@ -156,7 +156,7 @@ UNetModel::UNetModel(
         outputChannels,
         ActivationFunction::None,
         "predictedNoiseConv");
-    concat = new ConcatKernel(inferencingCtx);
+    concat = new ConcatKernel(inferencingCtx, 2);
 }
 
 SlangResult UNetModel::loadParams(TorchParamReader& reader)
@@ -197,9 +197,10 @@ ComPtr<rhi::IBuffer> UNetModel::forward(
         auto& block = upBlocks[i];
         // Concat skip connection
         auto skipConnection = skipConnections[skipConnections.getCount() - 1 - i];
-        int shape[] = {inputHeight, inputWidth, block->inChannels};
-        auto shapeView = makeArrayView(shape);
-        x = concat->queueExecute(task, x, shapeView, skipConnection, shapeView, 2);
+        Shape shape = {inputHeight, inputWidth, block->inChannels};
+        Shape shapes[] = {shape, shape};
+        rhi::IBuffer* buffers[] = {x, skipConnection};
+        x = concat->queueExecute(task, makeArrayView(buffers), makeArrayView(shapes), 2);
         // Up block
         x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
         inputWidth *= 2;

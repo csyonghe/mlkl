@@ -1,22 +1,26 @@
-
 #pragma once
 
+#include "elementwise.h"
 #include "kernel-base.h"
 
 class ConcatKernel : public RefObject
 {
-private:
-    ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
+    RefPtr<ElementwiseKernel> elementwiseKernel;
+    Dictionary<int, Expr> mapOperandToExprNode;
+    Expr axisExpr;
+    int operandCount;
 
 public:
-    ConcatKernel(InferencingContext* context);
+    ConcatKernel(InferencingContext* ctx, int operandCount);
+
+    // Concatenates N inputs along the specified axis.
+    // inputs: List of buffers
+    // inputShapes: List of shapes corresponding to inputs
+    // axis: The dimension to concatenate along
     ComPtr<rhi::IBuffer> queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputA,
-        ArrayView<int> shapeA,
-        rhi::IBuffer* inputB,
-        ArrayView<int> shapeB,
-        int axis,
-        int batchSize = 1);
+        ArrayView<rhi::IBuffer*> inputs,
+        ArrayView<Shape> inputShapes,
+        int axis);
 };

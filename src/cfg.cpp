@@ -27,26 +27,17 @@ ComPtr<rhi::IBuffer> ClassifierFreeGuidanceKernel::queueExecute(
     int channels,
     float guidanceScale)
 {
-    int count = (int)width * height * channels;
+    auto shape = Shape(width, height, channels);
 
     Dictionary<Expr, InputInfo> inputs;
-
     // Batch 0: Uncond (Offset 0)
-    InputInfo uncondInfo;
-    uncondInfo.buffer = batchedInput;
-    uncondInfo.offset = 0;
-    inputs.add(uncond, uncondInfo);
+    inputs[uncond] = InputInfo(shape, batchedInput, 0);
 
     // Batch 1: Cond (Offset count * sizeof(float))
-    InputInfo condInfo;
-    condInfo.buffer = batchedInput;
-    condInfo.offset = count * sizeof(float);
-    inputs.add(cond, condInfo);
+    inputs[cond] = InputInfo(shape, batchedInput, shape.getElementCount() * sizeof(float));
 
     // Scale (Scalar Value)
-    InputInfo scaleInfo;
-    scaleInfo.scalarValue = guidanceScale;
-    inputs.add(scale, scaleInfo);
+    inputs[scale] = guidanceScale;
 
     return kernel->eval(task, inputs);
 }

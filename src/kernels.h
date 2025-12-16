@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broadcast-add.h"
+#include "cfg.h"
 #include "concat.h"
 #include "conv2d.h"
 #include "ddim-step.h"

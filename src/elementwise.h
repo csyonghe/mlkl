@@ -68,10 +68,32 @@ enum class BinaryOp
     Add,
     Sub,
     Mul,
-    Div
+    Div,
+    Min,
+    Max,
+    Pow
 };
-
 String getSlangBinaryOpName(BinaryOp op);
+
+enum class UnaryOp
+{
+    Neg,
+    Exp,
+    Log,
+    Sin,
+    Cos,
+    Abs,
+    Sqrt,
+    Relu,
+    Sigmoid,
+    Tanh,
+    Silu,
+    Gelu,
+    Floor,
+    Ceil,
+    Rsqrt
+};
+String getSlangUnaryOpName(UnaryOp op);
 
 struct Expr
 {
@@ -120,6 +142,22 @@ struct InputInfo
 struct EvalContext
 {
     Dictionary<ExprNode*, InputInfo> inputs;
+    Dictionary<ExprNode*, Shape>* additionalShapeMap = nullptr;
+    Shape getShapeForNode(ExprNode* node) const
+    {
+        if (auto info = inputs.tryGetValue(node))
+        {
+            return info->shape;
+        }
+        if (additionalShapeMap)
+        {
+            if (auto shape = additionalShapeMap->tryGetValue(node))
+            {
+                return *shape;
+            }
+        }
+        return Shape();
+    }
 };
 
 struct ParameterWriter
@@ -170,11 +208,19 @@ public:
     // - BroadcastNode: Packs Rank/Shape/Strides (Inner is Reg<ID>, so size 0)
     // - BinaryNode: Packs NOTHING (Operands are Reg<ID>, so size 0)
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
-    virtual void packInlined(ParameterWriter& writer, const EvalContext& ctx) const
-    {
-        this->pack(writer, ctx);
-    }
 };
+
+class ProgramNode : public ExprNode
+{
+public:
+    List<ExprNode*> linearNodes;
+    int resultRegID = -1;
+    Dictionary<ExprNode*, int> nodeToRegID;
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
 
 class BufferNode : public ExprNode
 {
@@ -218,8 +264,30 @@ public:
     Expr inner;
     Expr targetShapeOf;
 
+    // Cached linear order of the inner DAG
+    RefPtr<ProgramNode> innerProgram;
+
     BroadcastNode(Expr inner, Expr targetShape);
 
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
+class ConcatNode : public ExprNode
+{
+public:
+    Expr left;
+    Expr right;
+    Expr axis;
+
+    // Compiled inner programs
+    RefPtr<ProgramNode> leftProgram;
+    RefPtr<ProgramNode> rightProgram;
+
+    ConcatNode(Expr left, Expr right, Expr axis);
+
+    int getAxis(const EvalContext& ctx) const;
     String getSlangTypeName() const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
@@ -239,7 +307,24 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
-    void packInlined(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
+class UnaryNode : public ExprNode
+{
+public:
+    Expr inner;
+    UnaryOp op;
+
+    UnaryNode(Expr inner, UnaryOp op)
+        : inner(inner), op(op)
+    {
+    }
+
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+
+    // Normal pack does nothing (Register operands)
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
 };
 
 // =========================================================================
@@ -249,7 +334,36 @@ public:
 Expr buffer();
 Expr constant(float v);
 Expr broadcast(Expr inner, Expr shapeOf);
+Expr concat(Expr left, Expr right, Expr axis);
 Expr uniformConstant();
+
+Expr min(Expr l, Expr r);
+Expr max(Expr l, Expr r);
+
+Expr neg(Expr i); // -Expr
+Expr exp(Expr i);
+Expr log(Expr i);
+Expr sin(Expr i);
+Expr cos(Expr i);
+Expr abs(Expr i);
+Expr sqrt(Expr i);
+Expr pow(Expr base, Expr exponent);
+Expr floor(Expr i);
+Expr ceil(Expr i);
+Expr rsqrt(Expr i);
+
+// Activations
+Expr relu(Expr i);
+Expr sigmoid(Expr i);
+Expr tanh(Expr i);
+Expr silu(Expr i);
+Expr gelu(Expr i);
+
+// Operator Overload for Negation
+inline Expr operator-(Expr i)
+{
+    return neg(i);
+}
 
 Expr operator+(Expr l, Expr r);
 Expr operator-(Expr l, Expr r);
@@ -281,6 +395,31 @@ inline Expr operator+(float l, Expr r)
     return constant(l) + r;
 }
 
+// --- Composite Helpers (No new shader code needed!) ---
+
+// clamp(x, min, max) -> min(max(x, min_val), max_val)
+inline Expr clamp(Expr x, Expr minVal, Expr maxVal)
+{
+    return min(max(x, minVal), maxVal);
+}
+
+inline Expr clamp(Expr x, float minVal, float maxVal)
+{
+    return clamp(x, constant(minVal), constant(maxVal));
+}
+
+// lerp(a, b, t) -> a + (b - a) * t
+inline Expr lerp(Expr a, Expr b, Expr t)
+{
+    return a + (b - a) * t;
+}
+
+// leakyRelu(x, alpha) -> max(x, x * alpha)
+inline Expr leakyRelu(Expr x, float alpha)
+{
+    return max(x, x * alpha);
+}
+
 // =========================================================================
 // 6. Kernel Wrapper
 // =========================================================================
@@ -291,7 +430,7 @@ class ElementwiseKernel : public RefObject
     Expr root;
     InferencingContext* context;
 
-    List<ExprNode*> linearNodes;
+    ProgramNode program;
 
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);

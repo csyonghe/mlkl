@@ -34,6 +34,51 @@ String getSlangBinaryOpName(BinaryOp op)
         return "Mul";
     case BinaryOp::Div:
         return "Div";
+    case BinaryOp::Min:
+        return "Min";
+    case BinaryOp::Max:
+        return "Max";
+    case BinaryOp::Pow:
+        return "Pow";
+    default:
+        return "Unknown";
+    }
+}
+
+String getSlangUnaryOpName(UnaryOp op)
+{
+    switch (op)
+    {
+    case UnaryOp::Neg:
+        return "Neg";
+    case UnaryOp::Exp:
+        return "Exp";
+    case UnaryOp::Log:
+        return "Log";
+    case UnaryOp::Sin:
+        return "Sin";
+    case UnaryOp::Cos:
+        return "Cos";
+    case UnaryOp::Abs:
+        return "Abs";
+    case UnaryOp::Sqrt:
+        return "Sqrt";
+    case UnaryOp::Relu:
+        return "Relu";
+    case UnaryOp::Sigmoid:
+        return "Sigmoid";
+    case UnaryOp::Tanh:
+        return "Tanh";
+    case UnaryOp::Silu:
+        return "Silu";
+    case UnaryOp::Gelu:
+        return "Gelu";
+    case UnaryOp::Floor:
+        return "Floor";
+    case UnaryOp::Ceil:
+        return "Ceil";
+    case UnaryOp::Rsqrt:
+        return "Rsqrt";
     default:
         return "Unknown";
     }
@@ -64,6 +109,25 @@ bool Shape::isCompatibleWith(const Shape& other) const
         return true;
     return *this == other;
 }
+
+List<int> computeDenseStrides(const Shape& shape)
+{
+    List<int> strides;
+    for (int i = 0; i < shape.getRank(); i++)
+        strides.add(0);
+
+    int s = 1;
+    for (int i = shape.getRank() - 1; i >= 0; i--)
+    {
+        strides[i] = s;
+        s *= shape[i];
+    }
+    return strides;
+}
+
+String genExprType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
+String genDefType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
+ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);
 
 // =========================================================================
 // Node Implementations
@@ -123,7 +187,7 @@ BroadcastNode::BroadcastNode(Expr inner, Expr targetShape)
 
 String BroadcastNode::getSlangTypeName() const
 {
-    return "Broadcast<" + inner.node->getSlangTypeName() + ">";
+    return "Broadcast<" + innerProgram->getSlangTypeName() + ">";
 }
 
 Shape BroadcastNode::resolveShape(const EvalContext& ctx) const
@@ -164,8 +228,8 @@ Shape BroadcastNode::resolveShape(const EvalContext& ctx) const
 
 void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
-    // Use pack inlined to deeply inline the inner nodes.
-    inner.node->packInlined(writer, ctx);
+    // Pack parameters for the inner program first.
+    innerProgram->pack(writer, ctx);
 
     // We compute metadata at runtime based on shapes
     Shape innerShape = inner.node->resolveShape(ctx);
@@ -218,6 +282,111 @@ void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     writer.writeBytes(strideArr, sizeof(strideArr));
 }
 
+// --- ConcatNode ---
+
+ConcatNode::ConcatNode(Expr left, Expr right, Expr axis)
+    : left(left), right(right), axis(axis)
+{
+}
+
+int ConcatNode::getAxis(const EvalContext& ctx) const
+{
+    auto axisInput = ctx.inputs.tryGetValue(axis.node);
+    if (!axisInput)
+        throw std::runtime_error("axis of concat not provided");
+    if (axisInput->buffer)
+        throw std::runtime_error("axis of concat must be static const");
+    return (int)axisInput->scalarValue;
+}
+
+String ConcatNode::getSlangTypeName() const
+{
+    return StringBuilder() << "Concat<" << leftProgram->getSlangTypeName() << ","
+                           << rightProgram->getSlangTypeName() << ">";
+}
+
+Shape ConcatNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape l = left.node->resolveShape(ctx);
+    Shape r = right.node->resolveShape(ctx);
+
+    if (l.getRank() != r.getRank())
+        throw std::runtime_error("Concat: Rank mismatch");
+
+    // Handle negative axis
+    int trueAxis = getAxis(ctx);
+    if (trueAxis < 0)
+        trueAxis += l.getRank();
+
+    if (trueAxis < 0 || trueAxis >= l.getRank())
+        throw std::runtime_error("Concat: Invalid axis");
+
+    List<int> dims;
+    for (int i = 0; i < l.getRank(); i++)
+    {
+        if (i == trueAxis)
+        {
+            dims.add(l[i] + r[i]);
+        }
+        else
+        {
+            if (l[i] != r[i])
+                throw std::runtime_error("Concat: Dimension mismatch off-axis");
+            dims.add(l[i]);
+        }
+    }
+    return Shape(dims.getArrayView());
+}
+
+void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // 1. Pack Inner Programs
+    leftProgram->pack(writer, ctx);
+    rightProgram->pack(writer, ctx);
+
+    // 2. Resolve Shapes
+    Shape lShape = left.node->resolveShape(ctx);
+    Shape rShape = right.node->resolveShape(ctx);
+    Shape outShape = resolveShape(ctx); // Output shape
+
+    int trueAxis = getAxis(ctx);
+
+    if (trueAxis < 0)
+        trueAxis += lShape.getRank();
+
+    // 3. Compute Metadata
+    List<int> lStrides = computeDenseStrides(lShape);
+    List<int> rStrides = computeDenseStrides(rShape);
+
+    // 4. Pack Scalars (Axis, Split, Rank)
+    // Axis
+    writer.write((uint32_t)trueAxis);
+    // Split Point (Size of Left at Axis)
+    writer.write((uint32_t)lShape[trueAxis]);
+    // Rank
+    writer.write((uint32_t)outShape.getRank());
+
+    // 5. Pack Arrays (OutputDims, LeftStrides, RightStrides)
+
+    // Output Dims
+    uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    for (int i = 0; i < outShape.getRank(); ++i)
+        outDimsArr[i] = (uint32_t)outShape[i];
+    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
+
+    // Left Strides
+    uint32_t lStridesArr[8] = {0};
+    for (int i = 0; i < lStrides.getCount(); ++i)
+        lStridesArr[i] = (uint32_t)lStrides[i];
+    writer.writeBytes(lStridesArr, sizeof(lStridesArr));
+
+    // Right Strides
+    uint32_t rStridesArr[8] = {0};
+    for (int i = 0; i < rStrides.getCount(); ++i)
+        rStridesArr[i] = (uint32_t)rStrides[i];
+    writer.writeBytes(rStridesArr, sizeof(rStridesArr));
+}
+
 // --- BinaryNode ---
 BinaryNode::BinaryNode(Expr l, Expr r, BinaryOp op)
     : left(l), right(r), op(op)
@@ -248,10 +417,61 @@ void BinaryNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     // Operands are Reg<ID>, size 0. Nothing to pack!
 }
 
-void BinaryNode::packInlined(ParameterWriter& writer, const EvalContext& ctx) const
+// --- UnaryNode ---
+
+String UnaryNode::getSlangTypeName() const
 {
-    left.node->packInlined(writer, ctx);
-    right.node->packInlined(writer, ctx);
+    return getSlangUnaryOpName(op) + "<" + inner.node->getSlangTypeName() + ">";
+}
+
+Shape UnaryNode::resolveShape(const EvalContext& ctx) const
+{
+    // Shape passes through Unary ops unchanged
+    return inner.node->resolveShape(ctx);
+}
+
+// --- ProgramNode ---
+
+String ProgramNode::getSlangTypeName() const
+{
+    StringBuilder typeBuilder;
+    typeBuilder << "Program<" << resultRegID;
+
+    // Append Statements
+    for (ExprNode* node : linearNodes)
+    {
+        auto id = nodeToRegID.tryGetValue(node);
+        if (!id)
+            throw std::runtime_error("ProgramNode: Node missing in nodeToRegID map");
+        String defType = genDefType(node, nodeToRegID);
+        typeBuilder << ", Eval<" << *id << ", " << defType << ">";
+    }
+
+    typeBuilder << ">";
+    return typeBuilder.toString();
+}
+
+Shape ProgramNode::resolveShape(const EvalContext& ctx) const
+{
+    if (linearNodes.getCount() == 0)
+        return Shape();
+
+    Dictionary<ExprNode*, Shape> shapes;
+    EvalContext localCtx = ctx;
+    localCtx.additionalShapeMap = &shapes;
+    for (ExprNode* node : linearNodes)
+    {
+        shapes[node] = node->resolveShape(localCtx);
+    }
+    return shapes[linearNodes.getLast()];
+}
+
+void ProgramNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    for (ExprNode* node : linearNodes)
+    {
+        node->pack(writer, ctx);
+    }
 }
 
 // [Factories]
@@ -271,7 +491,84 @@ Expr broadcast(Expr inner, Expr shapeOf)
 {
     return Expr(new BroadcastNode(inner, shapeOf));
 }
+Expr concat(Expr left, Expr right, Expr axis)
+{
+    return Expr(new ConcatNode(left, right, axis));
+}
+Expr min(Expr l, Expr r)
+{
+    return Expr(new BinaryNode(l, r, BinaryOp::Min));
+}
+Expr max(Expr l, Expr r)
+{
+    return Expr(new BinaryNode(l, r, BinaryOp::Max));
+}
 
+Expr neg(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Neg));
+}
+Expr exp(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Exp));
+}
+Expr log(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Log));
+}
+Expr sin(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Sin));
+}
+Expr cos(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Cos));
+}
+Expr abs(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Abs));
+}
+Expr sqrt(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Sqrt));
+}
+
+Expr relu(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Relu));
+}
+Expr sigmoid(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Sigmoid));
+}
+Expr tanh(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Tanh));
+}
+Expr silu(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Silu));
+}
+Expr gelu(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Gelu));
+}
+Expr pow(Expr base, Expr exponent)
+{
+    return Expr(new BinaryNode(base, exponent, BinaryOp::Pow));
+}
+Expr floor(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Floor));
+}
+Expr ceil(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Ceil));
+}
+Expr rsqrt(Expr i)
+{
+    return Expr(new UnaryNode(i, UnaryOp::Rsqrt));
+}
 Expr operator+(Expr l, Expr r)
 {
     return Expr(new BinaryNode(l, r, BinaryOp::Add));
@@ -296,10 +593,10 @@ Expr operator/(Expr l, Expr r)
 
 struct SSAGenContext
 {
-    std::unordered_map<ExprNode*, int> regIDs;
+    Dictionary<ExprNode*, int> regIDs;
     List<ExprNode*> topoOrder;
     std::set<ExprNode*> visited;
-    int regCounter = 0;
+    int* globalRegCounter = nullptr;
 };
 
 void topoVisit(ExprNode* node, SSAGenContext& ctx)
@@ -312,50 +609,71 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
         topoVisit(b->left.node, ctx);
         topoVisit(b->right.node, ctx);
     }
+    else if (auto u = dynamic_cast<UnaryNode*>(node))
+    {
+        topoVisit(u->inner.node, ctx);
+    }
     else if (auto br = dynamic_cast<BroadcastNode*>(node))
     {
-        // Stop recursion here to inline inner nodes.
+        // Local SSA generation for the inner graph
+        RefPtr<ProgramNode> innerProgram = new ProgramNode();
+        *innerProgram = compileExprToProgram(br->inner, ctx.globalRegCounter);
+        br->innerProgram = innerProgram;
     }
+    else if (auto c = dynamic_cast<ConcatNode*>(node))
+    {
+        // Concat creates TWO inner programs for conditional execution
+        c->leftProgram = new ProgramNode();
+        *c->leftProgram = compileExprToProgram(c->left, ctx.globalRegCounter);
 
+        c->rightProgram = new ProgramNode();
+        *c->rightProgram = compileExprToProgram(c->right, ctx.globalRegCounter);
+    }
     ctx.visited.insert(node);
     ctx.topoOrder.add(node);
-    ctx.regIDs[node] = ctx.regCounter++;
+    ctx.regIDs[node] = (*ctx.globalRegCounter)++;
 }
 
-String genExprType(ExprNode* node, SSAGenContext& ctx);
+ProgramNode compileExprToProgram(Expr root, int* globalRegCounter)
+{
+    SSAGenContext ssaCtx;
+    ssaCtx.globalRegCounter = globalRegCounter;
+    topoVisit(root.node, ssaCtx);
 
-String genDefType(ExprNode* node, SSAGenContext& ctx)
+    int resultReg = ssaCtx.regIDs[root.node];
+
+    ProgramNode program;
+    program.linearNodes = _Move(ssaCtx.topoOrder);
+    program.resultRegID = ssaCtx.regIDs[root.node];
+    program.nodeToRegID = _Move(ssaCtx.regIDs);
+    return _Move(program);
+}
+
+String genDefType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId)
 {
     if (auto b = dynamic_cast<BinaryNode*>(node))
     {
-        return getSlangBinaryOpName(b->op) + "<" + genExprType(b->left.node, ctx) + "," +
-               genExprType(b->right.node, ctx) + ">";
+        return getSlangBinaryOpName(b->op) + "<" + genExprType(b->left.node, mapNodeToId) + "," +
+               genExprType(b->right.node, mapNodeToId) + ">";
     }
-    else if (auto br = dynamic_cast<BroadcastNode*>(node))
+    else if (auto u = dynamic_cast<UnaryNode*>(node))
     {
-        return "Broadcast<" + genExprType(br->inner.node, ctx) + ">";
+        return getSlangUnaryOpName(u->op) + "<" + genExprType(u->inner.node, mapNodeToId) + ">";
     }
-    else if (dynamic_cast<BufferNode*>(node))
-        return "BufferView";
-    else if (dynamic_cast<ConstantNode*>(node))
-        return "ConstantView";
-    else if (dynamic_cast<UniformConstantNode*>(node))
-        return "ConstantView";
-    return "Error";
+    return node->getSlangTypeName();
 }
 
-String genExprType(ExprNode* node, SSAGenContext& ctx)
+String genExprType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId)
 {
-    auto it = ctx.regIDs.find(node);
-    if (it != ctx.regIDs.end())
+    if (auto it = mapNodeToId.tryGetValue(node))
     {
         // Visited node -> Use Register
-        std::stringstream ss;
-        ss << "Reg<" << it->second << ">";
-        return ss.str().c_str();
+        StringBuilder sb;
+        sb << "Reg<" << *it << ">";
+        return sb.produceString();
     }
     // CHANGE: Not visited (child of Broadcast) -> Generate full definition (Inline)
-    return genDefType(node, ctx);
+    return genDefType(node, mapNodeToId);
 }
 
 // =========================================================================
@@ -365,28 +683,10 @@ String genExprType(ExprNode* node, SSAGenContext& ctx)
 ElementwiseKernel::ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
     : context(ctx), root(rootNode)
 {
-    // 1. Traverse and Generate Signature
-    SSAGenContext ssaCtx;
-    topoVisit(root.node, ssaCtx);
+    int globalRegCounter = 0;
+    program = compileExprToProgram(root, &globalRegCounter);
 
-    int resultReg = ssaCtx.regIDs[root.node];
-
-    StringBuilder typeBuilder;
-    typeBuilder << "Program<" << resultReg;
-
-    // Append Statements
-    for (ExprNode* node : ssaCtx.topoOrder)
-    {
-        int id = ssaCtx.regIDs[node];
-        String defType = genDefType(node, ssaCtx);
-        typeBuilder << ", Eval<" << id << ", " << defType << ">";
-
-        linearNodes.add(node);
-    }
-
-    typeBuilder << ">";
-
-    String finalProgramType = typeBuilder.produceString();
+    String finalProgramType = program.getSlangTypeName();
 
     String typeArgs[] = {finalProgramType};
     pipeline = ctx->createComputePipeline("materialize", makeArrayView(typeArgs));
@@ -411,11 +711,7 @@ ComPtr<rhi::IBuffer> ElementwiseKernel::eval(
     writer.write(outBuf->getDeviceAddress());
     writer.write((uint32_t)count);
 
-    for (ExprNode* node : linearNodes)
-    {
-        // pack() for BroadcastNode also validates dimensions implicitly
-        node->pack(writer, ctx);
-    }
+    program.pack(writer, ctx);
     writer.finish();
 
     uint32_t groups = (uint32_t)((count + 255) / 256);

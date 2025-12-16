@@ -32,9 +32,9 @@ struct SimpleUNetProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
+        SLANG_RETURN_ON_FAIL(testBottleneckConcat());
 #if 0
         SLANG_RETURN_ON_FAIL(testUp0());
-        SLANG_RETURN_ON_FAIL(testBottleneckConcat());
         SLANG_RETURN_ON_FAIL(testDown0());
         SLANG_RETURN_ON_FAIL(testBroadcastAdd());
         SLANG_RETURN_ON_FAIL(testDown0Conv1());
@@ -477,15 +477,14 @@ struct SimpleUNetProgram : public TestBase
         auto expected = loadRawFloats("debug_dump/up0_concat_output.bin");
 
         // 3. Execute Concat (Axis 2 = Channels)
-        ConcatKernel concat(gInferencingCtx);
+        ConcatKernel concat(gInferencingCtx, 2);
         auto task = gInferencingCtx->createTask();
 
         // In this specific model, down3 outputs [2, 2, 1024] (assuming 32x32 -> 2x2)
         // Concatenating two of them -> [2, 2, 2048]
-        int shape[] = {2, 2, 1024};
-        auto result =
-            concat
-                .queueExecute(task, buffer, makeArrayView(shape), buffer, makeArrayView(shape), 2);
+        Shape shapes[] = {{2, 2, 1024}, {2, 2, 1024}};
+        rhi::IBuffer* buffers[] = {buffer, buffer};
+        auto result = concat.queueExecute(task, makeArrayView(buffers), makeArrayView(shapes), 2);
 
         task.execute();
         TEST_CHECK("testBottleneckConcat", checkOutput(result, expected));
