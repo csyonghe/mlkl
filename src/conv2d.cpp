@@ -141,6 +141,7 @@ struct Conv2DKernelParams
     int outputImageWidth;
     int outputImageHeight;
     int padding;
+    int batchSize;
 };
 
 ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
@@ -148,17 +149,24 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
     rhi::IBuffer* inputImage,
     int inputWidth,
     int inputHeight,
-    int padding)
+    int padding,
+    int batchSize)
 {
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
-    String resultBufferName =
-        name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
+
+    // Naming for debug
+    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" +
+                              String(outChannels) + "_B" + String(batchSize);
+
+    // Allocation includes BatchSize
     auto outputBuffer = task.allocateBuffer(
         resultBufferName.getBuffer(),
-        outputWidth * outputHeight * outChannels * sizeof(float));
-    auto expectedInputSize = inputWidth * inputHeight * inChannels * sizeof(float);
+        batchSize * outputWidth * outputHeight * outChannels * sizeof(float));
+
+    auto expectedInputSize = batchSize * inputWidth * inputHeight * inChannels * sizeof(float);
     SLANG_ASSERT(inputImage->getDesc().size == expectedInputSize);
+
     Conv2DKernelParams params = {};
     params.inputImage = inputImage->getDeviceAddress();
     params.outputImage = outputBuffer->getDeviceAddress();
@@ -167,39 +175,48 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
     params.outputImageWidth = outputWidth;
     params.outputImageHeight = outputHeight;
     params.padding = padding;
+    params.batchSize = batchSize; // Set Batch Size
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
 
     int totalOutputValues = outputWidth * outputHeight * outChannels;
-
-    // Depending on input/output shape, we will dispatch different kernels for better performance.
+    // For dispatch calculations, we multiply total work by batch size where linear indexing is
+    // used.
 
     if (outputWidth * outputHeight <= 16 && inChannels >= 32)
     {
-        // 1. How many output values can one block handle?
-        // Block Size (256) / Wave Size (32) = 8
-        int valuesPerBlock = 256 / 32;
+        // FlatWaveReduce
+        // Thread Group (256) handles a contiguous chunk of (Batch * Pixel * Channel)
+        // Global Linear Index covers everything.
+        int totalWorkItems = totalOutputValues * batchSize;
 
-        // 2. Dispatch enough blocks to cover all values
-        int numGroups = (totalOutputValues + valuesPerBlock - 1) / valuesPerBlock;
+        int valuesPerBlock = 256 / 32; // Each warp takes 1 item
+        int numGroups = (totalWorkItems + valuesPerBlock - 1) / valuesPerBlock;
 
         params.weights = weightsTransposedBuffer->getDeviceAddress();
         task.dispatchKernel(flatWaveReducePipeline, numGroups, 1, 1, params);
     }
     else if (outputWidth * outputHeight <= 1024)
     {
-        int numGroups = (totalOutputValues + 255) / 256;
+        // Flat Kernel
+        int totalWorkItems = totalOutputValues * batchSize;
+        int numGroups = (totalWorkItems + 255) / 256;
         task.dispatchKernel(flatPipeline, numGroups, 1, 1, params);
     }
     else
     {
+        // Tiled Kernel
         static const int batchOutChannels = 32;
-        int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
+        int zBlocksPerImage = (outChannels + batchOutChannels - 1) / batchOutChannels;
+
+        // Z Dimension now handles (Channels * Batches)
+        int totalZBlocks = zBlocksPerImage * batchSize;
+
         task.dispatchKernel(
             tilePipeline,
             (outputWidth + tileSize - 1) / tileSize,
             (outputHeight + tileSize - 1) / tileSize,
-            zBlocks,
+            totalZBlocks,
             params);
     }
     return ComPtr<rhi::IBuffer>(outputBuffer);

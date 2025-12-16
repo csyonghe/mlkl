@@ -14,7 +14,10 @@ void DDIMStepKernel::forward(
     rhi::IBuffer* outputImage,
     float alphaBar_t,
     float alphaBar_prev,
-    uint32_t totalPixels)
+    int width,
+    int height,
+    int channels,
+    int batchSize)
 {
     struct DDIMParams
     {
@@ -31,7 +34,9 @@ void DDIMStepKernel::forward(
     params.outputImage = outputImage->getDeviceAddress();
     params.alphaBar_t = alphaBar_t;
     params.alphaBar_prev = alphaBar_prev;
-    params.totalElements = totalPixels;
 
-    task.dispatchKernel(pipeline, (totalPixels + 255) / 256, 1, 1, params);
+    // Calculate total elements properly
+    params.totalElements = width * height * channels * batchSize;
+
+    task.dispatchKernel(pipeline, (params.totalElements + 255) / 256, 1, 1, params);
 }

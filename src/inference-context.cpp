@@ -17,6 +17,18 @@ ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(
     const char* entryPointName,
     Slang::ConstArrayView<String> specArgs)
 {
+    DigestBuilder<MD5> digestBuilder;
+    digestBuilder.append(UnownedStringSlice(entryPointName));
+    for (auto arg : specArgs)
+    {
+        digestBuilder.append(arg);
+    }
+    auto digest = digestBuilder.finalize();
+    ComPtr<rhi::IComputePipeline> pipeline;
+    if (pipelineCache.tryGetValue(digest, pipeline))
+    {
+        return pipeline;
+    }
     ComPtr<slang::IEntryPoint> entryPoint;
     slangModule->findEntryPointByName(entryPointName, entryPoint.writeRef());
     if (!entryPoint)
@@ -61,7 +73,9 @@ ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(
     rhi::ComputePipelineDesc desc = {};
     desc.program = shaderProgram;
     desc.label = entryPointName;
-    return device->createComputePipeline(desc);
+    pipeline = device->createComputePipeline(desc);
+    pipelineCache.add(digest, pipeline);
+    return pipeline;
 }
 
 void InferencingContext::diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
@@ -148,7 +162,7 @@ void InferencingTask::dispatchKernel(
     {
         reportError(
             "Kernel parameter size mismatch: expected %zu, got %zu\n",
-            paramsTypeLayout->getSize(),
+            paramsTypeLayout->getStride(),
             paramDataSize);
         return;
     }

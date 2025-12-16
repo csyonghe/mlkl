@@ -176,7 +176,9 @@ struct SimpleUNetProgram : public TestBase
                 imageB,
                 alphaBar_t,
                 alphaBar_prev,
-                imageSize * imageSize * outputChannelCount);
+                imageSize,
+                imageSize,
+                outputChannelCount);
             outputImage = imageB;
             Swap(imageA, imageB);
         }

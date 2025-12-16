@@ -2,42 +2,50 @@ implementing mlkl;
 
 struct LinearLayerParams
 {
-    // Raw Pointers (mapped to Buffer Device Addresses in CUDA/Vulkan)
-    float* weights;      // Layout: [inDim, outDim] (Transposed!)
-    float* biases; 
-    float* inputVector; 
-    float* outputVector; 
-    uint inDim;   // Input Features
-    uint outDim;  // Output Features
+    // Raw Pointers (mapped to Buffer Device Addresses)
+    float* weights;      // [inDim, outDim] (Transposed layout for coalescing)
+    float* biases;       // [outDim]
+    float* inputVector;  // [batchSize, inDim]
+    float* outputVector; // [batchSize, outDim]
+    uint inDim;
+    uint outDim;
+    uint batchSize;
 };
 
+// Dispatch: X = OutputDims, Y = BatchSize
 [numthreads(tileSize, 1, 1)]
 void linearLayer<int tileSize, TActivation : IActivation>(
-    ConstantBuffer<LinearLayerParams> params, // Params passed via Constant Memory
+    ConstantBuffer<LinearLayerParams> params,
     uint3 tid : SV_DispatchThreadID)
 {
     uint outChannel = tid.x;
+    uint batchIdx = tid.y;
 
     // Bounds Check
-    if (outChannel >= params.outDim) return;
+    if (outChannel >= params.outDim || batchIdx >= params.batchSize) return;
+
+    // Calculate Batch Offsets
+    // Pointers in Slang support arithmetic for offsets
+    // inputVector is flattened [Batch, InDim]
+    // outputVector is flattened [Batch, OutDim]
+    
+    // We point to the start of the vector for this specific batch item
+    float* batchInput = params.inputVector + (batchIdx * params.inDim);
+    float* batchOutput = params.outputVector + (batchIdx * params.outDim);
 
     // 1. Initialize with Bias
-    // Access pointer directly from the struct
     float sum = params.biases[outChannel];
 
     // 2. Perform Dot Product
-    // We assume weights are [In, Out] for coalescing.
+    // Iterate over input dimension
     for (uint i = 0; i < params.inDim; i++)
     {
         uint wIndex = i * params.outDim + outChannel;
-        
-        // Pointer arithmetic access
-        float inVal = params.inputVector[i];
+        float inVal = batchInput[i];
         float w = params.weights[wIndex];
-
         sum += inVal * w;
     }
 
     // 3. Apply Generic Activation
-    params.outputVector[outChannel] = TActivation.apply(sum);
+    batchOutput[outChannel] = TActivation.apply(sum);
 }

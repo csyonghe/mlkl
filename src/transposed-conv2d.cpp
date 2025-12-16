@@ -88,6 +88,7 @@ struct TransposedConv2DKernelParams
     int outputImageHeight;
     int stride;
     int padding;
+    int batchSize;
 };
 
 ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
@@ -95,15 +96,20 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
     rhi::IBuffer* inputImage,
     int inputWidth,
     int inputHeight,
-    int padding)
+    int padding,
+    int batchSize)
 {
     int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
     int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
-    String resultBufferName =
-        name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" + String(outChannels);
+
+    // Updated name for debug clarity
+    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" +
+                              String(outChannels) + "_B" + String(batchSize);
+
+    // Allocate for ALL batches
     auto outputBuffer = task.allocateBuffer(
         resultBufferName.getBuffer(),
-        outputWidth * outputHeight * outChannels * sizeof(float));
+        batchSize * outputWidth * outputHeight * outChannels * sizeof(float));
 
     TransposedConv2DKernelParams params = {};
     params.inputImage = inputImage->getDeviceAddress();
@@ -114,13 +120,17 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
     params.outputImageHeight = outputHeight;
     params.stride = stride;
     params.padding = padding;
+    params.batchSize = batchSize; // Set Batch Size
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
 
     if (outputWidth * outputHeight <= 1024)
     {
-        // Dispatch 1D Grid
-        int totalElements = outputWidth * outputHeight * outChannels;
+        // Dispatch 1D Grid (Flat Kernel)
+        // Global Index covers Batch * H * W * C
+        int totalElementsPerImage = outputWidth * outputHeight * outChannels;
+        int totalElements = totalElementsPerImage * batchSize;
+
         int groupSize = 256;
         int numGroups = (totalElements + groupSize - 1) / groupSize;
 
@@ -128,13 +138,17 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
     }
     else
     {
+        // Dispatch 3D Grid (Tiled Kernel)
+        // Z Dimension covers (ChannelGroups * Batch)
         static const int batchOutChannels = 32;
-        int zBlocks = (outChannels + batchOutChannels - 1) / batchOutChannels;
+        int zBlocksPerImage = (outChannels + batchOutChannels - 1) / batchOutChannels;
+        int totalZBlocks = zBlocksPerImage * batchSize;
+
         task.dispatchKernel(
             pipeline,
             (outputWidth + tileSize - 1) / tileSize,
             (outputHeight + tileSize - 1) / tileSize,
-            zBlocks,
+            totalZBlocks,
             params);
     }
     return ComPtr<rhi::IBuffer>(outputBuffer);

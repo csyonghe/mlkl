@@ -9,6 +9,7 @@ private:
     ComPtr<rhi::IComputePipeline> pipeline;
     ComPtr<rhi::IComputePipeline> flatPipeline;
     InferencingContext* context;
+
 public:
     int tileSize;
     int kernelSize;
@@ -17,10 +18,28 @@ public:
     int stride;
     String name;
 
-    TransposedConv2DKernel(InferencingContext* context, int tileSize, int kernelSize, int stride, int inChannels, int outChannels, ActivationFunction activation = ActivationFunction::None, String name = "transConv2d");
+    TransposedConv2DKernel(
+        InferencingContext* context,
+        int tileSize,
+        int kernelSize,
+        int stride,
+        int inChannels,
+        int outChannels,
+        ActivationFunction activation = ActivationFunction::None,
+        String name = "transConv2d");
 
     SlangResult loadParams(TorchParamReader& reader);
-    SlangResult loadParams(int kernelSize, int outputChannelCount, float* weightsData, float* biasesData);
+    SlangResult loadParams(
+        int kernelSize,
+        int outputChannelCount,
+        float* weightsData,
+        float* biasesData);
 
-    ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, rhi::IBuffer* inputImage, int inputWidth, int inputHeight, int padding);
+    ComPtr<rhi::IBuffer> queueExecute(
+        InferencingTask& task,
+        rhi::IBuffer* inputImage,
+        int inputWidth,
+        int inputHeight,
+        int padding,
+        int batchSize = 1);
 };

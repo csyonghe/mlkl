@@ -31,11 +31,17 @@ struct TimeEmbeddingKernelParams
     uint32_t timeStep;
     uint32_t embeddingDim; // The size of the sin/cos vector (InChannels)
     float maxPeriod;       // Default 10000.0
+    uint32_t batchSize;
 };
 
-ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uint32_t timeStep)
+ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(
+    InferencingTask& task,
+    uint32_t timeStep,
+    int batchSize)
 {
-    auto outputBuffer = task.allocateBuffer("time-embed", outputChannels * sizeof(float));
+    // Allocate [Batch, OutputDim]
+    auto outputBuffer =
+        task.allocateBuffer("time-embed", batchSize * outputChannels * sizeof(float));
 
     TimeEmbeddingKernelParams params = {};
     params.output = outputBuffer->getDeviceAddress();
@@ -44,7 +50,12 @@ ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(InferencingTask& task, uin
     params.embeddingDim = outputChannels;
     params.maxPeriod = 10000.0f;
     params.timeStep = timeStep;
-    task.dispatchKernel(pipeline, 1, 1, 1, params);
+    params.batchSize = batchSize;
+
+    // Dispatch: X=Channels, Y=Batch
+    // Group size is 32 in X.
+    uint32_t threadsX = (outputChannels + 31) / 32;
+    task.dispatchKernel(pipeline, threadsX, batchSize, 1, params);
 
     return ComPtr<rhi::IBuffer>(outputBuffer);
 }

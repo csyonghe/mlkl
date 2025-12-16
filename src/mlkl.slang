@@ -7,3 +7,4 @@ __include convolution;
 __include concat;
 __include broadcast_add;
 __include ddim_step;
+__include elementwise;

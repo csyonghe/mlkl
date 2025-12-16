@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/slang-basic.h"
+#include "core/slang-crypto.h"
 #include "external/slang-rhi/include/slang-rhi.h"
 #include "slang-com-ptr.h"
 #include "slang.h"
@@ -22,6 +23,7 @@ public:
     List<ComPtr<rhi::IBuffer>> buffers;
 
     ComPtr<rhi::IShaderObject> createKernelParamObject(slang::TypeLayoutReflection* typeLayout);
+
 public:
     InferencingTask(ComPtr<rhi::ICommandEncoder>&& encoder, InferencingContext* context)
         : encoder(_Move(encoder)), context(context)
@@ -64,11 +66,15 @@ private:
     ComPtr<rhi::IDevice> device;
     ComPtr<slang::ISession> slangSession;
     ComPtr<slang::IModule> slangModule;
+    Dictionary<MD5::Digest, ComPtr<rhi::IComputePipeline>> pipelineCache;
+
 public:
     InferencingContext(rhi::IDevice* device);
-    ComPtr<rhi::IComputePipeline> createComputePipeline(const char* entryPointName, Slang::ConstArrayView<String> specArgs);
+    ComPtr<rhi::IComputePipeline> createComputePipeline(
+        const char* entryPointName,
+        Slang::ConstArrayView<String> specArgs);
     void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob);
-    
+
     inline rhi::IDevice* getDevice() const { return device; }
 
     InferencingTask createTask();
@@ -82,7 +88,7 @@ public:
     }
 };
 
-template<typename...TArgs>
+template<typename... TArgs>
 inline void logInfo(const char* format, TArgs... args)
 {
     printf(format, std::forward<TArgs>(args)...);
