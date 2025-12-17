@@ -1,26 +1,25 @@
 implementing mlkl;
 
-struct BatchGemmParams
+struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>
 {
-    float* A;
-    float* B;
-    float* C;
+    TA A;
+    TB B;
+    TC C;
+    TOut FOut;
     
-    uint M; // Rows of Output C
-    uint N; // Cols of Output C
-    uint K; // Inner dimension
+    uint M; 
+    uint N; 
+    uint K; 
     
     float alpha;
     float beta;
-
-    uint transposeA; // 1 if true
-    uint transposeB; // 1 if true
+    float* output;
 };
 
-// Dispatch: x=N, y=M, z=BatchSize
+// Dispatch: x=N/16, y=M/16, z=BatchSize
 [numthreads(16, 16, 1)]
-void batchGemm(
-    ConstantBuffer<BatchGemmParams, CDataLayout> params,
+void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>(
+    ConstantBuffer<BatchGemmParams<TA, TB, TC, TOut>, ScalarDataLayout> params,
     uint3 id : SV_DispatchThreadID)
 {
     uint col = id.x; // n
@@ -29,44 +28,44 @@ void batchGemm(
 
     if (row >= params.M || col >= params.N) return;
 
-    // Calculate strides based on dimensions
-    // A: [Batch, M, K] normally. If TransposeA: [Batch, K, M]
-    // B: [Batch, K, N] normally. If TransposeB: [Batch, N, K]
-    // C: [Batch, M, N]
+    // Strides for logical dimensions
+    // A: [Batch, M, K] -> Stride K
+    // B: [Batch, K, N] -> Stride N
+    // C: [Batch, M, N] -> Stride N
     
-    // Total elements per matrix in the batch
-    uint sizeA = params.M * params.K; 
-    uint sizeB = params.K * params.N;
-    uint sizeC = params.M * params.N;
-
-    // Pointer arithmetic
-    float* matA = params.A + batchIdx * sizeA;
-    float* matB = params.B + batchIdx * sizeB;
-    float* matC = params.C + batchIdx * sizeC;
+    // Batch Offsets in Logical Space
+    uint batchOffsetA = batchIdx * params.M * params.K;
+    uint batchOffsetB = batchIdx * params.K * params.N;
+    uint batchOffsetC = batchIdx * params.M * params.N;
 
     float sum = 0.0f;
+    Input emptyInput = {}; 
+    emptyInput.value = 0.0f;
+
     for (uint k = 0; k < params.K; k++)
     {
-        // Resolve Index A
-        // Normal: A[row, k] -> row * K + k
-        // Transposed: A[k, row] -> k * M + row
-        uint idxA = params.transposeA != 0 ? (k * params.M + row) : (row * params.K + k);
+        // Resolve Linear Index for A [row, k]
+        uint idxA = batchOffsetA + row * params.K + k;
+        float valA = params.A.eval(idxA, emptyInput);
+
+        // Resolve Linear Index for B [k, col]
+        uint idxB = batchOffsetB + k * params.N + col;
+        float valB = params.B.eval(idxB, emptyInput);
         
-        // Resolve Index B
-        // Normal: B[k, col] -> k * N + col
-        // Transposed: B[col, k] -> col * K + k
-        uint idxB = params.transposeB != 0 ? (col * params.K + k) : (k * params.N + col);
-        
-        sum += matA[idxA] * matB[idxB];
+        sum += valA * valB;
     }
 
-    uint idxC = row * params.N + col;
-    if (params.beta != 0.0f)
-    {
-        matC[idxC] = params.alpha * sum + params.beta * matC[idxC];
-    }
-    else
-    {
-        matC[idxC] = params.alpha * sum;
-    }
+    uint idxC = batchOffsetC + row * params.N + col;
+    
+    // Evaluate C (Bias/Accumulator)
+    float valC = params.C.eval(idxC, emptyInput);
+
+    float res = params.alpha * sum + params.beta * valC;
+
+    // Apply Output Epilogue (Activation, etc.)
+    Input outInput = {};
+    outInput.value = res;
+    float finalVal = params.FOut.eval(idxC, outInput);
+
+    params.output[idxC] = finalVal;
 }

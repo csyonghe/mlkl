@@ -25,6 +25,7 @@ SlangResult TorchParamReader::readParams(List<float>& result, int count)
 SlangResult TorchParamReader::readLinearLayer(
     int inFeatures,
     int outFeatures,
+    bool hasBias,
     LinearLayerParams& params)
 {
     params.inputFeatures = inFeatures;
@@ -33,7 +34,8 @@ SlangResult TorchParamReader::readLinearLayer(
     // Read weights
     SLANG_RETURN_ON_FAIL(readParams(params.weights, weightCount));
     // Read biases
-    SLANG_RETURN_ON_FAIL(readParams(params.biases, outFeatures));
+    if (hasBias)
+        SLANG_RETURN_ON_FAIL(readParams(params.biases, outFeatures));
     return SLANG_OK;
 }
 

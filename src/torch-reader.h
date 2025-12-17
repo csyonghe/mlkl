@@ -3,9 +3,9 @@
 #include "core/slang-basic.h"
 #include "core/slang-io.h"
 #include "example-base/example-base.h"
-#include "slang-rhi/shader-cursor.h"
 #include "external/slang-rhi/include/slang-rhi.h"
 #include "slang-com-ptr.h"
+#include "slang-rhi/shader-cursor.h"
 #include "slang.h"
 
 #include <string>
@@ -17,7 +17,7 @@ struct LinearLayerParams
     int inputFeatures;
     int outputFeatures;
     List<float> weights; // layout: outputFeatures x inputFeatures elements
-    List<float> biases; // layout: outputFeatures elements
+    List<float> biases;  // layout: outputFeatures elements
 };
 
 struct BatchNorm2DLayerParams
@@ -56,18 +56,34 @@ class TorchParamReader
 private:
     RefPtr<Stream> stream;
     SlangResult readParams(List<float>& result, int count);
+
 public:
     TorchParamReader(RefPtr<Stream> inputStream);
     TorchParamReader(String path);
 
-    // Read torch's exported parameters for a linear layer, and swap the weights layout to be [outFeatures, inFeatures].
-    SlangResult readLinearLayer(int inFeatures, int outFeatures, LinearLayerParams& params);
+    // Read torch's exported parameters for a linear layer, and swap the weights layout to be
+    // [outFeatures, inFeatures].
+    SlangResult readLinearLayer(
+        int inFeatures,
+        int outFeatures,
+        bool hasBias,
+        LinearLayerParams& params);
 
-    // Read torch's exported parameters for a conv2d layer, the layout is unchanged (remains [outChannels, inChannels, kernelSize, kernelSize]).
-    SlangResult readConv2DLayer(int inChannels, int outChannels, int kernelSize, Conv2DLayerParams& params);
+    // Read torch's exported parameters for a conv2d layer, the layout is unchanged (remains
+    // [outChannels, inChannels, kernelSize, kernelSize]).
+    SlangResult readConv2DLayer(
+        int inChannels,
+        int outChannels,
+        int kernelSize,
+        Conv2DLayerParams& params);
 
-    // Read torch's exported parameters for a transposed conv2d layer, and swap the weights layout to be [outChannels, inChannels, kernelSize, kernelSize].
-    SlangResult readTransposedConv2DLayer(int inChannels, int outChannels, int kernelSize, TransposedConv2DLayerParams& params);
+    // Read torch's exported parameters for a transposed conv2d layer, and swap the weights layout
+    // to be [outChannels, inChannels, kernelSize, kernelSize].
+    SlangResult readTransposedConv2DLayer(
+        int inChannels,
+        int outChannels,
+        int kernelSize,
+        TransposedConv2DLayerParams& params);
 
     SlangResult readBatchNorm2DLayer(int numFeatures, BatchNorm2DLayerParams& params);
 };

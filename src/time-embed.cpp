@@ -13,7 +13,7 @@ SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
 {
     logInfo("Loading TimeEmbed Linear Layer: outputChannel %d\n", outputChannels);
     LinearLayerParams linearParams;
-    reader.readLinearLayer(outputChannels, outputChannels, linearParams);
+    reader.readLinearLayer(outputChannels, outputChannels, true, linearParams);
     biasesBuffer = context->createPersistentBuffer(linearParams.biases);
     if (!biasesBuffer)
         return SLANG_FAIL;

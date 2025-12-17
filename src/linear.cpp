@@ -34,7 +34,7 @@ SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
 {
     logInfo("Loading Linear Layer: inputSize=%d, outputSize=%d\n", inputSize, outputSize);
     LinearLayerParams params;
-    SLANG_RETURN_ON_FAIL(reader.readLinearLayer(inputSize, outputSize, params));
+    SLANG_RETURN_ON_FAIL(reader.readLinearLayer(inputSize, outputSize, loadBias, params));
     weightsBuffer = context->createPersistentBuffer(params.weights);
     if (loadBias)
         biasesBuffer = context->createPersistentBuffer(params.biases);

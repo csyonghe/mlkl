@@ -95,6 +95,87 @@ struct Broadcast<Inner : IExpr> : IExpr
         return inner.eval(innerLinear, input);
     }
 }
+struct Permute<Inner : IExpr> : IExpr
+{
+    Inner inner;
+    uint rank;
+    uint outputDims[8];
+    // Stride of the dimension in the Inner tensor that corresponds to the i-th output dimension
+    uint mappedStrides[8]; 
+
+    float eval(uint tid, Input input)
+    {
+        uint innerIdx = 0;
+        uint temp = tid;
+        
+        [unroll]
+        for (int i = 7; i >= 0; i--)
+        {
+            if (i < int(rank))
+            {
+                uint d = outputDims[i];
+                uint c = temp % d;
+                temp /= d;
+                innerIdx += c * mappedStrides[i];
+            }
+        }
+        return inner.eval(innerIdx, input);
+    }
+}
+
+struct Transpose<Inner : IExpr> : IExpr
+{
+    Inner inner;
+    uint dim0; // Dimension to swap
+    uint dim1; // Dimension to swap
+    
+    uint shape[8];   // Output shape
+    uint strides[8]; // Inner tensor strides
+
+    // To evaluate Transpose(A) at index 'i':
+    // 1. Convert 'i' to coords (in output shape)
+    // 2. Swap coord[dim0] and coord[dim1]
+    // 3. Re-linearize using inner strides
+    float eval(uint tid, Input input)
+    {
+        // 1. Decompose
+        uint coord[8];
+        uint temp = tid;
+        
+        // Unroll assuming max rank 8
+        [unroll]
+        for (int i = 7; i >= 0; i--)
+        {
+             // Note: We use the output shape for decomposition
+             uint d = shape[i]; 
+             // Avoid div/mod by 0 if shape is uninitialized/padding
+             if (d > 1) 
+             {
+                 coord[i] = temp % d;
+                 temp /= d;
+             }
+             else
+             {
+                 coord[i] = 0;
+             }
+        }
+
+        // 2. Swap coordinates
+        uint t = coord[dim0];
+        coord[dim0] = coord[dim1];
+        coord[dim1] = t;
+
+        // 3. Re-linearize
+        uint innerIdx = 0;
+        [unroll]
+        for (int i = 0; i < 8; i++)
+        {
+            innerIdx += coord[i] * strides[i];
+        }
+        
+        return inner.eval(innerIdx, input);
+    }
+}
 
 struct Concat<L : IExpr, R : IExpr> : IExpr
 {

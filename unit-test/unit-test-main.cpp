@@ -4,6 +4,7 @@
 #include "example-base/example-base.h"
 #include "inference-context.h"
 #include "kernels.h"
+#include "test-kernels.h"
 #include "torch-reader.h"
 
 #include <chrono>
@@ -38,8 +39,8 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testMaterialize());
         SLANG_RETURN_ON_FAIL(testSimpleConvolution());
         SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
-        SLANG_RETURN_ON_FAIL(testSoftmax());
-        SLANG_RETURN_ON_FAIL(testBatchGemm());
+        SLANG_RETURN_ON_FAIL(testFusedBatchGemm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testCrossAttentionFull(gInferencingCtx));
         printf("all tests passed!\n");
         return SLANG_OK;
     }
@@ -580,142 +581,6 @@ struct UnitTestProgram : public TestBase
                 }
             }
         }
-    }
-
-    void initImage(List<float>& imageData, int width, int height, int channels = 1)
-    {
-        uint32_t seed = 1723;
-        std::mt19937 gen(seed);
-
-        std::normal_distribution<float> dist(0.0f, 1.0f);
-        imageData.setCount(width * height * channels);
-
-        // 3. Generate
-        for (Index i = 0; i < imageData.getCount(); i++)
-        {
-            imageData[i] = dist(gen);
-        }
-    }
-
-    SlangResult testSoftmax()
-    {
-        printf("Running testSoftmax...\n");
-        int rows = 16;
-        int cols = 128; // Sequence length
-        List<float> inputData;
-        initImage(inputData, rows, cols, 1); // Reuse helper to gen random floats
-
-        List<float> expectedOutput;
-        expectedOutput.setCount(inputData.getCount());
-        cpuSoftmax(inputData.getBuffer(), expectedOutput.getBuffer(), cols, rows);
-
-        // Upload Input
-        auto inputBuf = gInferencingCtx->createPersistentBuffer(inputData, "SoftmaxInput");
-
-        // Execute Kernel
-        SoftmaxKernel kernel(gInferencingCtx);
-        auto task = gInferencingCtx->createTask();
-        auto outputBuf = kernel.allocResultBuffer(rows, cols);
-
-        kernel.queueExecute(task, outputBuf, BufferView(inputBuf), rows, cols);
-        task.execute();
-
-        TEST_CHECK("testSoftmax", checkOutput(outputBuf, expectedOutput));
-        return SLANG_OK;
-    }
-
-    SlangResult testBatchGemm()
-    {
-        printf("Running testBatchGemm...\n");
-        // Test Parameters: A[2, 32, 64] @ B[2, 64, 32] -> C[2, 32, 32]
-        // Case 1: Standard Multiplication
-        {
-            int batch = 2;
-            int M = 32, N = 32, K = 64;
-
-            List<float> A, B, Expected;
-            initImage(A, M, K, batch);
-            initImage(B, K, N, batch); // K rows, N cols physically
-            Expected.setCount(batch * M * N);
-
-            cpuBatchGemm(
-                A.getBuffer(),
-                B.getBuffer(),
-                Expected.getBuffer(),
-                batch,
-                M,
-                N,
-                K,
-                false,
-                false);
-
-            auto bufA = gInferencingCtx->createPersistentBuffer(A, "GemmA");
-            auto bufB = gInferencingCtx->createPersistentBuffer(B, "GemmB");
-
-            BatchGemmKernel kernel(gInferencingCtx);
-            auto bufC = kernel.allocResultBuffer(batch, M, N);
-
-            auto task = gInferencingCtx->createTask();
-            kernel.queueExecute(task, bufC, BufferView(bufA), BufferView(bufB), batch, M, N, K);
-            task.execute();
-
-            TEST_CHECK("BatchGemm_Normal", checkOutput(bufC, Expected));
-        }
-
-        // Case 2: Transpose B (Crucial for Attention Q @ K^T)
-        // We want C = A @ B^T
-        // A: [M, K]
-        // B: [N, K] (Physical layout is N rows, K cols)
-        // Logical op: [M, K] x [K, N] -> [M, N]
-        {
-            int batch = 2;
-            int M = 16, N = 16, K = 64;
-
-            List<float> A, B, Expected;
-            initImage(A, M, K, batch);
-            initImage(B, N, K, batch); // Note physical shape: N rows, K cols
-            Expected.setCount(batch * M * N);
-
-            // CPU computes A @ B^T
-            cpuBatchGemm(
-                A.getBuffer(),
-                B.getBuffer(),
-                Expected.getBuffer(),
-                batch,
-                M,
-                N,
-                K,
-                false,
-                true // Transpose B
-            );
-
-            auto bufA = gInferencingCtx->createPersistentBuffer(A, "GemmTransA");
-            auto bufB = gInferencingCtx->createPersistentBuffer(B, "GemmTransB");
-
-            BatchGemmKernel kernel(gInferencingCtx);
-            auto bufC = kernel.allocResultBuffer(batch, M, N);
-
-            auto task = gInferencingCtx->createTask();
-            // Pass transposeB = true
-            kernel.queueExecute(
-                task,
-                bufC,
-                BufferView(bufA),
-                BufferView(bufB),
-                batch,
-                M,
-                N,
-                K,
-                1.0f,
-                0.0f,
-                false,
-                true);
-            task.execute();
-
-            TEST_CHECK("BatchGemm_TransB", checkOutput(bufC, Expected));
-        }
-
-        return SLANG_OK;
     }
 };
 

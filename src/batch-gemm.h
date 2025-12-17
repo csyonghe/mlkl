@@ -1,29 +1,31 @@
 #pragma once
+#include "elementwise.h"
 #include "kernel-base.h"
 
 class BatchGemmKernel : public RefObject
 {
-private:
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
 
-public:
-    BatchGemmKernel(InferencingContext* ctx);
+    ProgramNode programA;
+    ProgramNode programB;
+    ProgramNode programC;
+    ProgramNode programOut;
 
-    // Allocate output buffer C [BatchSize, M, N]
+public:
+    BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, Expr Out);
+
     BufferView allocResultBuffer(int batchSize, int m, int n);
 
+    // Eval takes shape params explicitly, plus inputs for all expressions
     void queueExecute(
         InferencingTask& task,
-        BufferView C, // Output
-        BufferView A,
-        BufferView B,
+        BufferView output,
+        int M,
+        int N,
+        int K,
         int batchSize,
-        int m,
-        int n,
-        int k,
-        float alpha = 1.0f,
-        float beta = 0.0f,
-        bool transposeA = false,
-        bool transposeB = false);
+        float alpha,
+        float beta,
+        const Dictionary<Expr, InputInfo>& inputs);
 };

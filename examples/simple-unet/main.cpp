@@ -438,7 +438,7 @@ struct SimpleUNetProgram : public TestBase
             TorchParamReader reader1 =
                 TorchParamReader(resourceBase.resolveResource("debug_dump/down0_time_proj.bin"));
             LinearLayerParams linearParams;
-            reader1.readLinearLayer(32, 128, linearParams);
+            reader1.readLinearLayer(32, 128, true, linearParams);
             TEST_CHECK(
                 "testDown0_timeProjWeights",
                 checkOutput(

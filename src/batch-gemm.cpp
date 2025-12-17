@@ -1,10 +1,22 @@
 #include "batch-gemm.h"
 
-
-BatchGemmKernel::BatchGemmKernel(InferencingContext* ctx)
+BatchGemmKernel::BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, Expr Out)
     : context(ctx)
 {
-    pipeline = context->createComputePipeline("batchGemm", {});
+    int globalRegCounter = 0;
+
+    // Compile all four expressions
+    programA = compileExprToProgram(A, &globalRegCounter);
+    programB = compileExprToProgram(B, &globalRegCounter);
+    programC = compileExprToProgram(C, &globalRegCounter);
+    programOut = compileExprToProgram(Out, &globalRegCounter);
+
+    String typeArgs[] = {
+        programA.getSlangTypeName(),
+        programB.getSlangTypeName(),
+        programC.getSlangTypeName(),
+        programOut.getSlangTypeName()};
+    pipeline = ctx->createComputePipeline("batchGemm", makeArrayView(typeArgs));
 }
 
 // Allocate output buffer C [BatchSize, M, N]
@@ -16,39 +28,45 @@ BufferView BatchGemmKernel::allocResultBuffer(int batchSize, int m, int n)
 
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView C, // Output
-    BufferView A,
-    BufferView B,
+    BufferView output,
+    int M,
+    int N,
+    int K,
     int batchSize,
-    int m,
-    int n,
-    int k,
     float alpha,
     float beta,
-    bool transposeA,
-    bool transposeB)
+    const Dictionary<Expr, InputInfo>& inputs)
 {
-    struct BatchGemmParams
-    {
-        rhi::DeviceAddress A, B, C;
-        uint32_t M, N, K;
-        float alpha, beta;
-        uint32_t transposeA, transposeB;
-    } params;
+    EvalContext ctx;
+    for (auto it : inputs)
+        ctx.inputs.add(it.first.node, it.second);
 
-    params.A = A.getDeviceAddress();
-    params.B = B.getDeviceAddress();
-    params.C = C.getDeviceAddress();
-    params.M = m;
-    params.N = n;
-    params.K = k;
-    params.alpha = alpha;
-    params.beta = beta;
-    params.transposeA = transposeA ? 1 : 0;
-    params.transposeB = transposeB ? 1 : 0;
+    List<uint8_t> paramData;
+    ParameterWriter writer{paramData};
 
-    // Dispatch (N, M) groups
-    uint32_t groupX = (n + 15) / 16;
-    uint32_t groupY = (m + 15) / 16;
-    task.dispatchKernel(pipeline, groupX, groupY, batchSize, params);
+    // Pack in order: A, B, C, FOut, M, N, K, alpha, beta, output
+    programA.pack(writer, ctx);
+    programB.pack(writer, ctx);
+    programC.pack(writer, ctx);
+    programOut.pack(writer, ctx);
+
+    writer.write<uint32_t>((uint32_t)M);
+    writer.write<uint32_t>((uint32_t)N);
+    writer.write<uint32_t>((uint32_t)K);
+    writer.write(alpha);
+    writer.write(beta);
+    writer.write(output.getDeviceAddress());
+
+    writer.finish();
+
+    uint32_t groupX = (N + 15) / 16;
+    uint32_t groupY = (M + 15) / 16;
+
+    task.dispatchKernel(
+        pipeline,
+        groupX,
+        groupY,
+        batchSize,
+        paramData.getBuffer(),
+        (uint32_t)paramData.getCount());
 }

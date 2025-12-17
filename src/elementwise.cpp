@@ -282,6 +282,126 @@ void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     writer.writeBytes(strideArr, sizeof(strideArr));
 }
 
+// --- PermuteNode ---
+
+PermuteNode::PermuteNode(Expr inner, ArrayView<int> dims)
+    : inner(inner), dims(dims)
+{
+}
+
+String PermuteNode::getSlangTypeName() const
+{
+    return "Permute<" + innerProgram->getSlangTypeName() + ">";
+}
+
+Shape PermuteNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape innerShape = inner.node->resolveShape(ctx);
+    if (innerShape.getRank() != dims.getCount())
+        throw std::runtime_error("Permute: Rank mismatch with permutation indices");
+
+    List<int> newDims;
+    for (int i : dims)
+    {
+        if (i < 0 || i >= innerShape.getRank())
+            throw std::runtime_error("Permute: Invalid dimension index");
+        newDims.add(innerShape[i]);
+    }
+    return Shape(newDims.getArrayView());
+}
+
+void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    innerProgram->pack(writer, ctx);
+
+    Shape innerShape = inner.node->resolveShape(ctx);
+    Shape outShape = resolveShape(ctx);
+
+    List<int> innerStrides = computeDenseStrides(innerShape);
+    List<int> mappedStrides;
+
+    // For output dimension i, it corresponds to inner dimension dims[i].
+    // So if we move along output[i], we move along inner[dims[i]].
+    // Stride is innerStrides[dims[i]].
+    for (int i = 0; i < dims.getCount(); ++i)
+    {
+        mappedStrides.add(innerStrides[dims[i]]);
+    }
+
+    uint32_t rank = (uint32_t)outShape.getRank();
+    writer.write(rank);
+
+    uint32_t outDimsArr[8] = {1};
+    for (int i = 0; i < outShape.getRank(); ++i)
+        outDimsArr[i] = (uint32_t)outShape[i];
+    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
+
+    uint32_t mapStrideArr[8] = {0};
+    for (int i = 0; i < mappedStrides.getCount(); ++i)
+        mapStrideArr[i] = (uint32_t)mappedStrides[i];
+    writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
+}
+
+// --- TransposeNode ---
+
+TransposeNode::TransposeNode(Expr inner, int d0, int d1)
+    : inner(inner), dim0(d0), dim1(d1)
+{
+}
+
+String TransposeNode::getSlangTypeName() const
+{
+    return "Transpose<" + innerProgram->getSlangTypeName() + ">";
+}
+
+Shape TransposeNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape s = inner.node->resolveShape(ctx);
+    int rank = s.getRank();
+
+    // Handle negative indices
+    int d0 = dim0 < 0 ? rank + dim0 : dim0;
+    int d1 = dim1 < 0 ? rank + dim1 : dim1;
+
+    if (d0 < 0 || d0 >= rank || d1 < 0 || d1 >= rank)
+        throw std::runtime_error("Transpose: Invalid dimension index");
+
+    // Swap dimensions
+    List<int> newDims;
+    for (int i = 0; i < rank; i++)
+        newDims.add(s[i]);
+    std::swap(newDims[d0], newDims[d1]);
+
+    return Shape(newDims.getArrayView());
+}
+
+void TransposeNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    innerProgram->pack(writer, ctx);
+
+    Shape innerShape = inner.node->resolveShape(ctx);
+    Shape outShape = resolveShape(ctx);
+    List<int> innerStrides = computeDenseStrides(innerShape);
+    int rank = innerShape.getRank();
+
+    // Handle negative indices again for packing
+    int d0 = dim0 < 0 ? rank + dim0 : dim0;
+    int d1 = dim1 < 0 ? rank + dim1 : dim1;
+
+    writer.write((uint32_t)d0);
+    writer.write((uint32_t)d1);
+
+    uint32_t shapeArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    for (int i = 0; i < rank; ++i)
+        shapeArr[i] = (uint32_t)outShape[i];
+    writer.writeBytes(shapeArr, sizeof(shapeArr));
+
+    uint32_t strideArr[8] = {0};
+    for (int i = 0; i < rank; ++i)
+        strideArr[i] = (uint32_t)innerStrides[i];
+    writer.writeBytes(strideArr, sizeof(strideArr));
+}
+
 // --- ConcatNode ---
 
 ConcatNode::ConcatNode(Expr left, Expr right, Expr axis)
@@ -495,6 +615,14 @@ Expr broadcast(Expr inner, Expr shapeOf)
 {
     return Expr(new BroadcastNode(inner, shapeOf));
 }
+Expr permute(Expr inner, ArrayView<int> dims)
+{
+    return Expr(new PermuteNode(inner, dims));
+}
+Expr transpose(Expr inner, int dim0, int dim1)
+{
+    return Expr(new TransposeNode(inner, dim0, dim1));
+}
 Expr concat(Expr left, Expr right, Expr axis)
 {
     return Expr(new ConcatNode(left, right, axis));
@@ -623,6 +751,18 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
         RefPtr<ProgramNode> innerProgram = new ProgramNode();
         *innerProgram = compileExprToProgram(br->inner, ctx.globalRegCounter);
         br->innerProgram = innerProgram;
+    }
+    else if (auto p = dynamic_cast<PermuteNode*>(node))
+    {
+        RefPtr<ProgramNode> innerProgram = new ProgramNode();
+        *innerProgram = compileExprToProgram(p->inner, ctx.globalRegCounter);
+        p->innerProgram = innerProgram;
+    }
+    else if (auto t = dynamic_cast<TransposeNode*>(node))
+    {
+        RefPtr<ProgramNode> innerProgram = new ProgramNode();
+        *innerProgram = compileExprToProgram(t->inner, ctx.globalRegCounter);
+        t->innerProgram = innerProgram;
     }
     else if (auto c = dynamic_cast<ConcatNode*>(node))
     {

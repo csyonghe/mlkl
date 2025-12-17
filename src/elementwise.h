@@ -272,6 +272,37 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
+class PermuteNode : public ExprNode
+{
+public:
+    Expr inner;
+    List<int> dims; // Permutation
+
+    RefPtr<ProgramNode> innerProgram;
+
+    PermuteNode(Expr inner, ArrayView<int> dims);
+
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
+class TransposeNode : public ExprNode
+{
+public:
+    Expr inner;
+    int dim0;
+    int dim1;
+
+    RefPtr<ProgramNode> innerProgram;
+
+    TransposeNode(Expr inner, int d0, int d1);
+
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
 class ConcatNode : public ExprNode
 {
 public:
@@ -341,6 +372,8 @@ Expr buffer();
 Expr constant(float v);
 Expr broadcast(Expr inner, Expr shapeOf);
 Expr concat(Expr left, Expr right, Expr axis);
+Expr permute(Expr inner, ArrayView<int> dims);
+Expr transpose(Expr inner, int dim0, int dim1);
 Expr uniformConstant();
 Expr kernelOutput();
 
@@ -444,3 +477,5 @@ public:
     BufferView allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
     void eval(InferencingTask& task, BufferView output, const Dictionary<Expr, InputInfo>& inputs);
 };
+
+ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);

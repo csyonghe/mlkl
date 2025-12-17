@@ -10,23 +10,31 @@ class CrossAttentionKernel : public RefObject
 private:
     InferencingContext* context;
 
-    // Sub-Kernels for Projections
-    // These hold the weights (wQ, wK, wV, wOut) internally
+    // Linear Projections
     RefPtr<LinearKernel> projQ;
     RefPtr<LinearKernel> projK;
     RefPtr<LinearKernel> projV;
     RefPtr<LinearKernel> projOut;
 
-    // Sub-Kernels for Attention Mechanism
-    RefPtr<BatchGemmKernel> batchGemm;
+    // Generic Gemm Kernels
+    RefPtr<BatchGemmKernel> gemmScores; // Q @ K^T
+    RefPtr<BatchGemmKernel> gemmValues; // Probs @ V
+
+    // Expression Handles (to bind inputs at runtime)
+    Expr exprQ_In;     // Input A for gemmScores
+    Expr exprK_In;     // Input B for gemmScores (Inner buffer of transpose)
+    Expr exprProbs_In; // Input A for gemmValues
+    Expr exprV_In;     // Input B for gemmValues
+
     RefPtr<SoftmaxKernel> softmax;
     RefPtr<BroadcastAddKernel> broadcastAdd;
 
 public:
-    CrossAttentionKernel(InferencingContext* ctx);
+    CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim);
 
-    // Load weights for all 4 internal linear layers
     SlangResult loadParams(TorchParamReader& reader);
+
+    BufferView allocResultBuffer(int batchSize, int seqQ, int dim);
 
     void queueExecute(
         InferencingTask& task,
