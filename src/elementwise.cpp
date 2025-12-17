@@ -377,6 +377,7 @@ Shape TransposeNode::resolveShape(const EvalContext& ctx) const
 
 void TransposeNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
+    // First, pack the innerProgram in the main linear list.
     innerProgram->pack(writer, ctx);
 
     Shape innerShape = inner.node->resolveShape(ctx);
@@ -384,18 +385,19 @@ void TransposeNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     List<int> innerStrides = computeDenseStrides(innerShape);
     int rank = innerShape.getRank();
 
-    // Handle negative indices again for packing
     int d0 = dim0 < 0 ? rank + dim0 : dim0;
     int d1 = dim1 < 0 ? rank + dim1 : dim1;
 
     writer.write((uint32_t)d0);
     writer.write((uint32_t)d1);
 
+    // Write Shape (8 uints)
     uint32_t shapeArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     for (int i = 0; i < rank; ++i)
         shapeArr[i] = (uint32_t)outShape[i];
     writer.writeBytes(shapeArr, sizeof(shapeArr));
 
+    // Write Strides (8 uints)
     uint32_t strideArr[8] = {0};
     for (int i = 0; i < rank; ++i)
         strideArr[i] = (uint32_t)innerStrides[i];
