@@ -19,9 +19,17 @@ ClassifierFreeGuidanceKernel::ClassifierFreeGuidanceKernel(InferencingContext* c
     kernel = new ElementwiseKernel(context, result);
 }
 
-ComPtr<rhi::IBuffer> ClassifierFreeGuidanceKernel::queueExecute(
+BufferView ClassifierFreeGuidanceKernel::allocResultBuffer(int width, int height, int channels)
+{
+    // For CFG, shapeA and shapeB should be the same.
+    size_t elementCount = Shape(width, height, channels).getElementCount();
+    return context->allocScratchBuffer(elementCount * sizeof(float), "cfg");
+}
+
+void ClassifierFreeGuidanceKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* batchedInput,
+    BufferView output,
+    BufferView batchedInput,
     int width,
     int height,
     int channels,
@@ -39,5 +47,5 @@ ComPtr<rhi::IBuffer> ClassifierFreeGuidanceKernel::queueExecute(
     // Scale (Scalar Value)
     inputs[scale] = guidanceScale;
 
-    return kernel->eval(task, inputs);
+    kernel->eval(task, output, inputs);
 }

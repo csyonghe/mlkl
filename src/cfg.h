@@ -16,9 +16,12 @@ class ClassifierFreeGuidanceKernel : public RefObject
 public:
     ClassifierFreeGuidanceKernel(InferencingContext* context);
 
-    ComPtr<rhi::IBuffer> queueExecute(
+    BufferView allocResultBuffer(int width, int height, int channels);
+
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* batchedInput,
+        BufferView output,
+        BufferView batchedInput,
         int width,
         int height,
         int channels,

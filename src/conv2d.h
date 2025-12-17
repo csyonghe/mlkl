@@ -39,9 +39,12 @@ public:
         float* weightsData,
         float* biasesData);
 
-    ComPtr<rhi::IBuffer> queueExecute(
+    BufferView allocateResultBuffer(int inputWidth, int inputHeight, int padding, int batchSize);
+
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputImage,
+        BufferView output,
+        BufferView inputImage,
         int inputWidth,
         int inputHeight,
         int padding,

@@ -14,13 +14,16 @@ class ConcatKernel : public RefObject
 public:
     ConcatKernel(InferencingContext* ctx, int operandCount);
 
+    BufferView allocResultBuffer(ArrayView<Shape> inputShapes, int axis);
+
     // Concatenates N inputs along the specified axis.
     // inputs: List of buffers
     // inputShapes: List of shapes corresponding to inputs
     // axis: The dimension to concatenate along
-    ComPtr<rhi::IBuffer> queueExecute(
+    void queueExecute(
         InferencingTask& task,
-        ArrayView<rhi::IBuffer*> inputs,
+        BufferView output,
+        ArrayView<BufferView> inputs,
         ArrayView<Shape> inputShapes,
         int axis);
 };

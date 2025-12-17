@@ -151,7 +151,7 @@ void BufferNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     {
         if (info.buffer)
         {
-            writer.write(info.buffer->getDeviceAddress() + info.offset);
+            writer.write(info.buffer.getDeviceAddress() + info.offset);
             return;
         }
     }
@@ -696,23 +696,34 @@ ElementwiseKernel::ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
     pipeline = ctx->createComputePipeline("materialize", makeArrayView(typeArgs));
 }
 
-ComPtr<rhi::IBuffer> ElementwiseKernel::eval(
+BufferView ElementwiseKernel::allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs)
+{
+    EvalContext ctx;
+    for (auto it : inputs)
+    {
+        ctx.inputs.add(it.first.node, it.second);
+    }
+    Shape resultShape = root.node->resolveShape(ctx);
+    size_t count = resultShape.getElementCount();
+    return context->allocScratchBuffer(count * sizeof(float), "elementwise");
+}
+
+void ElementwiseKernel::eval(
     InferencingTask& task,
+    BufferView output,
     const Dictionary<Expr, InputInfo>& inputs)
 {
     EvalContext ctx;
     for (auto it : inputs)
         ctx.inputs.add(it.first.node, it.second);
 
-    // 1. VALIDATION: Resolve shapes for the whole tree to ensure compatibility
     Shape resultShape = root.node->resolveShape(ctx);
     size_t count = resultShape.getElementCount();
-    auto outBuf = task.allocateBuffer("eval_out", count * sizeof(float));
 
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
 
-    writer.write(outBuf->getDeviceAddress());
+    writer.write(output.getDeviceAddress());
     writer.write((uint32_t)count);
 
     program.pack(writer, ctx);
@@ -726,6 +737,4 @@ ComPtr<rhi::IBuffer> ElementwiseKernel::eval(
         1,
         paramData.getBuffer(),
         (uint32_t)paramData.getCount());
-
-    return ComPtr<rhi::IBuffer>(outBuf);
 }

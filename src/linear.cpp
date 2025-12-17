@@ -35,14 +35,23 @@ SlangResult LinearKernel::loadParams(TorchParamReader& reader)
     logInfo("Loading Linear Layer: inputSize=%d, outputSize=%d\n", inputSize, outputSize);
     LinearLayerParams params;
     SLANG_RETURN_ON_FAIL(reader.readLinearLayer(inputSize, outputSize, params));
-    weightsBuffer = context->createBuffer(params.weights);
-    biasesBuffer = context->createBuffer(params.biases);
+    weightsBuffer = context->createPersistentBuffer(params.weights);
+    biasesBuffer = context->createPersistentBuffer(params.biases);
     return SLANG_OK;
 }
 
-ComPtr<rhi::IBuffer> LinearKernel::queueExecute(
+
+BufferView LinearKernel::allocateResultBuffer(int batchSize)
+{
+    auto outputBuffer =
+        context->allocScratchBuffer(batchSize * outputSize * sizeof(float), "linear_output");
+    return outputBuffer;
+}
+
+void LinearKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputVector,
+    BufferView output,
+    BufferView inputVector,
     int batchSize)
 {
     struct LinearLayerParamsData
@@ -56,12 +65,8 @@ ComPtr<rhi::IBuffer> LinearKernel::queueExecute(
         int batchSize;
     } paramsData;
 
-    // Allocate output for the full batch
-    auto outputBuffer =
-        task.allocateBuffer("linear_output", batchSize * outputSize * sizeof(float));
-
-    paramsData.inputVector = inputVector->getDeviceAddress();
-    paramsData.outputVector = outputBuffer->getDeviceAddress();
+    paramsData.inputVector = inputVector.getDeviceAddress();
+    paramsData.outputVector = output.getDeviceAddress();
     paramsData.weights = weightsBuffer->getDeviceAddress();
     paramsData.biases = biasesBuffer->getDeviceAddress();
     paramsData.inputSize = inputSize;
@@ -76,6 +81,4 @@ ComPtr<rhi::IBuffer> LinearKernel::queueExecute(
     uint32_t threadGroupCountY = (uint32_t)batchSize;
 
     task.dispatchKernel(pipeline, threadGroupCountX, threadGroupCountY, 1, paramsData);
-
-    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

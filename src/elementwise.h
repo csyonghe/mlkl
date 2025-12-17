@@ -122,7 +122,7 @@ struct Expr
 struct InputInfo
 {
     // For Buffer inputs
-    rhi::IBuffer* buffer = nullptr;
+    BufferView buffer;
     size_t offset = 0;
 
     Shape shape;
@@ -131,9 +131,7 @@ struct InputInfo
     float scalarValue = 0.0f;
 
     InputInfo() = default;
-    InputInfo(Shape shape, rhi::IBuffer* buf, size_t off = 0)
-        : shape(shape), buffer(buf), offset(off) {};
-    InputInfo(Shape shape, const ComPtr<rhi::IBuffer>& buf, size_t off = 0)
+    InputInfo(Shape shape, BufferView buf, size_t off = 0)
         : shape(shape), buffer(buf), offset(off) {};
     InputInfo(float c)
         : scalarValue(c) {};
@@ -443,5 +441,6 @@ class ElementwiseKernel : public RefObject
 
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
-    ComPtr<rhi::IBuffer> eval(InferencingTask& task, const Dictionary<Expr, InputInfo>& inputs);
+    BufferView allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
+    void eval(InferencingTask& task, BufferView output, const Dictionary<Expr, InputInfo>& inputs);
 };

@@ -76,42 +76,69 @@ SlangResult UNetBlock::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-void UNetBlock::writeResult(const char* name, rhi::IBuffer* buffer)
+void UNetBlock::writeResult(const char* name, BufferView buffer)
 {
     ComPtr<ISlangBlob> blob;
-    inferencingCtx->getDevice()->readBuffer(buffer, 0, buffer->getDesc().size, blob.writeRef());
+    inferencingCtx->getDevice()
+        ->readBuffer(buffer.buffer, buffer.offset, buffer.size, blob.writeRef());
     File::writeAllBytes(String(name) + ".bin", blob->getBufferPointer(), blob->getBufferSize());
 }
 
-ComPtr<rhi::IBuffer> UNetBlock::forward(
+BufferView UNetBlock::allocateResultBuffer(int inputWidth, int inputHeight, int batchSize)
+{
+    if (downTransform)
+    {
+        return downTransform->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+    }
+    else
+    {
+        return upTransform->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+    }
+}
+void UNetBlock::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputImage,
+    BufferView outputImage,
+    BufferView inputImage,
     int inputWidth,
     int inputHeight,
-    rhi::IBuffer* timeEmbedding)
+    int batchSize,
+    BufferView timeEmbedding)
 {
-    auto transformedTimeEmbedding = timeEmbedTransform->queueExecute(task, timeEmbedding);
-    writeResult("time_embed_out", transformedTimeEmbedding);
-    auto conv1Result = conv1->queueExecute(task, inputImage, inputWidth, inputHeight, 1);
-    writeResult("conv1_fused_out", conv1Result);
+    task.context->pushAllocScope();
+    SLANG_DEFER(task.context->popAllocScope());
+
+    auto transformedTimeEmbedding = timeEmbedTransform->allocateResultBuffer(batchSize);
+
+    timeEmbedTransform->queueExecute(task, transformedTimeEmbedding, timeEmbedding, batchSize);
+
+    auto convResult = conv1->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+    conv1->queueExecute(task, convResult, inputImage, inputWidth, inputHeight, 1, batchSize);
 
     int shapeA[] = {inputHeight, inputWidth, outChannels};
     int shapeB[] = {1, 1, outChannels};
-    auto added = broadcastAdd->queueExecute(
+    auto added =
+        broadcastAdd->allocResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
+
+    broadcastAdd->queueExecute(
         task,
-        conv1Result,
+        added,
+        convResult,
         makeArrayView(shapeA),
         transformedTimeEmbedding,
-        makeArrayView(shapeB));
-    auto conv2Result = conv2->queueExecute(task, added, inputWidth, inputHeight, 1);
-    writeResult("conv2_fused_out", conv2Result);
+        makeArrayView(shapeB),
+        batchSize);
+    conv2->queueExecute(task, convResult, added, inputWidth, inputHeight, 1, batchSize);
 
-    rhi::IBuffer* finalResult = conv2Result;
     if (downTransform)
-        finalResult = downTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 1);
+    {
+        downTransform
+            ->queueExecute(task, outputImage, convResult, inputWidth, inputHeight, 1, batchSize);
+    }
     else
-        finalResult = upTransform->queueExecute(task, conv2Result, inputWidth, inputHeight, 1);
-    return ComPtr<rhi::IBuffer>(finalResult);
+    {
+        upTransform
+            ->queueExecute(task, outputImage, convResult, inputWidth, inputHeight, 1, batchSize);
+    }
 }
 
 UNetModel::UNetModel(
@@ -175,20 +202,29 @@ SlangResult UNetModel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-ComPtr<rhi::IBuffer> UNetModel::forward(
+void UNetModel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputImage,
+    BufferView outputImage,
+    BufferView inputImage,
     int inputWidth,
     int inputHeight,
-    int timeStep)
+    int timeStep,
+    int batchSize)
 {
-    auto timeEmbedding = timeEmbedKernel->queueExecute(task, timeStep);
-    auto x = initialConv->queueExecute(task, inputImage, inputWidth, inputHeight, 1);
-    List<ComPtr<rhi::IBuffer>> skipConnections;
+    task.context->pushAllocScope();
+    SLANG_DEFER(task.context->popAllocScope());
+
+    auto timeEmbedding = timeEmbedKernel->allocResultBuffer(batchSize);
+    timeEmbedKernel->queueExecute(task, timeEmbedding, timeStep, batchSize);
+    auto x = initialConv->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+    initialConv->queueExecute(task, x, inputImage, inputWidth, inputHeight, 1, batchSize);
+    List<BufferView> skipConnections;
     for (auto& block : downBlocks)
     {
-        x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
-        skipConnections.add(x);
+        auto x1 = block->allocateResultBuffer(inputWidth, inputHeight, batchSize);
+        block->queueExecute(task, x1, x, inputWidth, inputHeight, batchSize, timeEmbedding);
+        skipConnections.add(x1);
+        x = x1;
         inputWidth /= 2;
         inputHeight /= 2;
     }
@@ -197,15 +233,24 @@ ComPtr<rhi::IBuffer> UNetModel::forward(
         auto& block = upBlocks[i];
         // Concat skip connection
         auto skipConnection = skipConnections[skipConnections.getCount() - 1 - i];
-        Shape shape = {inputHeight, inputWidth, block->inChannels};
+        Shape shape = {batchSize, inputHeight, inputWidth, block->inChannels};
         Shape shapes[] = {shape, shape};
-        rhi::IBuffer* buffers[] = {x, skipConnection};
-        x = concat->queueExecute(task, makeArrayView(buffers), makeArrayView(shapes), 2);
+        BufferView buffers[] = {x, skipConnection};
+        auto concated = concat->allocResultBuffer(makeArrayView(shapes), 3);
+        concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 3);
         // Up block
-        x = block->forward(task, x, inputWidth, inputHeight, timeEmbedding);
+        auto upsampled = block->allocateResultBuffer(inputWidth, inputHeight, batchSize);
+        block->queueExecute(
+            task,
+            upsampled,
+            concated,
+            inputWidth,
+            inputHeight,
+            batchSize,
+            timeEmbedding);
+        x = upsampled;
         inputWidth *= 2;
         inputHeight *= 2;
     }
-    x = finalConv->queueExecute(task, x, inputWidth, inputHeight, 0);
-    return ComPtr<rhi::IBuffer>(x);
+    finalConv->queueExecute(task, outputImage, x, inputWidth, inputHeight, 0, batchSize);
 }

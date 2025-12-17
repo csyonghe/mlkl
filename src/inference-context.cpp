@@ -1,12 +1,14 @@
 #include "inference-context.h"
 
 #include "example-base.h"
+#include "inference-context.h"
 #include "slang-rhi/shader-cursor.h"
 
-InferencingContext::InferencingContext(rhi::IDevice* inDevice)
+InferencingContext::InferencingContext(rhi::IDevice* inDevice, size_t defaultPageSize)
 {
     this->device = inDevice;
     this->slangSession = device->getSlangSession();
+    this->allocator = new StackAllocator(this, defaultPageSize);
 
     ComPtr<ISlangBlob> diagnosticBlob;
     this->slangModule = slangSession->loadModule("mlkl", diagnosticBlob.writeRef());
@@ -98,7 +100,18 @@ InferencingTask InferencingContext::createTask()
     return task;
 }
 
-ComPtr<rhi::IBuffer> InferencingContext::createBuffer(
+BufferView InferencingContext::allocScratchBuffer(size_t size, const char* label)
+{
+    auto buffer = allocator->allocate(size);
+    if (!buffer)
+    {
+        reportError("Failed to create buffer of size %zu\n", size);
+        return {};
+    }
+    return buffer;
+}
+
+ComPtr<rhi::IBuffer> InferencingContext::createPersistentBuffer(
     const void* data,
     size_t size,
     const char* label)
@@ -182,13 +195,6 @@ void InferencingTask::dispatchKernel(
     }
     encoder = nullptr;
 #endif
-}
-
-rhi::IBuffer* InferencingTask::allocateBuffer(const char* name, size_t size, void* initData)
-{
-    ComPtr<rhi::IBuffer> buffer = context->createBuffer(initData, size, name);
-    buffers.add(buffer);
-    return buffer;
 }
 
 void InferencingTask::execute()

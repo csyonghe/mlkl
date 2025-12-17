@@ -39,9 +39,33 @@ ConcatKernel::ConcatKernel(InferencingContext* ctx, int operandCount)
     elementwiseKernel = new ElementwiseKernel(context, rootExpr);
 }
 
-ComPtr<rhi::IBuffer> ConcatKernel::queueExecute(
+BufferView ConcatKernel::allocResultBuffer(ArrayView<Shape> inputShapes, int axis)
+{
+    if (inputShapes.getCount() != operandCount)
+        throw std::runtime_error(
+            "ConcatKernel: Mismatched kernel operand count configuration and actual operand count");
+    if (inputShapes.getCount() == 0)
+        throw std::runtime_error("ConcatKernel: No inputs provided");
+
+    // 3. Bind Inputs
+    Dictionary<Expr, InputInfo> bindings;
+
+    bindings.add(axisExpr, axis);
+    for (int i = 0; i < inputShapes.getCount(); i++)
+    {
+        // Retrieve the Expr node created for this index
+        Expr e = mapOperandToExprNode[i];
+
+        // Bind runtime data: Shape + Buffer Pointer
+        bindings.add(e, InputInfo(inputShapes[i], {}, 0));
+    }
+    return elementwiseKernel->allocResultBuffer(bindings);
+}
+
+void ConcatKernel::queueExecute(
     InferencingTask& task,
-    ArrayView<rhi::IBuffer*> inputs,
+    BufferView output,
+    ArrayView<BufferView> inputs,
     ArrayView<Shape> inputShapes,
     int axis)
 {
@@ -69,5 +93,5 @@ ComPtr<rhi::IBuffer> ConcatKernel::queueExecute(
     // 4. Execute
     // The kernel will resolve the total output shape automatically
     // by propagating shapes through the ConcatNodes.
-    return elementwiseKernel->eval(task, bindings);
+    elementwiseKernel->eval(task, output, bindings);
 }

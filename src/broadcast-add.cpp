@@ -17,24 +17,36 @@ BroadcastAddKernel::BroadcastAddKernel(InferencingContext* context)
     kernel = new ElementwiseKernel(context, resultExpr);
 }
 
-ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(
+BufferView BroadcastAddKernel::allocResultBuffer(
+    const Shape& shapeA,
+    const Shape& shapeB,
+    int batchSize)
+{
+    return context->allocScratchBuffer(
+        shapeA.getElementCount() * batchSize * sizeof(float),
+        "broadcastAdd");
+}
+
+
+void BroadcastAddKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputA,
-    ArrayView<int> shapeA,
-    rhi::IBuffer* inputB,
-    ArrayView<int> shapeB,
+    BufferView result,
+    BufferView inputA,
+    const Shape& shapeA,
+    BufferView inputB,
+    const Shape& shapeB,
     int batchSize)
 {
     // 1. Construct Runtime Shapes
     // Prepend batch dimension to shapes
     List<int> dimsA;
     dimsA.add(batchSize);
-    for (int s : shapeA)
+    for (int s : shapeA.getDims())
         dimsA.add(s);
 
     List<int> dimsB;
     dimsB.add(batchSize);
-    for (int s : shapeB)
+    for (int s : shapeB.getDims())
         dimsB.add(s);
 
     Shape fullShapeA(dimsA.getArrayView());
@@ -51,5 +63,5 @@ ComPtr<rhi::IBuffer> BroadcastAddKernel::queueExecute(
 
     // 3. Execute
     // The kernel will resolve the output shape (which is A's shape) and dispatch.
-    return kernel->eval(task, inputs);
+    kernel->eval(task, result, inputs);
 }

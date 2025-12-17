@@ -1,4 +1,3 @@
-
 #include "conv2d.h"
 
 static const int kTinyKernelMaxOutputPixels = 4;
@@ -75,10 +74,10 @@ SlangResult Conv2DKernel::loadParams(
     float* biasesData)
 {
     int weightsCount = kernelSize * kernelSize * inChannels * outputChannelCount;
-    weightsBuffer = context->createBuffer(weightsData, weightsCount * sizeof(float));
+    weightsBuffer = context->createPersistentBuffer(weightsData, weightsCount * sizeof(float));
     if (!weightsBuffer)
         return SLANG_FAIL;
-    biasesBuffer = context->createBuffer(biasesData, outputChannelCount * sizeof(float));
+    biasesBuffer = context->createPersistentBuffer(biasesData, outputChannelCount * sizeof(float));
     if (!biasesBuffer)
         return SLANG_FAIL;
 
@@ -123,11 +122,31 @@ SlangResult Conv2DKernel::loadParams(
         }
 
         // 4. Create the Transposed Buffer
-        weightsTransposedBuffer = context->createBuffer(transposedWeights);
+        weightsTransposedBuffer = context->createPersistentBuffer(transposedWeights);
         if (!weightsTransposedBuffer)
             return SLANG_FAIL;
     }
     return SLANG_OK;
+}
+
+BufferView Conv2DKernel::allocateResultBuffer(
+    int inputWidth,
+    int inputHeight,
+    int padding,
+    int batchSize)
+{
+    int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
+    int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
+
+    // Naming for debug
+    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" +
+                              String(outChannels) + "_B" + String(batchSize);
+
+    // Allocation includes BatchSize
+    auto outputBuffer = context->allocScratchBuffer(
+        batchSize * outputWidth * outputHeight * outChannels * sizeof(float),
+        resultBufferName.getBuffer());
+    return outputBuffer;
 }
 
 struct Conv2DKernelParams
@@ -144,9 +163,10 @@ struct Conv2DKernelParams
     int batchSize;
 };
 
-ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
+void Conv2DKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputImage,
+    BufferView ouptut,
+    BufferView inputImage,
     int inputWidth,
     int inputHeight,
     int padding,
@@ -154,22 +174,12 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
 {
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
-
-    // Naming for debug
-    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" +
-                              String(outChannels) + "_B" + String(batchSize);
-
-    // Allocation includes BatchSize
-    auto outputBuffer = task.allocateBuffer(
-        resultBufferName.getBuffer(),
-        batchSize * outputWidth * outputHeight * outChannels * sizeof(float));
-
     auto expectedInputSize = batchSize * inputWidth * inputHeight * inChannels * sizeof(float);
-    SLANG_ASSERT(inputImage->getDesc().size == expectedInputSize);
+    SLANG_ASSERT(inputImage.size == expectedInputSize);
 
     Conv2DKernelParams params = {};
-    params.inputImage = inputImage->getDeviceAddress();
-    params.outputImage = outputBuffer->getDeviceAddress();
+    params.inputImage = inputImage.getDeviceAddress();
+    params.outputImage = ouptut.getDeviceAddress();
     params.inputImageWidth = inputWidth;
     params.inputImageHeight = inputHeight;
     params.outputImageWidth = outputWidth;
@@ -219,5 +229,4 @@ ComPtr<rhi::IBuffer> Conv2DKernel::queueExecute(
             totalZBlocks,
             params);
     }
-    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

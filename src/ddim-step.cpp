@@ -7,11 +7,11 @@ DDIMStepKernel::DDIMStepKernel(RefPtr<InferencingContext> inferencingCtx)
     pipeline = inferencingCtx->createComputePipeline("ddimStep", {});
 }
 
-void DDIMStepKernel::forward(
+void DDIMStepKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* currentImage,
-    rhi::IBuffer* predictedNoise,
-    rhi::IBuffer* outputImage,
+    BufferView currentImage,
+    BufferView predictedNoise,
+    BufferView outputImage,
     float alphaBar_t,
     float alphaBar_prev,
     int width,
@@ -29,9 +29,9 @@ void DDIMStepKernel::forward(
         uint32_t totalElements;
     } params;
 
-    params.currentImage = currentImage->getDeviceAddress();
-    params.predictedNoise = predictedNoise->getDeviceAddress();
-    params.outputImage = outputImage->getDeviceAddress();
+    params.currentImage = currentImage.getDeviceAddress();
+    params.predictedNoise = predictedNoise.getDeviceAddress();
+    params.outputImage = outputImage.getDeviceAddress();
     params.alphaBar_t = alphaBar_t;
     params.alphaBar_prev = alphaBar_prev;
 

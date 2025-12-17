@@ -13,12 +13,13 @@ private:
 
 public:
     BroadcastAddKernel(InferencingContext* context);
-
-    ComPtr<rhi::IBuffer> queueExecute(
+    BufferView allocResultBuffer(const Shape& shapeA, const Shape& shapeB, int batchSize = 1);
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputA,
-        ArrayView<int> shapeA,
-        rhi::IBuffer* inputB,
-        ArrayView<int> shapeB,
+        BufferView result,
+        BufferView inputA,
+        const Shape& shapeA,
+        BufferView inputB,
+        const Shape& shapeB,
         int batchSize = 1);
 };

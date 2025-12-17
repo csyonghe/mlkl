@@ -61,21 +61,22 @@ struct UnitTestProgram : public TestBase
         float inputData[] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,
                              14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25};
         auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-        auto inputBuffer = gInferencingCtx->createBuffer(inputData, 5 * 5 * sizeof(float));
+        auto inputBuffer =
+            gInferencingCtx->createPersistentBuffer(inputData, 5 * 5 * sizeof(float));
         float convWeights[9] = {0.1, 0.5, 0.2, 0.5, 1.0, 0.5, 0.2, 0.5, 0.4};
         float convBiases[] = {1000.0f};
         Conv2DKernel convKernel = Conv2DKernel(gInferencingCtx.Ptr(), 4, 3, 1, 1, 1);
         auto task = gInferencingCtx->createTask();
         convKernel.loadParams(3, 1, convWeights, convBiases);
-        auto outputBuffer = convKernel.queueExecute(task, inputBuffer, 5, 5, 1);
+        auto outputBuffer = convKernel.allocateResultBuffer(5, 5, 1, 1);
+        convKernel.queueExecute(task, outputBuffer, BufferView(inputBuffer), 5, 5, 1);
 
         auto readWeight = [&](int x, int y) { return convWeights[y * 3 + x]; };
 
         renderDocBeginFrame();
         task.execute();
-        float outputData[25];
         gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuffer, 0, sizeof(outputData), outputData);
+        auto outputData = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
         float v0 = outputData[0];
         float expectedV0 = readInput(0, 0) * readWeight(1, 1) + readInput(1, 0) * readWeight(2, 1) +
@@ -92,17 +93,18 @@ struct UnitTestProgram : public TestBase
         float convWeights[9] = {0.1, 0.5, 0.2, 0.5, 1.0, 0.5, 0.2, 0.5, 0.4};
         float convBiases[] = {1000.0f};
         auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-        auto inputBuffer = gInferencingCtx->createBuffer(inputData, 5 * 5 * sizeof(float));
+        auto inputBuffer =
+            gInferencingCtx->createPersistentBuffer(inputData, 5 * 5 * sizeof(float));
         TransposedConv2DKernel transposedConvKernel =
             TransposedConv2DKernel(gInferencingCtx.Ptr(), 4, 3, 1, 1, 1);
         auto task = gInferencingCtx->createTask();
         transposedConvKernel.loadParams(3, 1, convWeights, convBiases);
-        auto outputBuffer = transposedConvKernel.queueExecute(task, inputBuffer, 5, 5, 1);
+        auto outputBuffer = transposedConvKernel.allocateResultBuffer(5, 5, 1, 1);
+        transposedConvKernel.queueExecute(task, outputBuffer, BufferView(inputBuffer), 5, 5, 1);
         auto readWeight = [&](int x, int y) { return convWeights[y * 3 + x]; };
         renderDocBeginFrame();
         task.execute();
-        float outputData[25];
-        gDevice->readBuffer(outputBuffer, 0, sizeof(outputData), outputData);
+        auto outputData = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
         float v0 = outputData[0];
         float expectedV0 = readInput(1, 0) * readWeight(1, 1) + readInput(0, 1) * readWeight(1, 0) +
@@ -129,35 +131,28 @@ struct UnitTestProgram : public TestBase
 
         float dataB[] = {100, 200, 300}; // 1x3
 
-        auto bufA = gInferencingCtx->createBuffer(dataA, sizeof(dataA));
-        auto bufB = gInferencingCtx->createBuffer(dataB, sizeof(dataB));
+        auto bufA = gInferencingCtx->createPersistentBuffer(dataA, sizeof(dataA));
+        auto bufB = gInferencingCtx->createPersistentBuffer(dataB, sizeof(dataB));
 
         // 2. Prepare Kernel
         BroadcastAddKernel kernel(gInferencingCtx);
         auto task = gInferencingCtx->createTask();
 
         // Shapes excluding batch dimension
-        int shapeA[] = {height, width};
-        int shapeB[] = {width};
+        Shape shapeA = {height, width};
+        Shape shapeB = {width};
 
         // 3. Execute
         // Internally this constructs shapes [1, 2, 3] and [1, 3]
         // And broadcasts B to [1, 2, 3]
-        auto outputBuffer = kernel.queueExecute(
-            task,
-            bufA,
-            makeArrayView(shapeA, 2),
-            bufB,
-            makeArrayView(shapeB, 1),
-            batchSize);
+        auto output = kernel.allocResultBuffer(shapeA, shapeB, batchSize);
+        kernel.queueExecute(task, output, bufA, shapeA, bufB, shapeB, batchSize);
 
         // 4. Readback
         renderDocBeginFrame();
         task.execute();
 
-        float output[6];
-        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        auto outputData = gInferencingCtx->readBuffer<float>(output);
         renderDocEndFrame();
 
         // 5. Verify
@@ -168,12 +163,12 @@ struct UnitTestProgram : public TestBase
 
         for (int i = 0; i < 6; i++)
         {
-            if (fabs(output[i] - expected[i]) > 1e-3f)
+            if (fabs(outputData[i] - expected[i]) > 1e-3f)
             {
                 printf(
                     "BroadcastAdd Mismatch at %d: Got %f, Expected %f\n",
                     i,
-                    output[i],
+                    outputData[i],
                     expected[i]);
                 return SLANG_FAIL;
             }
@@ -205,7 +200,7 @@ struct UnitTestProgram : public TestBase
 
         float guidanceScale = 2.0f;
 
-        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+        auto inputBuf = gInferencingCtx->createPersistentBuffer(inputData, sizeof(inputData));
 
         // 2. Prepare Kernel
         ClassifierFreeGuidanceKernel kernel(gInferencingCtx);
@@ -216,16 +211,21 @@ struct UnitTestProgram : public TestBase
         //  - Treat the first 4 floats as 'Uncond'
         //  - Treat the next 4 floats as 'Cond'
         //  - Apply the formula
-        auto outputBuffer =
-            kernel.queueExecute(task, inputBuf, width, height, channels, guidanceScale);
+        auto outputBuffer = kernel.allocResultBuffer(width, height, channels);
+        kernel.queueExecute(
+            task,
+            outputBuffer,
+            BufferView(inputBuf),
+            width,
+            height,
+            channels,
+            guidanceScale);
 
         // 4. Readback
         renderDocBeginFrame();
         task.execute();
 
-        float output[4]; // Output should be a single image (size 4)
-        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        auto output = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
 
         // 5. Verify
@@ -262,8 +262,8 @@ struct UnitTestProgram : public TestBase
             dataB[i] = 100.0f;   // 100, 100...
         }
 
-        auto bufA = gInferencingCtx->createBuffer(dataA, count * sizeof(float));
-        auto bufB = gInferencingCtx->createBuffer(dataB, count * sizeof(float));
+        auto bufA = gInferencingCtx->createPersistentBuffer(dataA, count * sizeof(float));
+        auto bufB = gInferencingCtx->createPersistentBuffer(dataB, count * sizeof(float));
 
         // 2. Build Expression Tree: (A + B) * 0.5
         auto a = buffer();
@@ -296,14 +296,14 @@ struct UnitTestProgram : public TestBase
         //  Eval<8, ConstantView>,
         //  Eval<9, Mul<Reg<7>,Reg<8>>>
         //  >>`.
-        auto outputBuffer = kernel->eval(task, inputs);
+        auto outputBuffer = kernel->allocResultBuffer(inputs);
+        kernel->eval(task, outputBuffer, inputs);
 
         // 6. Execute and Readback
         renderDocBeginFrame();
         task.execute();
 
-        float outputData[count];
-        gDevice->readBuffer(outputBuffer, 0, sizeof(outputData), outputData);
+        auto outputData = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
 
         // 7. Verify Results
@@ -332,7 +332,7 @@ struct UnitTestProgram : public TestBase
         int count = 4;
         Shape shape = {count}; // [4]
 
-        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+        auto inputBuf = gInferencingCtx->createPersistentBuffer(inputData, sizeof(inputData));
 
         // 1. Build Expression Tree
         // Expr = relu( -sin(x) )
@@ -349,15 +349,14 @@ struct UnitTestProgram : public TestBase
 
         // Execute
         // Since it's a simple elementwise op, output shape matches input shape
-        auto outputBuffer = kernel.eval(task, inputs);
+        auto outputBuffer = kernel.allocResultBuffer(inputs);
+        kernel.eval(task, outputBuffer, inputs);
 
         // 4. Readback
         renderDocBeginFrame();
         task.execute();
 
-        float output[4];
-        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        auto output = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
 
         // 5. Verify
@@ -399,7 +398,7 @@ struct UnitTestProgram : public TestBase
         int count = 2;
         Shape shape = {count};
 
-        auto inputBuf = gInferencingCtx->createBuffer(inputData, sizeof(inputData));
+        auto inputBuf = gInferencingCtx->createPersistentBuffer(inputData, sizeof(inputData));
 
         auto x = buffer();
         // Use the C++ helper function
@@ -411,15 +410,14 @@ struct UnitTestProgram : public TestBase
         Dictionary<Expr, InputInfo> inputs;
         inputs.add(x, InputInfo(shape, inputBuf, 0));
 
-        auto outputBuffer = kernel.eval(task, inputs);
+        auto outputBuffer = kernel.allocResultBuffer(inputs);
+        kernel.eval(task, outputBuffer, inputs);
 
         // Readback
         renderDocBeginFrame();
         task.execute();
 
-        float output[2];
-        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuffer, 0, sizeof(output), output);
+        auto output = gInferencingCtx->readBuffer<float>(outputBuffer);
         renderDocEndFrame();
 
         // Verify
@@ -451,25 +449,25 @@ struct UnitTestProgram : public TestBase
         float dataB[] = {3, 4, 5};
         float dataC[] = {6};
 
-        auto bufA = gInferencingCtx->createBuffer(dataA, sizeof(dataA));
-        auto bufB = gInferencingCtx->createBuffer(dataB, sizeof(dataB));
-        auto bufC = gInferencingCtx->createBuffer(dataC, sizeof(dataC));
+        auto bufA = gInferencingCtx->createPersistentBuffer(dataA, sizeof(dataA));
+        auto bufB = gInferencingCtx->createPersistentBuffer(dataB, sizeof(dataB));
+        auto bufC = gInferencingCtx->createPersistentBuffer(dataC, sizeof(dataC));
 
-        rhi::IBuffer* inputs[] = {bufA, bufB, bufC};
+        BufferView inputs[] = {bufA, bufB, bufC};
         Shape shapes[] = {Shape({2}), Shape({3}), Shape({1})};
 
         ConcatKernel kernel(gInferencingCtx, 3);
         auto task = gInferencingCtx->createTask();
+        auto outputBuffer = kernel.allocResultBuffer(makeArrayView(shapes), 0);
 
-        auto outputBuf = kernel.queueExecute(task, makeArrayView(inputs), makeArrayView(shapes), 0);
+        kernel.queueExecute(task, outputBuffer, makeArrayView(inputs), makeArrayView(shapes), 0);
 
         // Readback
         renderDocBeginFrame();
         task.execute();
-        float output[6];
-        gDevice->getQueue(rhi::QueueType::Graphics)->waitOnHost();
-        gDevice->readBuffer(outputBuf, 0, sizeof(output), output);
         renderDocEndFrame();
+
+        auto output = gInferencingCtx->readBuffer<float>(outputBuffer);
 
         // Verify
         float expected[] = {1, 2, 3, 4, 5, 6};

@@ -135,18 +135,24 @@ struct SimpleUNetProgram : public TestBase
             noiseSchedule[t].beta = betaT;
             noiseSchedule[t].alphaCumprod = currentAlphaCumprod;
         }
-        auto imageA = gInferencingCtx->createBuffer(
+        auto imageAStorage = gInferencingCtx->createPersistentBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
             "imageA");
-        auto imageB = gInferencingCtx->createBuffer(
-            nullptr,
+        auto imageA = BufferView(imageAStorage);
+        auto imageB = gInferencingCtx->allocScratchBuffer(
             inputImageData.getCount() * sizeof(float),
             "imageB");
         auto outputImage = imageA;
         static const int largePrime = 15485863;
         renderDocBeginFrame();
         auto task = gInferencingCtx->createTask();
+        gInferencingCtx->pushAllocScope();
+        SLANG_DEFER(gInferencingCtx->popAllocScope());
+
+        auto predictedNoise = gInferencingCtx->allocScratchBuffer(
+            inputImageData.getCount() * sizeof(float),
+            "predictedNoise");
         for (int step = inferenceSteps - 1; step >= 0; step--)
         {
             // Map 0..100 -> 0..500
@@ -166,10 +172,11 @@ struct SimpleUNetProgram : public TestBase
             float alphaBar_prev = (step_prev < 0) ? 1.0f : noiseSchedule[t_prev].alphaCumprod;
 
             // Use 't' for the model, but 'step' for the loop logic
-            auto predictedNoise = model.forward(task, imageA, imageSize, imageSize, t);
+
+            model.queueExecute(task, predictedNoise, imageA, imageSize, imageSize, t, 1);
 
             auto noiseParam = noiseSchedule[t];
-            diffusionKernel.forward(
+            diffusionKernel.queueExecute(
                 task,
                 imageA,
                 predictedNoise,
@@ -191,13 +198,7 @@ struct SimpleUNetProgram : public TestBase
         renderDocEndFrame();
 
         // Read back final image
-        List<float> outputImageData;
-        outputImageData.setCount(imageSize * imageSize * outputChannelCount);
-        gDevice->readBuffer(
-            outputImage,
-            0,
-            outputImageData.getCount() * sizeof(float),
-            outputImageData.getBuffer());
+        List<float> outputImageData = gInferencingCtx->readBuffer<float>(outputImage);
 
         // Save to disk as png
         // Convert to 8-bit
@@ -231,17 +232,11 @@ struct SimpleUNetProgram : public TestBase
         return result;
     }
 
-    bool checkOutput(rhi::IBuffer* outputBuffer, const List<float>& expectedOutput)
+    bool checkOutput(BufferView outputBuffer, const List<float>& expectedOutput)
     {
-        List<float> outputData;
-        outputData.setCount(expectedOutput.getCount());
-        if (outputBuffer->getDesc().size < outputData.getCount() * sizeof(float))
+        if (outputBuffer.size < expectedOutput.getCount() * sizeof(float))
             return false;
-        gDevice->readBuffer(
-            outputBuffer,
-            0,
-            outputData.getCount() * sizeof(float),
-            outputData.getBuffer());
+        auto outputData = gInferencingCtx->readBuffer<float>(outputBuffer);
         for (Index i = 0; i < outputData.getCount(); i++)
         {
             if (isnan(outputData[i]))
@@ -268,7 +263,8 @@ struct SimpleUNetProgram : public TestBase
         SLANG_RETURN_ON_FAIL(glboalTimeEmbedKernel.loadParams(reader));
 
         auto task = gInferencingCtx->createTask();
-        auto output = glboalTimeEmbedKernel.queueExecute(task, 495);
+        auto output = glboalTimeEmbedKernel.allocResultBuffer(1);
+        glboalTimeEmbedKernel.queueExecute(task, output, 495);
         task.execute();
 
         TEST_CHECK("testGlobalTimeEmbed", checkOutput(output, expectedOutput));
@@ -286,14 +282,15 @@ struct SimpleUNetProgram : public TestBase
             TorchParamReader(resourceBase.resolveResource("debug_dump/conv0.bin"));
         SLANG_RETURN_ON_FAIL(initialConvKernel.loadParams(reader, false));
         List<float> inputImageData = loadRawFloats("debug_dump/initial_x_input.bin");
-        auto inputImage = gInferencingCtx->createBuffer(
+        auto inputImage = gInferencingCtx->createPersistentBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
             "inputImage");
         auto task = gInferencingCtx->createTask();
-        auto output = initialConvKernel.queueExecute(task, inputImage, 32, 32, 1);
+        auto outputImage = initialConvKernel.allocateResultBuffer(32, 32, 1, 1);
+        initialConvKernel.queueExecute(task, outputImage, BufferView(inputImage), 32, 32, 1);
         task.execute();
-        TEST_CHECK("testInitialConv", checkOutput(output, expectedOutput));
+        TEST_CHECK("testInitialConv", checkOutput(outputImage, expectedOutput));
         return SLANG_OK;
     }
 
@@ -325,7 +322,7 @@ struct SimpleUNetProgram : public TestBase
         // 4. Load Input
         // Input size should be 32x32x128
         List<float> inputImageData = loadRawFloats("debug_dump/down0_transform_input.bin");
-        auto inputImage = gInferencingCtx->createBuffer(
+        auto inputImage = gInferencingCtx->createPersistentBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
             "down0TransformInput");
@@ -333,7 +330,8 @@ struct SimpleUNetProgram : public TestBase
         // 5. Execute
         // Input: 32x32. Stride: 2. Padding: 1.
         auto task = gInferencingCtx->createTask();
-        auto output = transformKernel.queueExecute(task, inputImage, 32, 32, 1);
+        auto output = transformKernel.allocateResultBuffer(32, 32, 1, 1);
+        transformKernel.queueExecute(task, output, BufferView(inputImage), 32, 32, 1);
 
         task.execute();
 
@@ -374,13 +372,14 @@ struct SimpleUNetProgram : public TestBase
         // 4. Load Input
         // Input size should be 32x32x64
         List<float> inputImageData = loadRawFloats("debug_dump/down0_conv1_input.bin");
-        auto inputImage = gInferencingCtx->createBuffer(
+        auto inputImage = gInferencingCtx->createPersistentBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
             "down0Conv1Input");
         // 5. Execute
         auto task = gInferencingCtx->createTask();
-        auto output = conv1Kernel.queueExecute(task, inputImage, 32, 32, 1);
+        auto output = conv1Kernel.allocateResultBuffer(32, 32, 1, 1);
+        conv1Kernel.queueExecute(task, output, BufferView(inputImage), 32, 32, 1);
         task.execute();
         // 6. Verify
         TEST_CHECK("testDown0Conv1", checkOutput(output, expectedOutput));
@@ -397,12 +396,12 @@ struct SimpleUNetProgram : public TestBase
         BroadcastAddKernel broadcastAddKernel = BroadcastAddKernel(gInferencingCtx);
         // 3. Load Inputs
         List<float> inputAData = loadRawFloats("debug_dump/down0_conv1_fused_output.bin");
-        auto inputABuffer = gInferencingCtx->createBuffer(
+        auto inputABuffer = gInferencingCtx->createPersistentBuffer(
             inputAData.getBuffer(),
             inputAData.getCount() * sizeof(float),
             "broadcastAddInputA");
         List<float> inputBData = loadRawFloats("debug_dump/down0_time_proj_output.bin");
-        auto inputBBuffer = gInferencingCtx->createBuffer(
+        auto inputBBuffer = gInferencingCtx->createPersistentBuffer(
             inputBData.getBuffer(),
             inputBData.getCount() * sizeof(float),
             "broadcastAddInputB");
@@ -410,11 +409,14 @@ struct SimpleUNetProgram : public TestBase
         auto task = gInferencingCtx->createTask();
         int shapeA[] = {32, 32, 128};
         int shapeB[] = {1, 1, 128};
-        auto output = broadcastAddKernel.queueExecute(
+        auto output =
+            broadcastAddKernel.allocResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), 1);
+        broadcastAddKernel.queueExecute(
             task,
-            inputABuffer,
+            output,
+            BufferView(inputABuffer),
             makeArrayView(shapeA),
-            inputBBuffer,
+            BufferView(inputBBuffer),
             makeArrayView(shapeB));
         task.execute();
         // 5. Verify
@@ -440,22 +442,30 @@ struct SimpleUNetProgram : public TestBase
             TEST_CHECK(
                 "testDown0_timeProjWeights",
                 checkOutput(
-                    model.downBlocks[0]->timeEmbedTransform->weightsBuffer,
+                    BufferView(model.downBlocks[0]->timeEmbedTransform->weightsBuffer),
                     linearParams.weights));
         }
 
         List<float> imageInputData = loadRawFloats("debug_dump/down0_conv1_input.bin");
-        auto inputImage = gInferencingCtx->createBuffer(
+        auto inputImage = gInferencingCtx->createPersistentBuffer(
             imageInputData.getBuffer(),
             imageInputData.getCount() * sizeof(float),
             "inputImage");
         List<float> timeEmbedInputData = loadRawFloats("debug_dump/down0_time_proj_input.bin");
-        auto timeEmbedInput = gInferencingCtx->createBuffer(
+        auto timeEmbedInput = gInferencingCtx->createPersistentBuffer(
             timeEmbedInputData.getBuffer(),
             timeEmbedInputData.getCount() * sizeof(float),
             "timeEmbedInput");
         auto task = gInferencingCtx->createTask();
-        auto result = model.downBlocks[0]->forward(task, inputImage, 32, 32, timeEmbedInput);
+        auto result = model.downBlocks[0]->allocateResultBuffer(32, 32, 1);
+        model.downBlocks[0]->queueExecute(
+            task,
+            result,
+            BufferView(inputImage),
+            32,
+            32,
+            1,
+            BufferView(timeEmbedInput));
         task.execute();
         TEST_CHECK("testDown0", checkOutput(result, expectedOutput));
         return SLANG_OK;
@@ -468,7 +478,7 @@ struct SimpleUNetProgram : public TestBase
         // just use the 'up0_concat_output' and slice it in half if you want to be clever.
         // Better: Add hook for 'model.downs[-1]' output in Python -> 'down3_output.bin'
         auto down3Out = loadRawFloats("debug_dump/down3_transform_output.bin");
-        auto buffer = gInferencingCtx->createBuffer(
+        auto buffer = gInferencingCtx->createPersistentBuffer(
             down3Out.getBuffer(),
             down3Out.getCount() * sizeof(float),
             "down3Out");
@@ -483,8 +493,9 @@ struct SimpleUNetProgram : public TestBase
         // In this specific model, down3 outputs [2, 2, 1024] (assuming 32x32 -> 2x2)
         // Concatenating two of them -> [2, 2, 2048]
         Shape shapes[] = {{2, 2, 1024}, {2, 2, 1024}};
-        rhi::IBuffer* buffers[] = {buffer, buffer};
-        auto result = concat.queueExecute(task, makeArrayView(buffers), makeArrayView(shapes), 2);
+        BufferView buffers[] = {BufferView(buffer), BufferView(buffer)};
+        auto result = concat.allocResultBuffer(makeArrayView(shapes), 2);
+        concat.queueExecute(task, result, makeArrayView(buffers), makeArrayView(shapes), 2);
 
         task.execute();
         TEST_CHECK("testBottleneckConcat", checkOutput(result, expected));
@@ -495,13 +506,13 @@ struct SimpleUNetProgram : public TestBase
     {
         // 1. Input: The Concatenated tensor (2048 channels)
         auto inputData = loadRawFloats("debug_dump/up0_concat_output.bin");
-        auto inputBuf = gInferencingCtx->createBuffer(
+        auto inputBuf = gInferencingCtx->createPersistentBuffer(
             inputData.getBuffer(),
             inputData.getCount() * sizeof(float));
 
         // 2. Time Input
         auto timeData = loadRawFloats("debug_dump/down0_time_proj_input.bin");
-        auto timeBuf = gInferencingCtx->createBuffer(
+        auto timeBuf = gInferencingCtx->createPersistentBuffer(
             timeData.getBuffer(),
             timeData.getCount() * sizeof(float));
 
@@ -520,7 +531,8 @@ struct SimpleUNetProgram : public TestBase
         // 4. Execute
         auto task = gInferencingCtx->createTask();
         // Input size: 2x2. Output should be 4x4.
-        auto result = upBlock.forward(task, inputBuf, 2, 2, timeBuf);
+        auto result = upBlock.allocateResultBuffer(2, 2, 1);
+        upBlock.queueExecute(task, result, BufferView(inputBuf), 2, 2, 1, BufferView(timeBuf));
 
         task.execute();
 
@@ -541,17 +553,15 @@ struct SimpleUNetProgram : public TestBase
         if (inputData.getCount() == 0)
             return SLANG_FAIL;
 
-        auto inputImage = gInferencingCtx->createBuffer(
-            inputData.getBuffer(),
-            inputData.getCount() * sizeof(float),
-            "step495_input");
+        auto inputImage = gInferencingCtx->createPersistentBuffer(inputData, "step495_input");
 
         // 3. Run Forward Pass
         int t = 495;
         auto task = gInferencingCtx->createTask();
 
         // Note: ensure input width/height matches Python (32)
-        auto result = model.forward(task, inputImage, 32, 32, t);
+        auto result = gInferencingCtx->createPersistentBuffer(inputData, "step495_output");
+        model.queueExecute(task, BufferView(result), BufferView(inputImage), 32, 32, t, 1);
 
         task.execute(); // Or just let debug mode handle it
 

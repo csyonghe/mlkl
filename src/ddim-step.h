@@ -10,11 +10,11 @@ protected:
 
 public:
     DDIMStepKernel(RefPtr<InferencingContext> inferencingCtx);
-    void forward(
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* currentImage,
-        rhi::IBuffer* predictedNoise,
-        rhi::IBuffer* outputImage,
+        BufferView currentImage,
+        BufferView predictedNoise,
+        BufferView outputImage,
         float alphaBar_t,    // Current cumulative alpha
         float alphaBar_prev, // Target cumulative alpha
         int width,

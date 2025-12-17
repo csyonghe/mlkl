@@ -50,13 +50,11 @@ SlangResult TransposedConv2DKernel::loadParams(TorchParamReader& reader)
     TransposedConv2DLayerParams convParams;
     SLANG_RETURN_ON_FAIL(
         reader.readTransposedConv2DLayer(inChannels, outChannels, kernelSize, convParams));
-    biasesBuffer = context->createBuffer(convParams.biases);
-    if (!biasesBuffer)
-        return SLANG_FAIL;
-    weightsBuffer = context->createBuffer(convParams.weights);
-    if (!weightsBuffer)
-        return SLANG_FAIL;
-    return SLANG_OK;
+    return loadParams(
+        kernelSize,
+        outChannels,
+        convParams.weights.getBuffer(),
+        convParams.biases.getBuffer());
 }
 
 SlangResult TransposedConv2DKernel::loadParams(
@@ -65,16 +63,36 @@ SlangResult TransposedConv2DKernel::loadParams(
     float* weightsData,
     float* biasesData)
 {
-    weightsBuffer = context->createBuffer(
+    weightsBuffer = context->createPersistentBuffer(
         weightsData,
         kernelSize * kernelSize * inChannels * outputChannelCount * sizeof(float));
     if (!weightsBuffer)
         return SLANG_FAIL;
-    biasesBuffer = context->createBuffer(biasesData, outputChannelCount * sizeof(float));
+    biasesBuffer = context->createPersistentBuffer(biasesData, outputChannelCount * sizeof(float));
     if (!biasesBuffer)
         return SLANG_FAIL;
     return SLANG_OK;
 }
+
+BufferView TransposedConv2DKernel::allocateResultBuffer(
+    int inputWidth,
+    int inputHeight,
+    int padding,
+    int batchSize)
+{
+    int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
+    int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
+
+    // Updated name for debug clarity
+    String resultBufferName = StringBuilder() << name << "_" + outputWidth << "x" << outputHeight
+                                              << "x" << outChannels << "_B" << batchSize;
+
+    auto outputBuffer = context->allocScratchBuffer(
+        batchSize * outputWidth * outputHeight * outChannels * sizeof(float),
+        resultBufferName.getBuffer());
+    return outputBuffer;
+}
+
 
 struct TransposedConv2DKernelParams
 {
@@ -91,9 +109,10 @@ struct TransposedConv2DKernelParams
     int batchSize;
 };
 
-ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
+void TransposedConv2DKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputImage,
+    BufferView outputImage,
+    BufferView inputImage,
     int inputWidth,
     int inputHeight,
     int padding,
@@ -102,18 +121,9 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
     int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
     int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
 
-    // Updated name for debug clarity
-    String resultBufferName = name + "_" + String(outputWidth) + "x" + String(outputHeight) + "x" +
-                              String(outChannels) + "_B" + String(batchSize);
-
-    // Allocate for ALL batches
-    auto outputBuffer = task.allocateBuffer(
-        resultBufferName.getBuffer(),
-        batchSize * outputWidth * outputHeight * outChannels * sizeof(float));
-
     TransposedConv2DKernelParams params = {};
-    params.inputImage = inputImage->getDeviceAddress();
-    params.outputImage = outputBuffer->getDeviceAddress();
+    params.inputImage = inputImage.getDeviceAddress();
+    params.outputImage = outputImage.getDeviceAddress();
     params.inputImageWidth = inputWidth;
     params.inputImageHeight = inputHeight;
     params.outputImageWidth = outputWidth;
@@ -151,5 +161,4 @@ ComPtr<rhi::IBuffer> TransposedConv2DKernel::queueExecute(
             totalZBlocks,
             params);
     }
-    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

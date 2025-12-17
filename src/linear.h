@@ -21,8 +21,10 @@ public:
         int inputSize,
         int outputSize);
     SlangResult loadParams(TorchParamReader& reader);
-    ComPtr<rhi::IBuffer> queueExecute(
+    BufferView allocateResultBuffer(int batchSize);
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputVectorint,
+        BufferView output,
+        BufferView inputVector,
         int batchSize = 1);
 };

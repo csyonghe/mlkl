@@ -15,5 +15,11 @@ public:
     TimeEmbedingKernel(InferencingContext* context, int outputChannels);
 
     SlangResult loadParams(TorchParamReader& reader);
-    ComPtr<rhi::IBuffer> queueExecute(InferencingTask& task, uint32_t timeStep, int batchSize = 1);
+
+    BufferView allocResultBuffer(int batchSize);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        uint32_t timeStep,
+        int batchSize = 1);
 };

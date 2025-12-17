@@ -14,14 +14,22 @@ SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
     logInfo("Loading TimeEmbed Linear Layer: outputChannel %d\n", outputChannels);
     LinearLayerParams linearParams;
     reader.readLinearLayer(outputChannels, outputChannels, linearParams);
-    biasesBuffer = context->createBuffer(linearParams.biases);
+    biasesBuffer = context->createPersistentBuffer(linearParams.biases);
     if (!biasesBuffer)
         return SLANG_FAIL;
-    weightsBuffer = context->createBuffer(linearParams.weights);
+    weightsBuffer = context->createPersistentBuffer(linearParams.weights);
     if (!weightsBuffer)
         return SLANG_FAIL;
     return SLANG_OK;
 }
+
+BufferView TimeEmbedingKernel::allocResultBuffer(int batchSize)
+{
+    return context->allocScratchBuffer(
+        batchSize * outputChannels * sizeof(float),
+        "time_embed_output");
+}
+
 
 struct TimeEmbeddingKernelParams
 {
@@ -34,17 +42,14 @@ struct TimeEmbeddingKernelParams
     uint32_t batchSize;
 };
 
-ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(
+void TimeEmbedingKernel::queueExecute(
     InferencingTask& task,
+    BufferView output,
     uint32_t timeStep,
     int batchSize)
 {
-    // Allocate [Batch, OutputDim]
-    auto outputBuffer =
-        task.allocateBuffer("time-embed", batchSize * outputChannels * sizeof(float));
-
     TimeEmbeddingKernelParams params = {};
-    params.output = outputBuffer->getDeviceAddress();
+    params.output = output.getDeviceAddress();
     params.weights = weightsBuffer->getDeviceAddress();
     params.biases = biasesBuffer->getDeviceAddress();
     params.embeddingDim = outputChannels;
@@ -56,6 +61,4 @@ ComPtr<rhi::IBuffer> TimeEmbedingKernel::queueExecute(
     // Group size is 32 in X.
     uint32_t threadsX = (outputChannels + 31) / 32;
     task.dispatchKernel(pipeline, threadsX, batchSize, 1, params);
-
-    return ComPtr<rhi::IBuffer>(outputBuffer);
 }

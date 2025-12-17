@@ -32,14 +32,18 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    void writeResult(const char* name, rhi::IBuffer* buffer);
+    void writeResult(const char* name, BufferView buffer);
 
-    ComPtr<rhi::IBuffer> forward(
+    BufferView allocateResultBuffer(int inputWidth, int inputHeight, int batchSize);
+
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputImage,
+        BufferView output,
+        BufferView inputImage,
         int inputWidth,
         int inputHeight,
-        rhi::IBuffer* timeEmbedding);
+        int batchSize,
+        BufferView timeEmbedding);
 };
 
 class UNetModel : public RefObject
@@ -58,10 +62,12 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    ComPtr<rhi::IBuffer> forward(
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputImage,
+        BufferView outputImage,
+        BufferView inputImage,
         int inputWidth,
         int inputHeight,
-        int timeStep);
+        int timeStep,
+        int batchSize);
 };

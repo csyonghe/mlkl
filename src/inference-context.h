@@ -5,6 +5,7 @@
 #include "external/slang-rhi/include/slang-rhi.h"
 #include "slang-com-ptr.h"
 #include "slang.h"
+#include "stack-allocator.h"
 
 using namespace Slang;
 
@@ -21,7 +22,6 @@ public:
     InferencingContext* context;
     List<ComPtr<rhi::IShaderObject>> kernelParamObjects;
     List<ComPtr<rhi::IBuffer>> buffers;
-
     ComPtr<rhi::IShaderObject> createKernelParamObject(slang::TypeLayoutReflection* typeLayout);
 
 public:
@@ -54,9 +54,6 @@ public:
             &paramData,
             sizeof(TParams));
     }
-
-    rhi::IBuffer* allocateBuffer(const char* name, size_t size, void* initData = nullptr);
-
     void execute();
 };
 
@@ -67,9 +64,10 @@ private:
     ComPtr<slang::ISession> slangSession;
     ComPtr<slang::IModule> slangModule;
     Dictionary<MD5::Digest, ComPtr<rhi::IComputePipeline>> pipelineCache;
+    RefPtr<StackAllocator> allocator;
 
 public:
-    InferencingContext(rhi::IDevice* device);
+    InferencingContext(rhi::IDevice* device, size_t defaultPageSize = 1024 * 1024 * 1024);
     ComPtr<rhi::IComputePipeline> createComputePipeline(
         const char* entryPointName,
         Slang::ConstArrayView<String> specArgs);
@@ -77,14 +75,33 @@ public:
 
     inline rhi::IDevice* getDevice() const { return device; }
 
+    StackAllocator* getAllocator() const { return allocator; }
+
     InferencingTask createTask();
 
-    ComPtr<rhi::IBuffer> createBuffer(const void* data, size_t size, const char* label = nullptr);
+    void pushAllocScope() { allocator->push(); }
+    void popAllocScope() { allocator->pop(); }
+    BufferView allocScratchBuffer(size_t size, const char* label = nullptr);
+
+    ComPtr<rhi::IBuffer> createPersistentBuffer(
+        const void* data,
+        size_t size,
+        const char* label = nullptr);
 
     template<typename T>
-    ComPtr<rhi::IBuffer> createBuffer(const List<T>& data)
+    List<T> readBuffer(BufferView buffer)
     {
-        return createBuffer(data.getBuffer(), data.getCount() * sizeof(T));
+        List<T> result;
+        size_t count = buffer.size / sizeof(T);
+        result.setCount(count);
+        getDevice()->readBuffer(buffer.buffer, buffer.offset, buffer.size, result.getBuffer());
+        return result;
+    }
+
+    template<typename T>
+    ComPtr<rhi::IBuffer> createPersistentBuffer(const List<T>& data, const char* label = nullptr)
+    {
+        return createPersistentBuffer(data.getBuffer(), data.getCount() * sizeof(T), label);
     }
 };
 
