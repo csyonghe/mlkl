@@ -1,10 +1,7 @@
 #pragma once
-#if 0
-#include "elementwise.h"
-#include "kernel-base.h"
-
-// Assumed Dependencies
 #include "batch-gemm.h"
+#include "broadcast-add.h"
+#include "kernel-base.h"
 #include "linear.h"
 #include "softmax.h"
 
@@ -12,51 +9,33 @@ class CrossAttentionKernel : public RefObject
 {
 private:
     InferencingContext* context;
-    
-    // -- Weights (Model Parameters) --
-    // In a real engine, these would be managed by a Model/Layer class.
-    // Here we own them for simplicity.
-    rhi::IBuffer* wQ = nullptr;
-    rhi::IBuffer* wK = nullptr;
-    rhi::IBuffer* wV = nullptr;
-    rhi::IBuffer* wOut = nullptr;
 
-    // -- Sub-Kernels --
-    RefPtr<LinearKernel> linear;       // Reused for Q, K, V, Out projections
-    RefPtr<BatchGemmKernel> batchGemm; // Reused for Q@K and Attn@V
+    // Sub-Kernels for Projections
+    // These hold the weights (wQ, wK, wV, wOut) internally
+    RefPtr<LinearKernel> projQ;
+    RefPtr<LinearKernel> projK;
+    RefPtr<LinearKernel> projV;
+    RefPtr<LinearKernel> projOut;
+
+    // Sub-Kernels for Attention Mechanism
+    RefPtr<BatchGemmKernel> batchGemm;
     RefPtr<SoftmaxKernel> softmax;
-    
-    // -- Intermediate Buffers --
-    // We cache these to avoid allocation overhead every frame.
-    ComPtr<rhi::IBuffer> bufQ;
-    ComPtr<rhi::IBuffer> bufK;
-    ComPtr<rhi::IBuffer> bufV;
-    ComPtr<rhi::IBuffer> bufScores; // Q @ K^T
-    ComPtr<rhi::IBuffer> bufProbs;  // Softmax(Scores)
-    ComPtr<rhi::IBuffer> bufAttn;   // Probs @ V
-
-    // Helper to resize buffers lazily
-    void ensureBuffer(ComPtr<rhi::IBuffer>& buf, size_t size, const char* name);
+    RefPtr<BroadcastAddKernel> broadcastAdd;
 
 public:
     CrossAttentionKernel(InferencingContext* ctx);
 
-    // Set weights for the layer (called during model load)
-    void setWeights(rhi::IBuffer* q, rhi::IBuffer* k, rhi::IBuffer* v, rhi::IBuffer* o);
+    // Load weights for all 4 internal linear layers
+    SlangResult loadParams(TorchParamReader& reader);
 
-    // Execute the full attention mechanism
-    // Input:  [Batch, SeqQ, Dim]
-    // Context: [Batch, SeqKV, Dim]
-    // Output: [Batch, SeqQ, Dim]
-    ComPtr<rhi::IBuffer> queueExecute(
+    void queueExecute(
         InferencingTask& task,
-        rhi::IBuffer* inputLatent,
-        rhi::IBuffer* contextEmb,
+        BufferView output,
+        BufferView inputLatent,
+        BufferView contextEmb,
         int batchSize,
         int seqQ,
         int seqKV,
-        int dim,       // Total Model Dimension (e.g. 768)
-        int numHeads   // Number of Heads (e.g. 12)
-    );
+        int dim,
+        int numHeads);
 };
-#endif

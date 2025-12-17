@@ -8,3 +8,5 @@ __include concat;
 __include broadcast_add;
 __include ddim_step;
 __include elementwise;
+__include batch_gemm;
+__include softmax;

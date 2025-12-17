@@ -1,34 +1,45 @@
-#if 0
 #include "cross-attention.h"
 
 #include <cmath>
 
-CrossAttentionKernel::CrossAttentionKernel(InferencingContext* ctx) 
+CrossAttentionKernel::CrossAttentionKernel(InferencingContext* ctx)
     : context(ctx)
 {
-    // Initialize sub-kernels
-    linear = new LinearKernel(ctx);
+    // Initialize kernels
+    // Note: Dimensions (input/output size) here are placeholders if your
+    // LinearKernel::loadParams overwrites them based on the file content.
+    // If not, you should pass the correct dims here or resize in loadParams.
+    // Assuming ActivationFunction::None for all projections.
+    projQ = new LinearKernel(ctx, ActivationFunction::None, 256, 0, 0);
+    projK = new LinearKernel(ctx, ActivationFunction::None, 256, 0, 0);
+    projV = new LinearKernel(ctx, ActivationFunction::None, 256, 0, 0);
+    projOut = new LinearKernel(ctx, ActivationFunction::None, 256, 0, 0);
+
     batchGemm = new BatchGemmKernel(ctx);
     softmax = new SoftmaxKernel(ctx);
+    broadcastAdd = new BroadcastAddKernel(ctx);
 }
 
-void CrossAttentionKernel::setWeights(rhi::IBuffer* q, rhi::IBuffer* k, rhi::IBuffer* v, rhi::IBuffer* o)
+SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
 {
-    wQ = q; wK = k; wV = v; wOut = o;
+    // The order must match your Python dump script:
+    // 1. to_q
+    SLANG_RETURN_ON_FAIL(projQ->loadParams(reader, false));
+    // 2. to_k
+    SLANG_RETURN_ON_FAIL(projK->loadParams(reader, false));
+    // 3. to_v
+    SLANG_RETURN_ON_FAIL(projV->loadParams(reader, false));
+    // 4. to_out
+    SLANG_RETURN_ON_FAIL(projOut->loadParams(reader, false));
+
+    return SLANG_OK;
 }
 
-void CrossAttentionKernel::ensureBuffer(ComPtr<rhi::IBuffer>& buf, size_t size, const char* name)
-{
-    if (!buf || buf->getDesc().size < size)
-    {
-        buf = context->allocScratchBuffer(size, rhi::ResourceState::UnorderedAccess, name);
-    }
-}
-
-ComPtr<rhi::IBuffer> CrossAttentionKernel::queueExecute(
+void CrossAttentionKernel::queueExecute(
     InferencingTask& task,
-    rhi::IBuffer* inputLatent, // Query Source
-    rhi::IBuffer* contextEmb,  // Key/Value Source
+    BufferView finalOutput,
+    BufferView inputLatent,
+    BufferView contextEmb,
     int batchSize,
     int seqQ,
     int seqKV,
@@ -38,106 +49,68 @@ ComPtr<rhi::IBuffer> CrossAttentionKernel::queueExecute(
     int headDim = dim / numHeads;
     float scale = 1.0f / sqrtf((float)headDim);
 
-    // 1. Allocate / Resize Intermediate Buffers
-    // ---------------------------------------------------------
-    // Q, K, V, Attn are all size [Batch, Seq, Dim] (float = 4 bytes)
-    size_t sizeQ = (size_t)batchSize * seqQ * dim * sizeof(float);
-    size_t sizeKV = (size_t)batchSize * seqKV * dim * sizeof(float);
-    
-    // Scores/Probs are size [Batch, Heads, SeqQ, SeqKV]
-    size_t sizeScores = (size_t)batchSize * numHeads * seqQ * seqKV * sizeof(float);
+    // 1. Projections
+    // The LinearKernel computes Output = Input @ W^T + Bias
 
-    ensureBuffer(bufQ, sizeQ, "Attn_Q");
-    ensureBuffer(bufK, sizeKV, "Attn_K");
-    ensureBuffer(bufV, sizeKV, "Attn_V");
-    ensureBuffer(bufScores, sizeScores, "Attn_Scores");
-    ensureBuffer(bufProbs, sizeScores, "Attn_Probs");
-    ensureBuffer(bufAttn, sizeQ, "Attn_Output");
+    // Q = inputLatent @ W_q
+    BufferView bufQ = projQ->allocateResultBuffer(batchSize * seqQ);
+    projQ->queueExecute(task, bufQ, inputLatent, batchSize * seqQ);
 
-    auto finalOutput = task.allocateBuffer("CrossAttn_Final", sizeQ);
+    // K = contextEmb @ W_k
+    BufferView bufK = projK->allocateResultBuffer(batchSize * seqKV);
+    projK->queueExecute(task, bufK, contextEmb, batchSize * seqKV);
 
-    // 2. Linear Projections (Input -> Q, Context -> K, V)
-    // ---------------------------------------------------------
-    // Viewed as: [Batch * Seq, Dim] * [Dim, Dim] -> [Batch * Seq, Dim]
-    
-    // Q = Input * W_q
-    linear->queueExecute(task, inputLatent, wQ, nullptr, bufQ, batchSize * seqQ, dim, dim);
-    
-    // K = Context * W_k
-    linear->queueExecute(task, contextEmb, wK, nullptr, bufK, batchSize * seqKV, dim, dim);
-    
-    // V = Context * W_v
-    linear->queueExecute(task, contextEmb, wV, nullptr, bufV, batchSize * seqKV, dim, dim);
+    // V = contextEmb @ W_v
+    BufferView bufV = projV->allocateResultBuffer(batchSize * seqKV);
+    projV->queueExecute(task, bufV, contextEmb, batchSize * seqKV);
 
-    // 3. Scaled Dot Product Attention: Scores = alpha * (Q @ K^T)
-    // ---------------------------------------------------------
-    // BatchGemm handles the multi-head view implicitly by strides.
-    // Q: [Batch, Heads, SeqQ, HeadDim]
-    // K: [Batch, Heads, SeqKV, HeadDim] (Transposed to [HeadDim, SeqKV] logically)
-    // Out: [Batch, Heads, SeqQ, SeqKV]
-    
+    // 2. Attention Scores: Q @ K^T
+    // Q: [Batch*Heads, SeqQ, HeadDim]
+    // K: [Batch*Heads, SeqKV, HeadDim] -> Transposed to [HeadDim, SeqKV]
+    BufferView bufScores = batchGemm->allocResultBuffer(batchSize * numHeads, seqQ, seqKV);
+
     batchGemm->queueExecute(
         task,
-        bufQ,       // Matrix A
-        bufK,       // Matrix B
-        bufScores,  // Matrix C
-        
-        batchSize * numHeads, // Batch Count for GEMM
-        seqQ,                 // M
-        seqKV,                // N
-        headDim,              // K
-        
-        scale,      // alpha (Fused 1/sqrt(d) scaling here!)
-        0.0f,       // beta
-        
-        false,      // Transpose A? No
-        true        // Transpose B? Yes (K^T)
+        bufScores,
+        bufQ,
+        bufK,
+        batchSize * numHeads,
+        seqQ,
+        seqKV,
+        headDim,
+        scale,
+        0.0f,
+        false,
+        true // Transpose B (K)
     );
 
-    // 4. Softmax
-    // ---------------------------------------------------------
-    // Normalize along the last dimension (SeqKV)
-    // Input: [Batch, Heads, SeqQ, SeqKV]
-    softmax->queueExecute(task, bufScores, bufProbs, seqKV); 
+    // 3. Softmax
+    BufferView bufProbs = softmax->allocResultBuffer(batchSize * numHeads * seqQ, seqKV);
+    softmax->queueExecute(task, bufProbs, bufScores, batchSize * numHeads * seqQ, seqKV);
 
-    // 5. Weighted Sum: Output = Probs @ V
-    // ---------------------------------------------------------
-    // Probs: [Batch, Heads, SeqQ, SeqKV]
-    // V:     [Batch, Heads, SeqKV, HeadDim]
-    // Out:   [Batch, Heads, SeqQ, HeadDim]
-    
+    // 4. Weighted Sum: Probs @ V
+    BufferView bufAttnOut = batchGemm->allocResultBuffer(batchSize * numHeads, seqQ, headDim);
+
     batchGemm->queueExecute(
         task,
-        bufProbs,   // Matrix A
-        bufV,       // Matrix B
-        bufAttn,    // Matrix C
-        
-        batchSize * numHeads, // Batch Count
-        seqQ,                 // M
-        headDim,              // N
-        seqKV,                // K
-        
-        1.0f, 0.0f, // alpha, beta
-        false,      // Transpose A? No
-        false       // Transpose B? No
-    );
+        bufAttnOut,
+        bufProbs,
+        bufV,
+        batchSize * numHeads,
+        seqQ,
+        headDim,
+        seqKV,
+        1.0f,
+        0.0f,
+        false,
+        false);
 
-    // 6. Output Projection
-    // ---------------------------------------------------------
-    // View as: [Batch * SeqQ, Dim] * [Dim, Dim]
-    // Final = bufAttn * W_out
-    
-    linear->queueExecute(
-        task, 
-        bufAttn, 
-        wOut, 
-        nullptr, 
-        finalOutput, 
-        batchSize * seqQ, 
-        dim, 
-        dim
-    );
+    // 5. Output Projection
+    // We project the result of attention back to original dim
+    BufferView bufProjected = projOut->allocateResultBuffer(batchSize * seqQ);
+    projOut->queueExecute(task, bufProjected, bufAttnOut, batchSize * seqQ);
 
-    return ComPtr<rhi::IBuffer>(finalOutput);
+    // 6. Residual Connection: Output = inputLatent + bufProjected
+    Shape shape = {(int)batchSize, (int)seqQ, (int)dim};
+    broadcastAdd->queueExecute(task, finalOutput, inputLatent, shape, bufProjected, shape);
 }
-#endif

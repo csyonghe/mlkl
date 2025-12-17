@@ -30,13 +30,14 @@ LinearKernel::LinearKernel(
     pipeline = context->createComputePipeline("linearLayer", makeConstArrayView(specArgs));
 }
 
-SlangResult LinearKernel::loadParams(TorchParamReader& reader)
+SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
 {
     logInfo("Loading Linear Layer: inputSize=%d, outputSize=%d\n", inputSize, outputSize);
     LinearLayerParams params;
     SLANG_RETURN_ON_FAIL(reader.readLinearLayer(inputSize, outputSize, params));
     weightsBuffer = context->createPersistentBuffer(params.weights);
-    biasesBuffer = context->createPersistentBuffer(params.biases);
+    if (loadBias)
+        biasesBuffer = context->createPersistentBuffer(params.biases);
     return SLANG_OK;
 }
 
@@ -68,7 +69,7 @@ void LinearKernel::queueExecute(
     paramsData.inputVector = inputVector.getDeviceAddress();
     paramsData.outputVector = output.getDeviceAddress();
     paramsData.weights = weightsBuffer->getDeviceAddress();
-    paramsData.biases = biasesBuffer->getDeviceAddress();
+    paramsData.biases = biasesBuffer ? biasesBuffer->getDeviceAddress() : 0;
     paramsData.inputSize = inputSize;
     paramsData.outputSize = outputSize;
     paramsData.batchSize = batchSize;

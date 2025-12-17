@@ -34,7 +34,7 @@ void linearLayer<int tileSize, TActivation : IActivation>(
     float* batchOutput = params.outputVector + (batchIdx * params.outDim);
 
     // 1. Initialize with Bias
-    float sum = params.biases[outChannel];
+    float sum = params.biases ? params.biases[outChannel] : 0.0f;
 
     // 2. Perform Dot Product
     // Iterate over input dimension

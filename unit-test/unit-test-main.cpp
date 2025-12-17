@@ -38,7 +38,8 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testMaterialize());
         SLANG_RETURN_ON_FAIL(testSimpleConvolution());
         SLANG_RETURN_ON_FAIL(testSimpleTransposedConvolution());
-
+        SLANG_RETURN_ON_FAIL(testSoftmax());
+        SLANG_RETURN_ON_FAIL(testBatchGemm());
         printf("all tests passed!\n");
         return SLANG_OK;
     }
@@ -55,6 +56,24 @@ struct UnitTestProgram : public TestBase
 
 #define TEST_CHECK(testName, condition) \
     SLANG_RETURN_ON_FAIL(testCheck((condition), (testName), #condition))
+    bool checkOutput(BufferView outputBuffer, const List<float>& expectedOutput)
+    {
+        if (outputBuffer.size < expectedOutput.getCount() * sizeof(float))
+            return false;
+        auto outputData = gInferencingCtx->readBuffer<float>(outputBuffer);
+        for (Index i = 0; i < outputData.getCount(); i++)
+        {
+            if (isnan(outputData[i]))
+                return false;
+            float diff = fabs(outputData[i] - expectedOutput[i]);
+            if (diff < 1e-2f)
+                continue;
+            float abs = fabs(outputData[i]);
+            if (abs > 1e-3f)
+                return false;
+        }
+        return true;
+    }
 
     SlangResult testSimpleConvolution()
     {
@@ -479,6 +498,223 @@ struct UnitTestProgram : public TestBase
                 return SLANG_FAIL;
             }
         }
+        return SLANG_OK;
+    }
+
+    // --- Helpers for CPU Reference Calculation ---
+
+    void cpuSoftmax(const float* input, float* output, int stride, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            const float* rowIn = input + i * stride;
+            float* rowOut = output + i * stride;
+
+            float maxVal = -1e38f;
+            for (int j = 0; j < stride; j++)
+                maxVal = std::max(maxVal, rowIn[j]);
+
+            float sum = 0.0f;
+            for (int j = 0; j < stride; j++)
+            {
+                float v = std::exp(rowIn[j] - maxVal);
+                rowOut[j] = v;
+                sum += v;
+            }
+
+            for (int j = 0; j < stride; j++)
+                rowOut[j] /= sum;
+        }
+    }
+
+    void cpuBatchGemm(
+        const float* A,
+        const float* B,
+        float* C,
+        int batch,
+        int M,
+        int N,
+        int K,
+        bool transA,
+        bool transB)
+    {
+        // Sizes of physical matrices
+        // If transA, A is [K, M], else [M, K]
+        // If transB, B is [N, K], else [K, N]
+        // C is always [M, N]
+
+        int strideA = M * K;
+        int strideB = K * N;
+        int strideC = M * N;
+
+        // Logical Leading Dimensions
+        int lda = transA ? M : K; // Stride of the major dimension
+        int ldb = transB ? K : N;
+
+        for (int b = 0; b < batch; b++)
+        {
+            const float* matA = A + b * strideA;
+            const float* matB = B + b * strideB;
+            float* matC = C + b * strideC;
+
+            for (int r = 0; r < M; r++)
+            {
+                for (int c = 0; c < N; c++)
+                {
+                    float sum = 0.0f;
+                    for (int k = 0; k < K; k++)
+                    {
+                        // Get A[r, k]
+                        // If TransA: Physical is [k, r] -> k * lda + r
+                        // If NormA:  Physical is [r, k] -> r * lda + k
+                        float valA = transA ? matA[k * lda + r] : matA[r * lda + k];
+
+                        // Get B[k, c] (Logical)
+                        // If TransB: We want Logical B_T[k, c] -> Physical B[c, k] -> c * ldb + k
+                        // If NormB:  Physical B[k, c] -> k * ldb + c
+                        float valB = transB ? matB[c * ldb + k] : matB[k * ldb + c];
+
+                        sum += valA * valB;
+                    }
+                    matC[r * N + c] = sum;
+                }
+            }
+        }
+    }
+
+    void initImage(List<float>& imageData, int width, int height, int channels = 1)
+    {
+        uint32_t seed = 1723;
+        std::mt19937 gen(seed);
+
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        imageData.setCount(width * height * channels);
+
+        // 3. Generate
+        for (Index i = 0; i < imageData.getCount(); i++)
+        {
+            imageData[i] = dist(gen);
+        }
+    }
+
+    SlangResult testSoftmax()
+    {
+        printf("Running testSoftmax...\n");
+        int rows = 16;
+        int cols = 128; // Sequence length
+        List<float> inputData;
+        initImage(inputData, rows, cols, 1); // Reuse helper to gen random floats
+
+        List<float> expectedOutput;
+        expectedOutput.setCount(inputData.getCount());
+        cpuSoftmax(inputData.getBuffer(), expectedOutput.getBuffer(), cols, rows);
+
+        // Upload Input
+        auto inputBuf = gInferencingCtx->createPersistentBuffer(inputData, "SoftmaxInput");
+
+        // Execute Kernel
+        SoftmaxKernel kernel(gInferencingCtx);
+        auto task = gInferencingCtx->createTask();
+        auto outputBuf = kernel.allocResultBuffer(rows, cols);
+
+        kernel.queueExecute(task, outputBuf, BufferView(inputBuf), rows, cols);
+        task.execute();
+
+        TEST_CHECK("testSoftmax", checkOutput(outputBuf, expectedOutput));
+        return SLANG_OK;
+    }
+
+    SlangResult testBatchGemm()
+    {
+        printf("Running testBatchGemm...\n");
+        // Test Parameters: A[2, 32, 64] @ B[2, 64, 32] -> C[2, 32, 32]
+        // Case 1: Standard Multiplication
+        {
+            int batch = 2;
+            int M = 32, N = 32, K = 64;
+
+            List<float> A, B, Expected;
+            initImage(A, M, K, batch);
+            initImage(B, K, N, batch); // K rows, N cols physically
+            Expected.setCount(batch * M * N);
+
+            cpuBatchGemm(
+                A.getBuffer(),
+                B.getBuffer(),
+                Expected.getBuffer(),
+                batch,
+                M,
+                N,
+                K,
+                false,
+                false);
+
+            auto bufA = gInferencingCtx->createPersistentBuffer(A, "GemmA");
+            auto bufB = gInferencingCtx->createPersistentBuffer(B, "GemmB");
+
+            BatchGemmKernel kernel(gInferencingCtx);
+            auto bufC = kernel.allocResultBuffer(batch, M, N);
+
+            auto task = gInferencingCtx->createTask();
+            kernel.queueExecute(task, bufC, BufferView(bufA), BufferView(bufB), batch, M, N, K);
+            task.execute();
+
+            TEST_CHECK("BatchGemm_Normal", checkOutput(bufC, Expected));
+        }
+
+        // Case 2: Transpose B (Crucial for Attention Q @ K^T)
+        // We want C = A @ B^T
+        // A: [M, K]
+        // B: [N, K] (Physical layout is N rows, K cols)
+        // Logical op: [M, K] x [K, N] -> [M, N]
+        {
+            int batch = 2;
+            int M = 16, N = 16, K = 64;
+
+            List<float> A, B, Expected;
+            initImage(A, M, K, batch);
+            initImage(B, N, K, batch); // Note physical shape: N rows, K cols
+            Expected.setCount(batch * M * N);
+
+            // CPU computes A @ B^T
+            cpuBatchGemm(
+                A.getBuffer(),
+                B.getBuffer(),
+                Expected.getBuffer(),
+                batch,
+                M,
+                N,
+                K,
+                false,
+                true // Transpose B
+            );
+
+            auto bufA = gInferencingCtx->createPersistentBuffer(A, "GemmTransA");
+            auto bufB = gInferencingCtx->createPersistentBuffer(B, "GemmTransB");
+
+            BatchGemmKernel kernel(gInferencingCtx);
+            auto bufC = kernel.allocResultBuffer(batch, M, N);
+
+            auto task = gInferencingCtx->createTask();
+            // Pass transposeB = true
+            kernel.queueExecute(
+                task,
+                bufC,
+                BufferView(bufA),
+                BufferView(bufB),
+                batch,
+                M,
+                N,
+                K,
+                1.0f,
+                0.0f,
+                false,
+                true);
+            task.execute();
+
+            TEST_CHECK("BatchGemm_TransB", checkOutput(bufC, Expected));
+        }
+
         return SLANG_OK;
     }
 };

@@ -20,7 +20,7 @@ public:
         int tileSize,
         int inputSize,
         int outputSize);
-    SlangResult loadParams(TorchParamReader& reader);
+    SlangResult loadParams(TorchParamReader& reader, bool loadBiass = true);
     BufferView allocateResultBuffer(int batchSize);
     void queueExecute(
         InferencingTask& task,
