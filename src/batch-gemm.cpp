@@ -55,6 +55,7 @@ void BatchGemmKernel::queueExecute(
     writer.write<uint32_t>((uint32_t)K);
     writer.write(alpha);
     writer.write(beta);
+    writer.align(8);
     writer.write(output.getDeviceAddress());
 
     writer.finish();

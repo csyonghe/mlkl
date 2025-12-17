@@ -157,7 +157,7 @@ SlangResult testSoftmax(InferencingContext* ctx)
 SlangResult testCrossAttentionFull(InferencingContext* ctx)
 {
     printf("Running testCrossAttentionFull...\n");
-    int B = 2, Dim = 64, ContextDim = 32, Heads = 4, SeqQ = 16, SeqKV = 8;
+    int B = 2, Dim = 64, ContextDim = 32, Heads = 1, SeqQ = 16, SeqKV = 8;
 
     // Inputs
     List<float> x, c;

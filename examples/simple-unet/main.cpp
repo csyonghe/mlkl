@@ -22,15 +22,8 @@ struct SimpleUNetProgram : public TestBase
     SlangResult execute(int argc, char* argv[])
     {
         parseOption(argc, argv);
-        rhi::DeviceDesc deviceDesc;
-        deviceDesc.slang.targetProfile = "spirv_1_6";
-        deviceDesc.deviceType = rhi::DeviceType::Vulkan;
-        // rhi::getRHI()->enableDebugLayers();
-        gDevice = rhi::getRHI()->createDevice(deviceDesc);
-        if (!gDevice)
-            return SLANG_FAIL;
 
-        gInferencingCtx = new InferencingContext(gDevice);
+        gInferencingCtx = new InferencingContext();
 
 #if 0
         SLANG_RETURN_ON_FAIL(testUp0());

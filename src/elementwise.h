@@ -211,7 +211,7 @@ public:
 class ProgramNode : public ExprNode
 {
 public:
-    List<ExprNode*> linearNodes;
+    List<RefPtr<ExprNode>> linearNodes;
     int resultRegID = -1;
     Dictionary<ExprNode*, int> nodeToRegID;
     String getSlangTypeName() const override;

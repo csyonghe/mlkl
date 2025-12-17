@@ -4,9 +4,40 @@
 #include "inference-context.h"
 #include "slang-rhi/shader-cursor.h"
 
+InferencingContext::InferencingContext(size_t defaultPageSize)
+{
+    rhi::DeviceDesc deviceDesc;
+    deviceDesc.slang.targetProfile = "spirv_1_6";
+    List<slang::CompilerOptionEntry> compilerOptionsEntries;
+    const char* capabilities[] = {"spvGroupNonUniformBallot", "spvGroupNonUniformArithmetic"};
+    for (auto cap : capabilities)
+    {
+        slang::CompilerOptionEntry entry;
+        entry.name = slang::CompilerOptionName::Capability;
+        slang::CompilerOptionValue value;
+        value.kind = slang::CompilerOptionValueKind::String;
+        value.stringValue0 = cap;
+        entry.value = value;
+        compilerOptionsEntries.add(entry);
+    }
+    deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
+    deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
+    deviceDesc.deviceType = rhi::DeviceType::Vulkan;
+    // rhi::getRHI()->enableDebugLayers();
+    device = rhi::getRHI()->createDevice(deviceDesc);
+    if (!device)
+        throw std::runtime_error("cannot create vulkan device.");
+    initWithDevice(defaultPageSize);
+}
+
 InferencingContext::InferencingContext(rhi::IDevice* inDevice, size_t defaultPageSize)
 {
     this->device = inDevice;
+    initWithDevice(defaultPageSize);
+}
+
+void InferencingContext::initWithDevice(size_t defaultPageSize)
+{
     this->slangSession = device->getSlangSession();
     this->allocator = new StackAllocator(this, defaultPageSize);
 

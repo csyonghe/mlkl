@@ -75,7 +75,7 @@ SlangResult testBatchGemm(InferencingContext* ctx)
     // Physical B: [batch, N, K]
     // Logical B needed for Gemm (KxN): Transpose(PhysicalB)
     auto inputB = buffer();
-    auto exprB = transpose(inputB, 0, 1);
+    auto exprB = transpose(inputB, 1, 2);
     auto exprC = constant(0.0f); // No bias for standard test
     auto exprOut = kernelOutput();
 

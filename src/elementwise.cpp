@@ -789,7 +789,10 @@ ProgramNode compileExprToProgram(Expr root, int* globalRegCounter)
     int resultReg = ssaCtx.regIDs[root.node];
 
     ProgramNode program;
-    program.linearNodes = _Move(ssaCtx.topoOrder);
+    for (auto node : ssaCtx.topoOrder)
+    {
+        program.linearNodes.add(node);
+    }
     program.resultRegID = ssaCtx.regIDs[root.node];
     program.nodeToRegID = _Move(ssaCtx.regIDs);
     return _Move(program);

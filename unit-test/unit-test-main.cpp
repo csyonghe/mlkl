@@ -23,6 +23,20 @@ struct UnitTestProgram : public TestBase
         parseOption(argc, argv);
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
+        List<slang::CompilerOptionEntry> compilerOptionsEntries;
+        const char* capabilities[] = {"spvGroupNonUniformBallot", "spvGroupNonUniformArithmetic"};
+        for (auto cap : capabilities)
+        {
+            slang::CompilerOptionEntry entry;
+            entry.name = slang::CompilerOptionName::Capability;
+            slang::CompilerOptionValue value;
+            value.kind = slang::CompilerOptionValueKind::String;
+            value.stringValue0 = cap;
+            entry.value = value;
+            compilerOptionsEntries.add(entry);
+        }
+        deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
+        deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
         // rhi::getRHI()->enableDebugLayers();
         gDevice = rhi::getRHI()->createDevice(deviceDesc);

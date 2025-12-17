@@ -65,8 +65,10 @@ private:
     ComPtr<slang::IModule> slangModule;
     Dictionary<MD5::Digest, ComPtr<rhi::IComputePipeline>> pipelineCache;
     RefPtr<StackAllocator> allocator;
+    void initWithDevice(size_t defaultPageSize);
 
 public:
+    InferencingContext(size_t defaultPageSize = 1024 * 1024 * 1024);
     InferencingContext(rhi::IDevice* device, size_t defaultPageSize = 1024 * 1024 * 1024);
     ComPtr<rhi::IComputePipeline> createComputePipeline(
         const char* entryPointName,
