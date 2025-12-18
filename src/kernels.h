@@ -5,7 +5,6 @@
 #include "cfg.h"
 #include "concat.h"
 #include "conv2d.h"
-#include "ddim-step.h"
 #include "elementwise.h"
 #include "gather.h"
 #include "linear.h"

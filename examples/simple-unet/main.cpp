@@ -2,6 +2,7 @@
 // 32x32 MNIST digit images unconditioned in a diffusion process.
 
 #include "core/slang-basic.h"
+#include "ddim-sampler.h"
 #include "example-base/example-base.h"
 #include "inference-context.h"
 #include "kernels.h"
@@ -90,8 +91,6 @@ struct SimpleUNetProgram : public TestBase
     SlangResult testUNetModel()
     {
         UNetModel model = UNetModel(gInferencingCtx, 1, 1);
-
-        DDIMStepKernel diffusionKernel = DDIMStepKernel(gInferencingCtx);
         SLANG_RETURN_ON_FAIL(loadModel(model, "model_weights.bin"));
 
         uint32_t imageSize = 32;
@@ -101,33 +100,10 @@ struct SimpleUNetProgram : public TestBase
         List<float> inputImageData;
         initImage(inputImageData, imageSize, imageSize, inputChannelCount);
 
-        struct NoiseParam
-        {
-            float alpha;
-            float beta;
-            float alphaCumprod;
-        };
-        int trainingSteps = 500; // Must match Python NOISE_STEPS
+        int trainingSteps = 500;
         int inferenceSteps = 50;
-        float betaStart = 1e-4;
-        float betaEnd = 0.02f;
-        List<NoiseParam> noiseSchedule;
-        noiseSchedule.setCount(trainingSteps);
-        float currentAlphaCumprod = 1.0f;
-        for (int t = 0; t < trainingSteps; t++)
-        {
-            // Linear Schedule Calculation
-            float ratio = (float)t / (float)(trainingSteps - 1);
-            float betaT = betaStart + ratio * (betaEnd - betaStart);
-            float alphaT = 1.0f - betaT;
+        DDIMSampler sampler(gInferencingCtx, 500, 50);
 
-            currentAlphaCumprod *= alphaT;
-
-            // Store in table
-            noiseSchedule[t].alpha = alphaT;
-            noiseSchedule[t].beta = betaT;
-            noiseSchedule[t].alphaCumprod = currentAlphaCumprod;
-        }
         auto imageAStorage = gInferencingCtx->createPersistentBuffer(
             inputImageData.getBuffer(),
             inputImageData.getCount() * sizeof(float),
@@ -148,37 +124,10 @@ struct SimpleUNetProgram : public TestBase
             "predictedNoise");
         for (int step = inferenceSteps - 1; step >= 0; step--)
         {
-            // Map 0..100 -> 0..500
-            // e.g. Step 99 -> t=495
-            int t = (step * trainingSteps) / inferenceSteps;
-
-            // B. Previous Training Time (The target we are jumping TO)
-            // e.g., Step 98/100 -> t_prev=490
-            int step_prev = step - 1;
-            int t_prev = (step_prev * trainingSteps) / inferenceSteps;
-
-            // C. Get Alpha Cumprod values
-            float alphaBar_t = noiseSchedule[t].alphaCumprod;
-
-            // Special handling for the final step:
-            // If we are going below t=0, the target is the pure image (AlphaBar = 1.0)
-            float alphaBar_prev = (step_prev < 0) ? 1.0f : noiseSchedule[t_prev].alphaCumprod;
-
             // Use 't' for the model, but 'step' for the loop logic
-
+            int t = sampler.timesteps[step];
             model.queueExecute(task, predictedNoise, imageA, imageSize, imageSize, t, 1);
-
-            auto noiseParam = noiseSchedule[t];
-            diffusionKernel.queueExecute(
-                task,
-                imageA,
-                predictedNoise,
-                imageB,
-                alphaBar_t,
-                alphaBar_prev,
-                imageSize,
-                imageSize,
-                outputChannelCount);
+            sampler.step(task, imageB, imageA, predictedNoise, step, Shape(imageSize, imageSize));
             outputImage = imageB;
             Swap(imageA, imageB);
         }
