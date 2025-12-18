@@ -1,5 +1,5 @@
+#include "../shared/ddim-sampler.h"
 #include "conditioned-unet.h"
-#include "ddim-sampler.h"
 #include "elementwise.h"
 #include "example-base.h"
 #include "torch-reader.h"

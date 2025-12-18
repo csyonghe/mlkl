@@ -1,8 +1,8 @@
 // An example showing how to build a simple unet model to produce
 // 32x32 MNIST digit images unconditioned in a diffusion process.
 
+#include "../shared/ddim-sampler.h"
 #include "core/slang-basic.h"
-#include "ddim-sampler.h"
 #include "example-base/example-base.h"
 #include "inference-context.h"
 #include "kernels.h"
