@@ -51,11 +51,15 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testReluNegSin(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testMultiConcat(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testBroadcastAdd(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testIdentityPermute(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testClassifierFreeGuidance(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2D(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTransposedConv2D(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testBatchGemm(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testFusedBatchGemm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testFlashAttention(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testFlashAttentionInputPermutationOnly(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testFlashAttentionFusedPermutation(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testCrossAttentionFull(gInferencingCtx));
         printf("all tests passed!\n");
         return SLANG_OK;

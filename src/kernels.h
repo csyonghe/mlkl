@@ -6,6 +6,7 @@
 #include "concat.h"
 #include "conv2d.h"
 #include "elementwise.h"
+#include "flash-attention.h"
 #include "gather.h"
 #include "linear.h"
 #include "softmax.h"

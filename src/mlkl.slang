@@ -10,3 +10,4 @@ __include ddim_step;
 __include elementwise;
 __include batch_gemm;
 __include softmax;
+__include flash_attention;

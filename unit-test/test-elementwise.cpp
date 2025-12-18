@@ -334,3 +334,38 @@ SlangResult testMultiConcat(InferencingContext* ctx)
     }
     MLKL_TEST_OK();
 }
+
+SlangResult testIdentityPermute(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    // Create a 4D buffer [1, 2, 2, 2] = 8 elements
+    Expr eBuf = buffer();
+    Expr ePerm = permute(eBuf, {0, 1, 2, 3}); // Identity
+
+    RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, ePerm);
+
+    List<float> data = {0, 1, 2, 3, 4, 5, 6, 7};
+    auto bufIn = ctx->createPersistentBuffer(data, "In");
+    auto bufOut = ctx->allocScratchBuffer(8 * sizeof(float), "Out");
+
+    Dictionary<Expr, InputInfo> inputs;
+    // Note: The physical shape MUST be provided to the node
+    inputs.add(eBuf, InputInfo(Shape{1, 2, 2, 2}, bufIn));
+
+    auto task = ctx->createTask();
+    kernel->queueExecute(task, bufOut, inputs);
+    task.execute();
+
+    auto result = ctx->readBuffer<float>(bufOut);
+    // If result is {0, 1, 2, 3, 4, 5, 6, 7}, indexing is correct.
+    for (int i = 0; i < 8; i++)
+    {
+        if (result[i] != data[i])
+        {
+            printf("Identity Permute Mismatch at %d: %f != %f\n", i, result[i], data[i]);
+            return SLANG_FAIL;
+        }
+    }
+    MLKL_TEST_OK();
+}

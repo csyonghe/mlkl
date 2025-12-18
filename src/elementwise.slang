@@ -15,6 +15,11 @@ interface IStmt
     void execute(uint tid, Input input);
 }
 
+interface ISink
+{
+    void store(uint index, float value);
+};
+
 // Acts as both the Storage and the Expression
 struct Reg<let ID : int> : IExpr
 {
@@ -100,26 +105,36 @@ struct Permute<Inner : IExpr> : IExpr
 {
     Inner inner;
     uint rank;
+    // Dimensions packed in REVERSE order (index 0 is the innermost/last dimension)
     uint outputDims[8];
-    // Stride of the dimension in the Inner tensor that corresponds to the i-th output dimension
+    // Strides in the physical buffer mapped to the reversed logical dimensions
     uint mappedStrides[8]; 
 
     float eval(uint tid, Input input)
     {
+        // For scalars (rank 0), the loop is skipped and it returns inner.eval(0)
         uint innerIdx = 0;
         uint temp = tid;
         
+        // We iterate through the packed metadata. 
+        // Because we packed in reverse in C++, index 0 is the fastest changing dim.
         [unroll]
-        for (int i = 7; i >= 0; i--)
+        for (uint i = 0; i < 8; i++)
         {
-            if (i < int(rank))
+            if (i < rank)
             {
                 uint d = outputDims[i];
+                
+                // Extract the coordinate for this logical dimension
+                // If d is 1 (e.g. for a scalar or padding), c is always 0.
                 uint c = temp % d;
                 temp /= d;
+                
+                // Add the contribution to the physical buffer offset
                 innerIdx += c * mappedStrides[i];
             }
         }
+        
         return inner.eval(innerIdx, input);
     }
 }
@@ -418,6 +433,45 @@ struct Gelu<I : IExpr> : IExpr
     }
 }
 
+
+// The terminal node that actually writes to memory
+struct BufferSink : ISink
+{
+    float* data;
+    void store(uint index, float value)
+    {
+        data[index] = value;
+    }
+};
+
+// Address Transformation Sink (Push-based Permute)
+struct PermuteSink<Child : ISink> : ISink
+{
+    Child child;
+    uint rank;
+    uint logicalDims[8]; // Packed in reverse
+    uint physicalStrides[8]; // Packed in reverse
+
+    void store(uint tid, float value)
+    {
+        uint physicalIdx = 0;
+        uint temp = tid;
+        
+        [unroll]
+        for (uint i = 0; i < 8; i++)
+        {
+            if (i < rank)
+            {
+                uint d = logicalDims[i];
+                uint c = temp % d;
+                temp /= d;
+                physicalIdx += c * physicalStrides[i];
+            }
+        }
+        child.store(physicalIdx, value);
+    }
+};
+
 struct MaterializeParams<P : IExpr>
 {
     float* outputBuffer;
@@ -441,3 +495,4 @@ void materialize<P:IExpr>(
     // 2. Write Output
     params.outputBuffer[tid] = result;
 }
+

@@ -79,12 +79,16 @@ SlangResult testMaterialize(InferencingContext* ctx);
 SlangResult testReluNegSin(InferencingContext* ctx);
 SlangResult testLeakyReluComposite(InferencingContext* ctx);
 SlangResult testMultiConcat(InferencingContext* ctx);
+SlangResult testIdentityPermute(InferencingContext* ctx);
 
 // Defined in test-gemm.cpp
 SlangResult testBatchGemm(InferencingContext* ctx);
 SlangResult testFusedBatchGemm(InferencingContext* ctx);
 
 // Defined in test-cross-attention.cpp
+SlangResult testFlashAttention(InferencingContext* ctx);
+SlangResult testFlashAttentionInputPermutationOnly(InferencingContext* ctx);
+SlangResult testFlashAttentionFusedPermutation(InferencingContext* ctx);
 SlangResult testSoftmax(InferencingContext* ctx);
 SlangResult testCrossAttentionFull(InferencingContext* ctx);
 

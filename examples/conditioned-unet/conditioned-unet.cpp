@@ -57,7 +57,7 @@ ConditionedUNet::ConditionedUNet(
     // 4. Mid Block (Bottleneck Attention)
     // Input to mid is the output of the last down block (e.g., 256 channels)
     int bottleneckChannels = baseChannels * channelMultipliers[channelMultipliers.getCount() - 1];
-    midAttn = new CrossAttentionKernel(ctx, bottleneckChannels, contextDim);
+    midAttn = new CrossAttentionKernel(ctx, bottleneckChannels, contextDim, 64);
 
     // 5. Up Blocks
     // We traverse multipliers in reverse: [4, 2, 1]
@@ -186,7 +186,6 @@ void ConditionedUNet::queueExecute(
     int seqKV = 1; // Assuming context is [Batch, 1, 128]
     int heads = 4; // Check your model config!
 
-    // Reshape x to [Batch, SeqQ, Dim] implicitly for Attention
     // Alloc output
     auto attnOut = midAttn->allocResultBuffer(batchSize, seqQ, channels);
 
@@ -198,9 +197,8 @@ void ConditionedUNet::queueExecute(
         batchSize,
         seqQ,
         seqKV,
-        channels,
         heads);
-    x = attnOut; // Shape is preserved [Batch, SeqQ, Dim] -> interpreted as [Batch, C, H, W]
+    x = attnOut; // Shape is preserved.
 
     // 5. Up Blocks
     for (Index i = 0; i < upBlocks.getCount(); i++)

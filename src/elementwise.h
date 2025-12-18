@@ -4,10 +4,6 @@
 
 #include <initializer_list>
 
-// =========================================================================
-// 1. Shape Type
-// =========================================================================
-
 struct Shape
 {
     Array<int, 8> dims;
@@ -57,12 +53,6 @@ struct Shape
     bool isCompatibleWith(const Shape& other) const;
 };
 
-// =========================================================================
-// 2. Enums & Forward Declarations
-// =========================================================================
-
-class ExprNode;
-
 enum class BinaryOp
 {
     Add,
@@ -95,30 +85,6 @@ enum class UnaryOp
 };
 String getSlangUnaryOpName(UnaryOp op);
 
-struct Expr
-{
-    RefPtr<ExprNode> node;
-
-    Expr() = default;
-    Expr(ExprNode* n)
-        : node(n)
-    {
-    }
-    Expr(const RefPtr<ExprNode>& n)
-        : node(n)
-    {
-    }
-
-    ExprNode* operator->() { return node; }
-    const ExprNode* operator->() const { return node; }
-    operator bool() const { return node != nullptr; }
-    HashCode getHashCode() const { return node ? node.getHashCode() : 0; }
-    bool operator==(const Expr& other) const { return node == other.node; }
-};
-
-// =========================================================================
-// 3. Evaluation Context
-// =========================================================================
 struct InputInfo
 {
     // For Buffer inputs
@@ -134,6 +100,8 @@ struct InputInfo
     InputInfo(float c)
         : scalarValue(c) {};
 };
+
+class ExprNode;
 
 struct EvalContext
 {
@@ -154,6 +122,12 @@ struct EvalContext
         }
         return Shape();
     }
+};
+
+struct SinkExprEvalContext
+{
+    Shape logicalShape; // The shape provided by the kernel (e.g., [B, H, S, D])
+    BufferView outputBuffer;
 };
 
 struct ParameterWriter
@@ -186,10 +160,6 @@ struct ParameterWriter
     }
 };
 
-// =========================================================================
-// 4. Expression Nodes
-// =========================================================================
-
 class ExprNode : public RefObject
 {
 public:
@@ -206,6 +176,54 @@ public:
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
 
     virtual size_t getAlignment() const { return sizeof(int32_t); }
+};
+
+
+struct Expr
+{
+    RefPtr<ExprNode> node;
+
+    Expr() = default;
+    Expr(ExprNode* n)
+        : node(n)
+    {
+    }
+    Expr(const RefPtr<ExprNode>& n)
+        : node(n)
+    {
+    }
+
+    ExprNode* operator->() { return node; }
+    const ExprNode* operator->() const { return node; }
+    operator bool() const { return node != nullptr; }
+    HashCode getHashCode() const { return node ? node.getHashCode() : 0; }
+    bool operator==(const Expr& other) const { return node == other.node; }
+};
+
+
+// SinkExpr represent transformations on the output shape.
+// Maps to `ISinkExpr` in Slang.
+class SinkExprNode : public RefObject
+{
+public:
+    virtual String getSlangTypeName() const = 0;
+
+    // Recursive Top-Down shape resolution:
+    // Takes the logical shape entering THIS node and returns the
+    // physical shape of the final terminal buffer.
+    virtual Shape resolvePhysicalShape(const Shape& logicalShape) const = 0;
+
+    virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const = 0;
+    virtual size_t getParameterAlignment() const { return sizeof(int32_t); }
+};
+
+struct SinkExpr
+{
+    RefPtr<SinkExprNode> node;
+    SinkExpr(SinkExprNode* n)
+        : node(n)
+    {
+    }
 };
 
 class ProgramNode : public ExprNode
@@ -384,9 +402,32 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
 };
 
-// =========================================================================
-// 5. Builder API
-// =========================================================================
+class BufferSinkNode : public SinkExprNode
+{
+public:
+    String getSlangTypeName() const override { return "BufferSink"; }
+    Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override
+    {
+        // The leaf represents the final memory. Its physical shape IS the logical
+        // shape that reached it after all transformations.
+        return logicalOutputShape;
+    }
+    virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
+    size_t getParameterAlignment() const override { return sizeof(void*); }
+};
+
+class PermuteSinkNode : public SinkExprNode
+{
+public:
+    SinkExpr child;
+    List<int> dims; // Permutation mapping
+public:
+    PermuteSinkNode(SinkExpr child, const std::initializer_list<int>& dims);
+    String getSlangTypeName() const override;
+    Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override;
+    virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
+    size_t getParameterAlignment() const override;
+};
 
 Expr buffer();
 Expr constant(float v);
@@ -398,6 +439,9 @@ Expr gather(Expr table, Expr indices);
 Expr transpose(Expr inner, int dim0, int dim1);
 Expr uniformConstant();
 Expr kernelOutput();
+
+SinkExpr bufferSink();
+SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
 
 Expr min(Expr l, Expr r);
 Expr max(Expr l, Expr r);
@@ -481,6 +525,10 @@ inline Expr leakyRelu(Expr x, float alpha)
 {
     return max(x, x * alpha);
 }
+
+// Factory methods
+SinkExpr bufferSink();
+SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
 
 // =========================================================================
 // 6. Kernel Wrapper

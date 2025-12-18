@@ -1,10 +1,8 @@
 #pragma once
-#include "batch-gemm.h"
 #include "broadcast-add.h"
+#include "flash-attention.h"
 #include "kernel-base.h"
 #include "linear.h"
-#include "permute.h"
-#include "softmax.h"
 
 class CrossAttentionKernel : public RefObject
 {
@@ -17,22 +15,20 @@ private:
     RefPtr<LinearKernel> projV;
     RefPtr<LinearKernel> projOut;
 
-    // Generic Gemm Kernels
-    RefPtr<BatchGemmKernel> gemmScores; // Q @ K^T
-    RefPtr<BatchGemmKernel> gemmValues; // Probs @ V
+    int headDim;
 
-    // Expression Handles (to bind inputs at runtime)
-    Expr exprQ_In;     // Input A for gemmScores
-    Expr exprK_In;     // Input B for gemmScores (Inner buffer of transpose)
-    Expr exprProbs_In; // Input A for gemmValues
-    Expr exprV_In;     // Input B for gemmValues
+    // Flash Attention Core
+    RefPtr<FlashAttentionKernel> flashAttn;
 
-    RefPtr<SoftmaxKernel> softmax;
+    // Expression Handles for Fused Permutation
+    Expr exprQ_In;
+    Expr exprK_In;
+    Expr exprV_In;
+
     RefPtr<BroadcastAddKernel> broadcastAdd;
-    RefPtr<PermuteKernel> permuteKernel;
 
 public:
-    CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim);
+    CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim, int headDim);
 
     SlangResult loadParams(TorchParamReader& reader);
 
@@ -46,6 +42,5 @@ public:
         int batchSize,
         int seqQ,
         int seqKV,
-        int dim,
         int numHeads);
 };

@@ -305,6 +305,8 @@ String PermuteNode::getSlangTypeName() const
 Shape PermuteNode::resolveShape(const EvalContext& ctx) const
 {
     Shape innerShape = inner.node->resolveShape(ctx);
+    if (innerShape.isScalar())
+        return innerShape;
     if (innerShape.getRank() != dims.getCount())
         throw std::runtime_error("Permute: Rank mismatch with permutation indices");
 
@@ -321,32 +323,54 @@ Shape PermuteNode::resolveShape(const EvalContext& ctx) const
 void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
     innerProgram->pack(writer, ctx);
-
     Shape innerShape = inner.node->resolveShape(ctx);
     Shape outShape = resolveShape(ctx);
 
-    List<int> innerStrides = computeDenseStrides(innerShape);
-    List<int> mappedStrides;
-
-    // For output dimension i, it corresponds to inner dimension dims[i].
-    // So if we move along output[i], we move along inner[dims[i]].
-    // Stride is innerStrides[dims[i]].
-    for (int i = 0; i < dims.getCount(); ++i)
+    // 1. Handle Scalar Case
+    if (innerShape.isScalar())
     {
-        mappedStrides.add(innerStrides[dims[i]]);
+        uint32_t rank = 1;
+        writer.write(rank);
+
+        uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        uint32_t mapStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+        // Logical dimension 0 has size 1 and stride 0 (or 1, doesn't matter for index 0)
+        outDimsArr[0] = 1;
+        mapStrideArr[0] = 0;
+
+        writer.writeBytes(outDimsArr, sizeof(outDimsArr));
+        writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
+        return;
     }
 
+    // 2. Standard Tensor Case
+    List<int> innerStrides = computeDenseStrides(innerShape);
     uint32_t rank = (uint32_t)outShape.getRank();
     writer.write(rank);
 
-    uint32_t outDimsArr[8] = {1};
-    for (int i = 0; i < outShape.getRank(); ++i)
-        outDimsArr[i] = (uint32_t)outShape[i];
-    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
+    uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    uint32_t mapStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-    uint32_t mapStrideArr[8] = {0};
-    for (int i = 0; i < mappedStrides.getCount(); ++i)
-        mapStrideArr[i] = (uint32_t)mappedStrides[i];
+    // Pack in reverse order to match Slang's temp % d logic
+    for (int i = 0; i < (int)rank; ++i)
+    {
+        int logicalDimIdx = (int)rank - 1 - i;
+
+        outDimsArr[i] = (uint32_t)outShape[logicalDimIdx];
+
+        // Ensure we don't index out of bounds of the permutation dims
+        if (logicalDimIdx < (int)dims.getCount())
+        {
+            int physicalDimIdx = dims[logicalDimIdx];
+            if (physicalDimIdx < innerStrides.getCount())
+            {
+                mapStrideArr[i] = (uint32_t)innerStrides[physicalDimIdx];
+            }
+        }
+    }
+
+    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
     writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
 }
 
@@ -562,6 +586,109 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     writer.writeBytes(rStridesArr, sizeof(rStridesArr));
 }
 
+// =========================================================================
+// BUFFER SINK (The Terminal Node)
+// =========================================================================
+
+void BufferSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
+{
+    // Ensure the output pointer is aligned for the GPU
+    writer.align(8);
+    if (evalCtx.outputBuffer)
+    {
+        writer.write(evalCtx.outputBuffer.getDeviceAddress());
+    }
+    else
+    {
+        writer.write<uint64_t>(0);
+    }
+}
+
+// =========================================================================
+// PERMUTE SINK (The Address Transformer)
+// =========================================================================
+
+
+PermuteSinkNode::PermuteSinkNode(SinkExpr child, const std::initializer_list<int>& dims)
+    : child(child)
+{
+    for (auto d : dims)
+        this->dims.add(d);
+}
+
+String PermuteSinkNode::getSlangTypeName() const
+{
+    return "PermuteSink<" + child.node->getSlangTypeName() + ">";
+}
+
+Shape PermuteSinkNode::resolvePhysicalShape(const Shape& logicalShape) const
+{
+    // 1. "Peel" or transform the current logical shape into the child's space.
+    // E.g., incoming [B, H, S, D] with dims {0, 2, 1, 3} -> transformed [B, S, H, D]
+    List<int> transformedDims;
+    for (int i = 0; i < dims.getCount(); ++i)
+    {
+        transformedDims.add(logicalShape[dims[i]]);
+    }
+    Shape transformedShape(transformedDims.getArrayView());
+
+    // 2. Delegate to child to find the ultimate physical layout
+    return child.node->resolvePhysicalShape(transformedShape);
+}
+
+// Alignment is the max of child and local uints (4)
+size_t PermuteSinkNode::getParameterAlignment() const
+{
+    return std::max((size_t)8, child.node->getParameterAlignment());
+}
+
+void PermuteSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
+{
+    writer.align(getParameterAlignment());
+
+    // 1. Determine the logical shape entering THIS node
+    Shape incomingLogical = evalCtx.logicalShape;
+
+    // 2. Determine the shape entering the CHILD node (the physical layout for this node)
+    List<int> childDims;
+    for (int d : dims)
+    {
+        childDims.add(incomingLogical[d]);
+    }
+    Shape childLogical = Shape(childDims.getArrayView());
+
+    // 3. To compute strides correctly for writing, we need the child's
+    // contribution to the layout.
+    List<int> childStrides = computeDenseStrides(childLogical);
+
+    // 4. Recursively pack child
+    SinkExprEvalContext childCtx = evalCtx;
+    childCtx.logicalShape = childLogical;
+    child.node->pack(writer, childCtx);
+
+    // 5. Pack Permute Metadata for the Shader
+    uint32_t rank = (uint32_t)incomingLogical.getRank();
+    writer.write(rank);
+
+    uint32_t logDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    uint32_t phyStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    // Pack in reverse for Slang's 'temp % d' de-indexing
+    for (int i = 0; i < (int)rank; ++i)
+    {
+        int logicalDimIdx = (int)rank - 1 - i;
+        logDimsArr[i] = (uint32_t)incomingLogical[logicalDimIdx];
+
+        // The stride for logical dim 'logicalDimIdx' is the physical stride
+        // of the dimension it maps to: childStrides[dims[logicalDimIdx]]
+        int physicalDimIdx = dims[logicalDimIdx];
+        phyStrideArr[i] = (uint32_t)childStrides[physicalDimIdx];
+    }
+
+    writer.writeBytes(logDimsArr, sizeof(logDimsArr));
+    writer.writeBytes(phyStrideArr, sizeof(phyStrideArr));
+}
+
 // --- BinaryNode ---
 BinaryNode::BinaryNode(Expr l, Expr r, BinaryOp op)
     : left(l), right(r), op(op)
@@ -705,6 +832,17 @@ Expr concat(Expr left, Expr right, Expr axis)
 {
     return Expr(new ConcatNode(left, right, axis));
 }
+
+SinkExpr bufferSink()
+{
+    return SinkExpr(new BufferSinkNode());
+}
+
+SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims)
+{
+    return SinkExpr(new PermuteSinkNode(child, dims));
+}
+
 Expr min(Expr l, Expr r)
 {
     return Expr(new BinaryNode(l, r, BinaryOp::Min));
