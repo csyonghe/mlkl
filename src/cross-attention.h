@@ -3,6 +3,7 @@
 #include "broadcast-add.h"
 #include "kernel-base.h"
 #include "linear.h"
+#include "permute.h"
 #include "softmax.h"
 
 class CrossAttentionKernel : public RefObject
@@ -28,6 +29,7 @@ private:
 
     RefPtr<SoftmaxKernel> softmax;
     RefPtr<BroadcastAddKernel> broadcastAdd;
+    RefPtr<PermuteKernel> permuteKernel;
 
 public:
     CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim);

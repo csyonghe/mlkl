@@ -64,6 +64,7 @@ struct ConstantView : IExpr
     float value;
     float eval(uint tid, Input input) { return value; }
 }
+
 struct KernelOutput : IExpr
 {
     float eval(uint tid, Input input) { return input.value; }
@@ -241,6 +242,35 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
             }
             return right.eval(idx, input);
         }
+    }
+}
+struct Gather<Table : IExpr, Indices : IExpr> : IExpr
+{
+    Table table;     // The lookup table (e.g., Weights [NumClasses, Dim])
+    Indices indices; // The indices to gather (e.g., Labels [Batch])
+    
+    uint embeddingDim; // Size of the inner dimension (Dim)
+    // For simplicity, this implementation assumes gathering along Axis 0 
+    // and that 'Table' is 2D and 'Indices' is 1D.
+
+    float eval(uint tid, Input input)
+    {
+        // Output Shape: [Batch, Dim]
+        // Map linear TID -> (batch, dim)
+        uint d = tid % embeddingDim;
+        uint b = tid / embeddingDim;
+
+        // 1. Evaluate Index at position 'b'
+        // We pass 'b' as the TID to the indices expression
+        float idxVal = indices.eval(b, input);
+        int row = int(idxVal); // Cast float to int index
+
+        // 2. Evaluate Table at position (row, d)
+        // Table is [NumClasses, Dim], Row-Major.
+        // Linear Index = row * embeddingDim + d
+        uint tableTid = row * embeddingDim + d;
+        
+        return table.eval(tableTid, input);
     }
 }
 

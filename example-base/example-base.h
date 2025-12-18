@@ -35,11 +35,7 @@ struct ExampleResources
 
     Slang::String resolveResource(const char* fileName) const
     {
-        static const Slang::List<Slang::String> directories{
-            "../",
-            "../../",
-            "../../../"
-        };
+        static const Slang::List<Slang::String> directories{"../", "../../", "../../../"};
 
         for (const Slang::String& dir : directories)
         {
@@ -100,5 +96,10 @@ inline void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 void renderDocBeginFrame();
 void renderDocEndFrame();
 
-void writeImagePNG(const char *filename, int width, int height, int numChannels,
-                   const void *data);
+void writeImagePNG(const char* filename, int width, int height, int numChannels, const void* data);
+void writeImagePNG(
+    const char* filename,
+    int width,
+    int height,
+    int numChannels,
+    const Slang::List<float>& imageData);

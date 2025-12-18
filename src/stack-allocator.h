@@ -28,6 +28,21 @@ struct BufferView
         : buffer(buf.get()), offset(0), size(buf->getDesc().size)
     {
     }
+
+    BufferView tail(size_t tailOffset) const
+    {
+        if (tailOffset > size)
+            throw std::runtime_error("BufferView::tail: tailOffset exceeds size");
+        return BufferView(buffer, offset + tailOffset, size - tailOffset);
+    }
+
+    BufferView head(size_t headSize) const
+    {
+        if (headSize > size)
+            throw std::runtime_error("BufferView::head: headSize exceeds size");
+        return BufferView(buffer, offset, headSize);
+    }
+
     // Helper to get GPU address if needed
     uint64_t getDeviceAddress() const { return buffer->getDeviceAddress() + offset; }
 

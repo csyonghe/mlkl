@@ -14,50 +14,61 @@ CrossAttentionKernel::CrossAttentionKernel(InferencingContext* ctx, int channelD
     // 2. Initialize Generic BatchGemms
 
     // --- Gemm 1: Scores = Q @ K^T ---
-    // A: Q [Batch, SeqQ, Dim]
-    exprQ_In = buffer();
 
-    // B: K [Batch, SeqKV, Dim] -> Transposed to [Batch, Dim, SeqKV] logically
-    // We use the 'transpose' builder which creates a TransposeNode around a buffer.
+    // A: Q
+    // Physical: [Batch, SeqQ, Heads, HeadDim] (0, 1, 2, 3)
+    // Logical:  [Batch, Heads, SeqQ, HeadDim] (0, 2, 1, 3)
+    Expr exprQ_Buf = buffer();
+    exprQ_In = exprQ_Buf;
+    Expr exprQ_Permuted = permute(exprQ_Buf, {0, 2, 1, 3});
+
+    // B: K^T
+    // Physical: [Batch, SeqKV, Heads, HeadDim] (0, 1, 2, 3)
+    // Logical K:   [Batch, Heads, SeqKV, HeadDim] (0, 2, 1, 3)
+    // Logical K^T: [Batch, Heads, HeadDim, SeqKV] (0, 2, 3, 1)
     Expr exprK_Buf = buffer();
-    exprK_In = exprK_Buf;                               // Store handle to the buffer itself
-    Expr exprK_Transposed = transpose(exprK_Buf, 1, 2); // Swap Seq and Dim
+    exprK_In = exprK_Buf;
+    Expr exprK_Permuted = permute(exprK_Buf, {0, 2, 3, 1});
 
     // C: Zero (No bias)
     Expr exprBias1 = constant(0.0f);
-
-    // Output: Standard
     Expr exprOut1 = kernelOutput();
 
-    gemmScores = new BatchGemmKernel(ctx, exprQ_In, exprK_Transposed, exprBias1, exprOut1);
+    gemmScores = new BatchGemmKernel(ctx, exprQ_Permuted, exprK_Permuted, exprBias1, exprOut1);
 
     // --- Gemm 2: Values = Probs @ V ---
-    // A: Probs [Batch, SeqQ, SeqKV]
+
+    // A: Probs
+    // Physical/Logical: [Batch, Heads, SeqQ, SeqKV] (Produced by Gemm1+Softmax, already Planar)
     exprProbs_In = buffer();
 
-    // B: V [Batch, SeqKV, Dim]
-    exprV_In = buffer();
+    // B: V
+    // Physical: [Batch, SeqKV, Heads, HeadDim] (0, 1, 2, 3)
+    // Logical:  [Batch, Heads, SeqKV, HeadDim] (0, 2, 1, 3)
+    Expr exprV_Buf = buffer();
+    exprV_In = exprV_Buf;
+    Expr exprV_Permuted = permute(exprV_Buf, {0, 2, 1, 3});
 
     // C: Zero
     Expr exprBias2 = constant(0.0f);
     Expr exprOut2 = kernelOutput();
 
-    gemmValues = new BatchGemmKernel(ctx, exprProbs_In, exprV_In, exprBias2, exprOut2);
+    gemmValues = new BatchGemmKernel(ctx, exprProbs_In, exprV_Permuted, exprBias2, exprOut2);
 
     // 3. Other Kernels
     softmax = new SoftmaxKernel(ctx);
     broadcastAdd = new BroadcastAddKernel(ctx);
+    permuteKernel = new PermuteKernel(ctx, {0, 2, 1, 3});
 }
 
 SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
 {
-    // Load weights.
-    // Q, K, V: No Bias
-    // Out: Has Bias
+    logInfo("Loading cross attention weights...\n");
     SLANG_RETURN_ON_FAIL(projQ->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projK->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projV->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projOut->loadParams(reader, true));
+    logInfo("Finished cross attention weights.\n");
     return SLANG_OK;
 }
 
@@ -81,87 +92,75 @@ void CrossAttentionKernel::queueExecute(
     int headDim = dim / numHeads;
     float scale = 1.0f / sqrtf((float)headDim);
 
+    // ... (Projections, GemmScores, Softmax, GemmValues same as before) ...
+
     // 1. Projections
-    // Q = inputLatent @ W_q
     BufferView bufQ = projQ->allocateResultBuffer(batchSize * seqQ);
     projQ->queueExecute(task, bufQ, inputLatent, batchSize * seqQ);
 
-    // K = contextEmb @ W_k
     BufferView bufK = projK->allocateResultBuffer(batchSize * seqKV);
     projK->queueExecute(task, bufK, contextEmb, batchSize * seqKV);
 
-    // V = contextEmb @ W_v
     BufferView bufV = projV->allocateResultBuffer(batchSize * seqKV);
     projV->queueExecute(task, bufV, contextEmb, batchSize * seqKV);
 
-    // 2. Attention Scores: Q @ K^T
-    // Q: [Batch*Heads, SeqQ, HeadDim]
-    // K: [Batch*Heads, SeqKV, HeadDim] (Physical)
-    //    We treat K as B in gemm.
-    //    Logic: A[M, K] x B[K, N].
-    //    Here M=SeqQ, N=SeqKV, K=HeadDim.
-    //    Q is [SeqQ, HeadDim]. OK.
-    //    K is [SeqKV, HeadDim].
-    //    We want Q x K^T.
-    //    In the kernel def, we wrapped K in `transpose(..., 1, 2)`.
-    //    So we pass K physical shape [Batch, SeqKV, HeadDim] to the input info.
-
-    // Alloc Output: [Batch*Heads, SeqQ, SeqKV]
+    // 2. Scores
     size_t sizeScores = (size_t)batchSize * numHeads * seqQ * seqKV * sizeof(float);
     BufferView bufScores = context->allocScratchBuffer(sizeScores, "Attn_Scores");
 
     Dictionary<Expr, InputInfo> scoresInputs;
-    // Input A: Q [Batch*Heads, SeqQ, HeadDim]
-    scoresInputs.add(exprQ_In, InputInfo(Shape{batchSize * numHeads, seqQ, headDim}, bufQ));
-    // Input B: K [Batch*Heads, SeqKV, HeadDim]
-    scoresInputs.add(exprK_In, InputInfo(Shape{batchSize * numHeads, seqKV, headDim}, bufK));
+    scoresInputs.add(exprQ_In, InputInfo(Shape{batchSize, seqQ, numHeads, headDim}, bufQ));
+    scoresInputs.add(exprK_In, InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufK));
 
-    // Execute Gemm 1
     gemmScores->queueExecute(
         task,
         bufScores,
         seqQ,
         seqKV,
-        headDim,              // M, N, K
-        batchSize * numHeads, // Batch
+        headDim,
+        batchSize * numHeads,
         scale,
-        0.0f, // Alpha, Beta
+        0.0f,
         scoresInputs);
 
     // 3. Softmax
-    // Normalize over dim 1 (SeqKV)
-    // Flatten batch for kernel: [Batch*Heads*SeqQ, SeqKV]
     BufferView bufProbs = context->allocScratchBuffer(sizeScores, "Attn_Probs");
     softmax->queueExecute(task, bufProbs, bufScores, batchSize * numHeads * seqQ, seqKV);
 
-    // 4. Weighted Sum: Probs @ V
-    // Probs: [Batch*Heads, SeqQ, SeqKV]
-    // V:     [Batch*Heads, SeqKV, HeadDim]
-    // Out:   [Batch*Heads, SeqQ, HeadDim]
-    // M=SeqQ, N=HeadDim, K=SeqKV
-
-    Dictionary<Expr, InputInfo> valuesInputs;
-    valuesInputs.add(exprProbs_In, InputInfo(Shape{batchSize * numHeads, seqQ, seqKV}, bufProbs));
-    valuesInputs.add(exprV_In, InputInfo(Shape{batchSize * numHeads, seqKV, headDim}, bufV));
-
+    // 4. Values
     size_t sizeAttnOut = (size_t)batchSize * numHeads * seqQ * headDim * sizeof(float);
     BufferView bufAttnOut = context->allocScratchBuffer(sizeAttnOut, "Attn_Out");
 
-    // Execute Gemm 2
+    Dictionary<Expr, InputInfo> valuesInputs;
+    valuesInputs.add(exprProbs_In, InputInfo(Shape{batchSize, numHeads, seqQ, seqKV}, bufProbs));
+    valuesInputs.add(exprV_In, InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufV));
+
     gemmValues->queueExecute(
         task,
         bufAttnOut,
         seqQ,
         headDim,
-        seqKV, // M, N, K
+        seqKV,
         batchSize * numHeads,
         1.0f,
         0.0f,
         valuesInputs);
 
-    // 5. Output Projection
+    // 5. Output Permutation & Projection
+    // bufAttnOut is Planar: [Batch, Heads, SeqQ, HeadDim]
+    // We permute to Interleaved: [Batch, SeqQ, Heads, HeadDim] for Linear layer
+
+    BufferView bufAttnInterleaved = context->allocScratchBuffer(sizeAttnOut, "Attn_Interleaved");
+
+    permuteKernel->queueExecute(
+        task,
+        bufAttnInterleaved,
+        bufAttnOut,
+        Shape{batchSize, numHeads, seqQ, headDim} // Input Shape
+    );
+
     BufferView bufProjected = projOut->allocateResultBuffer(batchSize * seqQ);
-    projOut->queueExecute(task, bufProjected, bufAttnOut, batchSize * seqQ);
+    projOut->queueExecute(task, bufProjected, bufAttnInterleaved, batchSize * seqQ);
 
     // 6. Residual
     Shape shape = {(int)batchSize, (int)seqQ, (int)dim};

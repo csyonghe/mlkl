@@ -39,10 +39,10 @@ void ClassifierFreeGuidanceKernel::queueExecute(
 
     Dictionary<Expr, InputInfo> inputs;
     // Batch 0: Uncond (Offset 0)
-    inputs[uncond] = InputInfo(shape, batchedInput, 0);
+    inputs[uncond] = InputInfo(shape, batchedInput);
 
     // Batch 1: Cond (Offset count * sizeof(float))
-    inputs[cond] = InputInfo(shape, batchedInput, shape.getElementCount() * sizeof(float));
+    inputs[cond] = InputInfo(shape, batchedInput.tail(shape.getElementCount() * sizeof(float)));
 
     // Scale (Scalar Value)
     inputs[scale] = guidanceScale;

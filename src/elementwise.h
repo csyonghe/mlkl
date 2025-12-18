@@ -123,16 +123,14 @@ struct InputInfo
 {
     // For Buffer inputs
     BufferView buffer;
-    size_t offset = 0;
-
     Shape shape;
 
     // For Uniform Constant inputs
     float scalarValue = 0.0f;
 
     InputInfo() = default;
-    InputInfo(Shape shape, BufferView buf, size_t off = 0)
-        : shape(shape), buffer(buf), offset(off) {};
+    InputInfo(Shape shape, BufferView buf)
+        : shape(shape), buffer(buf) {};
     InputInfo(float c)
         : scalarValue(c) {};
 };
@@ -281,6 +279,7 @@ public:
     RefPtr<ProgramNode> innerProgram;
 
     PermuteNode(Expr inner, ArrayView<int> dims);
+    PermuteNode(Expr inner, const std::initializer_list<int>& dims);
 
     String getSlangTypeName() const override;
     Shape resolveShape(const EvalContext& ctx) const override;
@@ -297,6 +296,23 @@ public:
     RefPtr<ProgramNode> innerProgram;
 
     TransposeNode(Expr inner, int d0, int d1);
+
+    String getSlangTypeName() const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
+class GatherNode : public ExprNode
+{
+public:
+    Expr table;
+    Expr indices;
+
+    // We cache the program for table/indices dependencies
+    RefPtr<ProgramNode> tableProgram;
+    RefPtr<ProgramNode> indicesProgram;
+
+    GatherNode(Expr table, Expr indices);
 
     String getSlangTypeName() const override;
     Shape resolveShape(const EvalContext& ctx) const override;
@@ -373,6 +389,8 @@ Expr constant(float v);
 Expr broadcast(Expr inner, Expr shapeOf);
 Expr concat(Expr left, Expr right, Expr axis);
 Expr permute(Expr inner, ArrayView<int> dims);
+Expr permute(Expr inner, const std::initializer_list<int>& dims);
+Expr gather(Expr table, Expr indices);
 Expr transpose(Expr inner, int dim0, int dim1);
 Expr uniformConstant();
 Expr kernelOutput();

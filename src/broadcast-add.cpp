@@ -56,10 +56,10 @@ void BroadcastAddKernel::queueExecute(
     Dictionary<Expr, InputInfo> inputs;
 
     // Bind A: InputInfo(Shape, Buffer, Offset)
-    inputs.add(inputAExpr, InputInfo(fullShapeA, inputA, 0));
+    inputs.add(inputAExpr, InputInfo(fullShapeA, inputA));
 
     // Bind B
-    inputs.add(inputBExpr, InputInfo(fullShapeB, inputB, 0));
+    inputs.add(inputBExpr, InputInfo(fullShapeB, inputB));
 
     // 3. Execute
     // The kernel will resolve the output shape (which is A's shape) and dispatch.

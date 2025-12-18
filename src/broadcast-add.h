@@ -1,3 +1,5 @@
+#pragma once
+
 #include "elementwise.h"
 #include "kernel-base.h"
 

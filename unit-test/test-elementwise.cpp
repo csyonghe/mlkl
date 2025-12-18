@@ -198,7 +198,7 @@ SlangResult testReluNegSin(InferencingContext* ctx)
 
     // 3. Bind Inputs & Execute
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(x, InputInfo(shape, inputBuf, 0));
+    inputs.add(x, InputInfo(shape, inputBuf));
 
     // Execute
     // Since it's a simple elementwise op, output shape matches input shape
@@ -263,7 +263,7 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx)
     auto task = ctx->createTask();
 
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(x, InputInfo(shape, inputBuf, 0));
+    inputs.add(x, InputInfo(shape, inputBuf));
 
     auto outputBuffer = kernel.allocResultBuffer(inputs);
     kernel.eval(task, outputBuffer, inputs);

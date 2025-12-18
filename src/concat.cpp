@@ -57,7 +57,7 @@ BufferView ConcatKernel::allocResultBuffer(ArrayView<Shape> inputShapes, int axi
         Expr e = mapOperandToExprNode[i];
 
         // Bind runtime data: Shape + Buffer Pointer
-        bindings.add(e, InputInfo(inputShapes[i], {}, 0));
+        bindings.add(e, InputInfo(inputShapes[i], {}));
     }
     return elementwiseKernel->allocResultBuffer(bindings);
 }
@@ -87,7 +87,7 @@ void ConcatKernel::queueExecute(
         Expr e = mapOperandToExprNode[i];
 
         // Bind runtime data: Shape + Buffer Pointer
-        bindings.add(e, InputInfo(inputShapes[i], inputs[i], 0));
+        bindings.add(e, InputInfo(inputShapes[i], inputs[i]));
     }
 
     // 4. Execute

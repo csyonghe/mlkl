@@ -7,6 +7,7 @@
 #include "conv2d.h"
 #include "ddim-step.h"
 #include "elementwise.h"
+#include "gather.h"
 #include "linear.h"
 #include "softmax.h"
 #include "time-embed.h"

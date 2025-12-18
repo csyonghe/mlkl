@@ -151,7 +151,7 @@ void BufferNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     {
         if (info.buffer)
         {
-            writer.write(info.buffer.getDeviceAddress() + info.offset);
+            writer.write(info.buffer.getDeviceAddress());
             return;
         }
     }
@@ -289,6 +289,14 @@ PermuteNode::PermuteNode(Expr inner, ArrayView<int> dims)
 {
 }
 
+PermuteNode::PermuteNode(Expr inner, const std::initializer_list<int>& dims)
+    : inner(inner)
+{
+    for (auto d : dims)
+        this->dims.add(d);
+}
+
+
 String PermuteNode::getSlangTypeName() const
 {
     return "Permute<" + innerProgram->getSlangTypeName() + ">";
@@ -340,6 +348,51 @@ void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     for (int i = 0; i < mappedStrides.getCount(); ++i)
         mapStrideArr[i] = (uint32_t)mappedStrides[i];
     writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
+}
+
+// --- GatherNode ---
+
+GatherNode::GatherNode(Expr table, Expr indices)
+    : table(table), indices(indices)
+{
+}
+
+String GatherNode::getSlangTypeName() const
+{
+    // Gather<TableProgram, IndicesProgram>
+    return "Gather<" + tableProgram->getSlangTypeName() + "," + indicesProgram->getSlangTypeName() +
+           ">";
+}
+
+Shape GatherNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape tableShape = table.node->resolveShape(ctx);
+    Shape idxShape = indices.node->resolveShape(ctx);
+
+    // Basic Embedding Validation:
+    // Table should be [NumClasses, Dim]
+    // Indices should be [Batch]
+    // Output is [Batch, Dim]
+
+    if (tableShape.getRank() != 2)
+        throw std::runtime_error("Gather: Table must be 2D");
+    if (idxShape.getRank() != 1)
+        throw std::runtime_error("Gather: Indices must be 1D");
+
+    return Shape{idxShape[0], tableShape[1]};
+}
+
+void GatherNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // 1. Pack dependencies
+    tableProgram->pack(writer, ctx);
+    indicesProgram->pack(writer, ctx);
+
+    // 2. Pack struct fields (embeddingDim)
+    Shape tableShape = table.node->resolveShape(ctx);
+    uint32_t dim = (uint32_t)tableShape[1];
+
+    writer.write(dim);
 }
 
 // --- TransposeNode ---
@@ -621,6 +674,14 @@ Expr permute(Expr inner, ArrayView<int> dims)
 {
     return Expr(new PermuteNode(inner, dims));
 }
+Expr permute(Expr inner, const std::initializer_list<int>& dims)
+{
+    return Expr(new PermuteNode(inner, dims));
+}
+Expr gather(Expr table, Expr indices)
+{
+    return Expr(new GatherNode(table, indices));
+}
 Expr transpose(Expr inner, int dim0, int dim1)
 {
     return Expr(new TransposeNode(inner, dim0, dim1));
@@ -774,6 +835,15 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
 
         c->rightProgram = new ProgramNode();
         *c->rightProgram = compileExprToProgram(c->right, ctx.globalRegCounter);
+    }
+    else if (auto g = dynamic_cast<GatherNode*>(node))
+    {
+        // Compile sub-programs for both inputs
+        g->tableProgram = new ProgramNode();
+        *g->tableProgram = compileExprToProgram(g->table, ctx.globalRegCounter);
+
+        g->indicesProgram = new ProgramNode();
+        *g->indicesProgram = compileExprToProgram(g->indices, ctx.globalRegCounter);
     }
     ctx.visited.insert(node);
     ctx.topoOrder.add(node);

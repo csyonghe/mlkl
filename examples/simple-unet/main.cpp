@@ -194,21 +194,7 @@ struct SimpleUNetProgram : public TestBase
         List<float> outputImageData = gInferencingCtx->readBuffer<float>(outputImage);
 
         // Save to disk as png
-        // Convert to 8-bit
-        List<uint8_t> outputImageData8Bit;
-        outputImageData8Bit.setCount(imageSize * imageSize * outputChannelCount);
-        for (int i = 0; i < outputImageData.getCount(); i++)
-        {
-            float v = outputImageData[i];
-            v = (Slang::Math::Clamp(v, -1.0f, 1.0f) + 1.0) * 0.5f;
-            outputImageData8Bit[i] = static_cast<uint8_t>(v * 255.0f);
-        }
-        writeImagePNG(
-            "output.png",
-            imageSize,
-            imageSize,
-            outputChannelCount,
-            outputImageData8Bit.getBuffer());
+        writeImagePNG("output.png", imageSize, imageSize, outputChannelCount, outputImageData);
         return SLANG_OK;
     }
 
