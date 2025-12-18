@@ -204,6 +204,8 @@ public:
     // - BroadcastNode: Packs Rank/Shape/Strides (Inner is Reg<ID>, so size 0)
     // - BinaryNode: Packs NOTHING (Operands are Reg<ID>, so size 0)
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
+
+    virtual size_t getAlignment() const { return sizeof(int32_t); }
 };
 
 class ProgramNode : public ExprNode
@@ -215,6 +217,7 @@ public:
     String getSlangTypeName() const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    virtual size_t getAlignment() const override;
 };
 
 
@@ -224,6 +227,7 @@ public:
     String getSlangTypeName() const override { return "BufferView"; }
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    virtual size_t getAlignment() const { return sizeof(void*); }
 };
 
 class ConstantNode : public ExprNode

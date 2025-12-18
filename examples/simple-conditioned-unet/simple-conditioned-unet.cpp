@@ -223,16 +223,11 @@ void SimpleConditionedUNet::queueExecute(
 
         Shape shape = {batchSize, h, w, block->inChannels}; // Assuming symmetric
         Shape shapes[] = {shape, shape};
-        BufferView buffers[] = {x, skip}; // NOTE: x needs to be upsampled first!
-
-        // MISSING: Upsample Logic.
-        // If UNetBlockKind::Up doesn't Upsample, we need a kernel.
-        // I will assume for now we concat and the block handles it,
-        // OR the user has an UpsampleKernel.
+        BufferView buffers[] = {x, skip};
 
         // Placeholder for concat:
-        auto concated = concat->allocResultBuffer(makeArrayView(shapes), 2);
-        concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 2);
+        auto concated = concat->allocResultBuffer(makeArrayView(shapes), 3);
+        concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 3);
 
         auto res = block->allocateResultBuffer(w, h, batchSize);
         block->queueExecute(task, res, concated, w, h, batchSize, tEmb);

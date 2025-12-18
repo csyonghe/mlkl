@@ -94,7 +94,7 @@ class Block(nn.Module):
 
     def forward(self, x, t):
         # First Conv
-        h = self.bnorm1(self.relu(self.conv1(x)))
+        h = self.relu(self.bnorm1(self.conv1(x)))
         # Time Embedding Injection
         time_emb = self.relu(self.time_mlp(t))
         # Extend time_emb to match spatial dims [B, C, 1, 1]
@@ -102,7 +102,7 @@ class Block(nn.Module):
         # Add time embedding
         h = h + time_emb
         # Second Conv
-        h = self.bnorm2(self.relu(self.conv2(h)))
+        h = self.relu(self.bnorm2(self.conv2(h)))
         # Downsample or Upsample
         return self.transform(h)
 

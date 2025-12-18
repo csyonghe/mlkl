@@ -14,23 +14,17 @@ using namespace Slang;
 static const ExampleResources resourceBase("simple-conditioned-unet");
 
 // ============================================================================
-// DDIM SAMPLER (Deterministic)
-// ============================================================================
-// ============================================================================
-// DDIM SAMPLER (Deterministic & Respaced)
+// DIFFUSION SCHEDULE
 // ============================================================================
 
 struct DiffusionSchedule
 {
-    // Stores the FULL training schedule (e.g. 1000 steps)
     std::vector<float> alphas_cumprod;
     int train_steps;
 
-    DiffusionSchedule(int steps = 1000, float beta_min = 0.0001f, float beta_max = 0.02f)
+    DiffusionSchedule(int steps = 500, float beta_min = 0.0001f, float beta_max = 0.02f)
         : train_steps(steps)
     {
-        // Standard Linear Beta Schedule
-        // (Ensure these beta_min/max match your training config!)
         float current_alpha_cumprod = 1.0f;
         for (int i = 0; i < steps; i++)
         {
@@ -41,6 +35,10 @@ struct DiffusionSchedule
         }
     }
 };
+
+// ============================================================================
+// ROBUST DDIM SAMPLER (Clipped & Trailing Schedule)
+// ============================================================================
 
 class DDIMSampler : public RefObject
 {
@@ -54,27 +52,30 @@ class DDIMSampler : public RefObject
 
 public:
     DiffusionSchedule schedule;
-
-    // The subsequence of time steps to use (e.g., 0, 5, 10...)
     std::vector<int> timesteps;
     int inference_steps;
 
     DDIMSampler(InferencingContext* context, int train_steps, int infer_steps)
         : ctx(context), schedule(train_steps), inference_steps(infer_steps)
     {
-        // 1. Create the Time Step Mapping
-        // We select 'infer_steps' evenly spaced points from [0, train_steps-1]
-        // Example: 1000 train, 200 infer -> step_ratio = 5
-        // timesteps = [0, 5, 10, ..., 995]
-        int step_ratio = train_steps / infer_steps;
-        for (int i = 0; i < infer_steps; i++)
+        // 1. Improved Schedule: "Trailing" mapping
+        // This ensures we always start at the max noise (t=499) and end at t=0.
+        // Formula: t = i * (train_max / infer_max)
+        timesteps.clear();
+        if (infer_steps > 1)
         {
-            // Standard generic sub-selection.
-            // Often +1 is used in some implementations, but simple striding is common.
-            timesteps.push_back(i * step_ratio);
+            for (int i = 0; i < infer_steps; i++)
+            {
+                int t = (int)((float)i / (float)(infer_steps - 1) * (train_steps - 1));
+                timesteps.push_back(t);
+            }
+        }
+        else
+        {
+            timesteps.push_back(train_steps - 1);
         }
 
-        // 2. Prepare Kernel (same mathematical formula as before)
+        // 2. Build Kernel with x0 Clipping
         // x_{t-1} = c1 * x_t + c2 * eps
         x_t = buffer();
         eps = buffer();
@@ -86,13 +87,12 @@ public:
     }
 
     // Takes the Loop Index 'i' (from inference_steps-1 down to 0)
-    // Returns the actual training timestep 't' used.
     int step(
         InferencingTask& task,
         BufferView out_x_prev,
         BufferView in_x_t,
         BufferView in_eps,
-        int index, // The inference loop index (e.g. 199)
+        int index,
         const Shape& shape)
     {
         // 1. Map Index -> Training Timestep
@@ -176,9 +176,9 @@ struct SimpleUNetProgram : public TestBase
         int batchSize = 1;
         int imgSize = 32; // Standard simple-unet size
         int channels = 1; // MNIST is grayscale
-        int train_steps = 1000;
-        int inference_steps = 200;
-        int targetDigit = 7;
+        int train_steps = 500;
+        int inference_steps = 100;
+        int targetDigit = 4;
 
         // 2. Initialize Model
         // (1 in, 1 out, 32 tDim, 128 cDim, 64 baseCh, 10 classes)

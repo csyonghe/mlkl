@@ -641,8 +641,23 @@ Shape ProgramNode::resolveShape(const EvalContext& ctx) const
     return shapes[linearNodes.getLast()];
 }
 
+size_t ProgramNode::getAlignment() const
+{
+    size_t alignment = 1;
+    for (ExprNode* node : linearNodes)
+    {
+        alignment = Math::Max(alignment, node->getAlignment());
+    }
+    return alignment;
+}
+
 void ProgramNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
+    // First, go through all nodes and find max alignment, that
+    // is the alignment of the entire Program struct, and we need
+    // to align our packing location with it.
+    auto alignment = getAlignment();
+    writer.align(alignment);
     for (ExprNode* node : linearNodes)
     {
         node->pack(writer, ctx);

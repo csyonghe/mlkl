@@ -51,7 +51,7 @@ public:
 
 class SimpleConditionedUNet : public RefObject
 {
-protected:
+public:
     RefPtr<InferencingContext> context;
 
     // Model Components
