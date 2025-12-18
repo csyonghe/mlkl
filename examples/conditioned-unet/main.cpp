@@ -75,7 +75,7 @@ public:
             timesteps.push_back(train_steps - 1);
         }
 
-        // 2. Build Kernel with x0 Clipping
+        // 2. Build Kernel with x0
         // x_{t-1} = c1 * x_t + c2 * eps
         x_t = buffer();
         eps = buffer();
@@ -148,7 +148,7 @@ public:
 
 static void fillRandom(List<float>& list, int count)
 {
-    static std::mt19937 gen(1234);
+    static std::mt19937 gen(7391);
     std::normal_distribution<float> dist(0.0f, 1.0f);
     list.setCount(count);
     for (int i = 0; i < count; ++i)
@@ -166,7 +166,7 @@ struct SimpleUNetProgram : public TestBase
 
     SimpleUNetProgram() { gInferencingCtx = new InferencingContext(); }
 
-    SlangResult testUNetModel()
+    SlangResult testUNetModel(int targetDigit)
     {
         printf("\n=== Running Conditioned UNet Generation ===\n");
 
@@ -178,7 +178,6 @@ struct SimpleUNetProgram : public TestBase
         int channels = 1; // MNIST is grayscale
         int train_steps = 500;
         int inference_steps = 100;
-        int targetDigit = 4;
 
         // 2. Initialize Model
         // (1 in, 1 out, 32 tDim, 128 cDim, 64 baseCh, 10 classes)
@@ -267,7 +266,7 @@ struct SimpleUNetProgram : public TestBase
         // 6. Save Result
         // The final result is in bufX (because we swapped after the last write to bufNextX)
         auto finalPixels = ctx->readBuffer<float>(bufX);
-        writeImagePNG("result_digit_7.png", imgSize, imgSize, 1, finalPixels);
+        writeImagePNG("result_digit.png", imgSize, imgSize, 1, finalPixels);
 
         printf("Done.\n");
         return SLANG_OK;
@@ -278,7 +277,7 @@ struct SimpleUNetProgram : public TestBase
 int main(int argc, char* argv[])
 {
     SimpleUNetProgram program;
-    if (SLANG_FAILED(program.testUNetModel()))
+    if (SLANG_FAILED(program.testUNetModel(7)))
     {
         return -1;
     }
