@@ -85,7 +85,7 @@ SlangResult testTranspose(InferencingContext* ctx)
     auto bufOut = kernel.allocResultBuffer(inputs);
 
     // 5. Execute
-    kernel.eval(task, bufOut, inputs);
+    kernel.queueExecute(task, bufOut, inputs);
     task.execute();
 
     // 6. Verify
@@ -148,7 +148,7 @@ SlangResult testMaterialize(InferencingContext* ctx)
     //  Eval<9, Mul<Reg<7>,Reg<8>>>
     //  >>`.
     auto outputBuffer = kernel->allocResultBuffer(inputs);
-    kernel->eval(task, outputBuffer, inputs);
+    kernel->queueExecute(task, outputBuffer, inputs);
 
     // 6. Execute and Readback
     renderDocBeginFrame();
@@ -203,7 +203,7 @@ SlangResult testReluNegSin(InferencingContext* ctx)
     // Execute
     // Since it's a simple elementwise op, output shape matches input shape
     auto outputBuffer = kernel.allocResultBuffer(inputs);
-    kernel.eval(task, outputBuffer, inputs);
+    kernel.queueExecute(task, outputBuffer, inputs);
 
     // 4. Readback
     renderDocBeginFrame();
@@ -266,7 +266,7 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx)
     inputs.add(x, InputInfo(shape, inputBuf));
 
     auto outputBuffer = kernel.allocResultBuffer(inputs);
-    kernel.eval(task, outputBuffer, inputs);
+    kernel.queueExecute(task, outputBuffer, inputs);
 
     // Readback
     renderDocBeginFrame();

@@ -63,5 +63,5 @@ void BroadcastAddKernel::queueExecute(
 
     // 3. Execute
     // The kernel will resolve the output shape (which is A's shape) and dispatch.
-    kernel->eval(task, result, inputs);
+    kernel->queueExecute(task, result, inputs);
 }

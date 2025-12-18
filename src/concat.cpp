@@ -93,5 +93,5 @@ void ConcatKernel::queueExecute(
     // 4. Execute
     // The kernel will resolve the total output shape automatically
     // by propagating shapes through the ConcatNodes.
-    elementwiseKernel->eval(task, output, bindings);
+    elementwiseKernel->queueExecute(task, output, bindings);
 }

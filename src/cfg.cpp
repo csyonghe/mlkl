@@ -47,5 +47,5 @@ void ClassifierFreeGuidanceKernel::queueExecute(
     // Scale (Scalar Value)
     inputs[scale] = guidanceScale;
 
-    kernel->eval(task, output, inputs);
+    kernel->queueExecute(task, output, inputs);
 }

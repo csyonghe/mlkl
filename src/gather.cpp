@@ -58,5 +58,5 @@ void GatherKernel::queueExecute(
     inputs.add(indicesExpr, InputInfo(Shape{batchSize}, inputLabels));
 
     // Execute
-    kernel->eval(task, output, inputs);
+    kernel->queueExecute(task, output, inputs);
 }

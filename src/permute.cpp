@@ -28,5 +28,5 @@ void PermuteKernel::queueExecute(
     Dictionary<Expr, InputInfo> inputs;
     inputs.add(inputExpr, InputInfo(inputShape, input));
 
-    kernel->eval(task, output, inputs);
+    kernel->queueExecute(task, output, inputs);
 }

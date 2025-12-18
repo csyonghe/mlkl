@@ -136,7 +136,7 @@ public:
         inputs.add(c1, InputInfo(val_c1));
         inputs.add(c2, InputInfo(val_c2));
 
-        updateKernel->eval(task, out_x_prev, inputs);
+        updateKernel->queueExecute(task, out_x_prev, inputs);
 
         return t; // Return actual training time for debug/logging
     }

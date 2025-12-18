@@ -938,7 +938,7 @@ BufferView ElementwiseKernel::allocResultBuffer(const Dictionary<Expr, InputInfo
     return context->allocScratchBuffer(count * sizeof(float), "elementwise");
 }
 
-void ElementwiseKernel::eval(
+void ElementwiseKernel::queueExecute(
     InferencingTask& task,
     BufferView output,
     const Dictionary<Expr, InputInfo>& inputs)

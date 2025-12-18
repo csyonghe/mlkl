@@ -497,7 +497,10 @@ class ElementwiseKernel : public RefObject
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
     BufferView allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
-    void eval(InferencingTask& task, BufferView output, const Dictionary<Expr, InputInfo>& inputs);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        const Dictionary<Expr, InputInfo>& inputs);
 };
 
 ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);
