@@ -1,10 +1,10 @@
-#include "simple-conditioned-unet.h"
+#include "conditioned-unet.h"
 
 #include "kernels.h"
 
 #include <vector>
 
-SimpleConditionedUNet::SimpleConditionedUNet(
+ConditionedUNet::ConditionedUNet(
     RefPtr<InferencingContext> ctx,
     int inChannels,
     int outChannels,
@@ -100,7 +100,7 @@ SimpleConditionedUNet::SimpleConditionedUNet(
     concat = new ConcatKernel(ctx, 2);
 }
 
-SlangResult SimpleConditionedUNet::loadParams(TorchParamReader& reader)
+SlangResult ConditionedUNet::loadParams(TorchParamReader& reader)
 {
     // 1. Time MLP
     SLANG_RETURN_ON_FAIL(timeEmbed->loadParams(reader));
@@ -132,7 +132,7 @@ SlangResult SimpleConditionedUNet::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-void SimpleConditionedUNet::queueExecute(
+void ConditionedUNet::queueExecute(
     InferencingTask& task,
     BufferView outputImage,
     BufferView inputImage,

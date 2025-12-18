@@ -1,6 +1,6 @@
+#include "conditioned-unet.h"
 #include "elementwise.h"
 #include "example-base.h"
-#include "simple-conditioned-unet.h"
 #include "torch-reader.h"
 
 #include <algorithm>
@@ -11,7 +11,7 @@
 
 using namespace Slang;
 
-static const ExampleResources resourceBase("simple-conditioned-unet");
+static const ExampleResources resourceBase("conditioned-unet");
 
 // ============================================================================
 // DIFFUSION SCHEDULE
@@ -182,8 +182,8 @@ struct SimpleUNetProgram : public TestBase
 
         // 2. Initialize Model
         // (1 in, 1 out, 32 tDim, 128 cDim, 64 baseCh, 10 classes)
-        RefPtr<SimpleConditionedUNet> model =
-            new SimpleConditionedUNet(ctx, channels, channels, 32, 128, 64, 10);
+        RefPtr<ConditionedUNet> model =
+            new ConditionedUNet(ctx, channels, channels, 32, 128, 64, 10);
 
         {
             auto weightsPath = resourceBase.resolveResource("model_weights_conditioned.bin");

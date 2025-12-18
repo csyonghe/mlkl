@@ -49,7 +49,7 @@ public:
         BufferView timeEmbedding);
 };
 
-class SimpleConditionedUNet : public RefObject
+class ConditionedUNet : public RefObject
 {
 public:
     RefPtr<InferencingContext> context;
@@ -78,7 +78,7 @@ public:
     List<int> channelMultipliers;
 
 public:
-    SimpleConditionedUNet(
+    ConditionedUNet(
         RefPtr<InferencingContext> ctx,
         int inChannels = 1,
         int outChannels = 1,
