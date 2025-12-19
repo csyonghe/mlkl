@@ -20,8 +20,8 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
 {
     // 1. Shared memory tiles
     // We use TILE_K as the shared dimension for both Input and Weights
-    static groupshared float s_A[TILE_M][TILE_K];
-    static groupshared float s_B[TILE_N][TILE_K];
+    static groupshared float s_A[TILE_M][TILE_K+1]; // +1 to reduce bank conflict
+    static groupshared float s_B[TILE_N][TILE_K+1];
 
     uint row = groupID.y * TILE_M + groupThreadID.y;
     uint col = groupID.x * TILE_N + groupThreadID.x;
