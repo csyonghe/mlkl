@@ -2,6 +2,9 @@
 
 #include "kernel-base.h"
 
+// Transposed Conv2D Kernel
+// Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
+// Input/Output layout: [BatchSize, Height, Width, Channels]
 class TransposedConv2DKernel : public RefObject
 {
 private:

@@ -2,6 +2,13 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+// Compute batched matrix multiply: alpha*A[i]*B[i] + beta*C[i], where i = 0..batchSize-1
+// Input layout:
+// - A: [BatchSize M K]
+// - B: [BatchSize K N]
+// - C: [BatchSize M N]
+// Output: [BatchSize M N]
+//
 class BatchGemmKernel : public RefObject
 {
     ComPtr<rhi::IComputePipeline> pipeline;
@@ -11,9 +18,10 @@ class BatchGemmKernel : public RefObject
     ProgramNode programB;
     ProgramNode programC;
     ProgramNode programOut;
+    SinkExpr sinkExpr;
 
 public:
-    BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, Expr Out);
+    BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, SinkExpr sinkExpr, Expr Out);
 
     BufferView allocResultBuffer(int batchSize, int m, int n);
 
@@ -27,5 +35,35 @@ public:
         int batchSize,
         float alpha,
         float beta,
+        EvalContext& ctx);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        int M,
+        int N,
+        int K,
+        int batchSize,
+        float alpha,
+        float beta,
         const Dictionary<Expr, InputInfo>& inputs);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        int M,
+        int N,
+        int K,
+        int batchSize,
+        float alpha,
+        float beta,
+        ArrayView<InputInfo> inputs);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        int M,
+        int N,
+        int K,
+        int batchSize,
+        float alpha,
+        float beta,
+        const std::initializer_list<InputInfo>& inputs);
 };

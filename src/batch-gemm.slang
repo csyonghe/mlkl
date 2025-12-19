@@ -1,10 +1,11 @@
 implementing mlkl;
 
-struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>
+struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>
 {
     TA A;
     TB B;
     TC C;
+    TSink Sink;
     TOut FOut;
     
     uint M; 
@@ -13,13 +14,12 @@ struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>
     
     float alpha;
     float beta;
-    float* output;
 };
 
 // Dispatch: x=N/16, y=M/16, z=BatchSize
 [numthreads(16, 16, 1)]
-void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>(
-    ConstantBuffer<BatchGemmParams<TA, TB, TC, TOut>, ScalarDataLayout> params,
+void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>(
+    ConstantBuffer<BatchGemmParams<TA, TB, TC, TSink, TOut>, CDataLayout> params,
     uint3 id : SV_DispatchThreadID)
 {
     uint col = id.x; // n
@@ -67,5 +67,5 @@ void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TOut:IExpr>(
     outInput.value = res;
     float finalVal = params.FOut.eval(idxC, outInput);
 
-    params.output[idxC] = finalVal;
+    params.Sink.store(idxC, finalVal);
 }

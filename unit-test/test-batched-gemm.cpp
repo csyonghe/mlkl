@@ -57,36 +57,28 @@ SlangResult testBatchGemm(InferencingContext* ctx)
     auto bufA = ctx->createPersistentBuffer(A, "GemmA");
     auto bufB = ctx->createPersistentBuffer(B, "GemmB");
 
-    // Using Generic BatchGemmKernel
-    // A: Buffer
-    // B: Transpose(Buffer, 0, 1) - Wait, input to kernel is just expression.
-    // If we use the old logic (kernel takes raw buffers and flags), we use that.
-    // Assuming we migrated to the NEW Generic Kernel:
-
     // Construct Exprs
     auto exprA = buffer();
-    // cpuBatchGemm(transB=true) means we are multiplying by B transposed.
-    // Input B is [N, K] (Physical). We treat it as [K, N] logic?
-    // Wait, cpuBatchGemm transB=true means:
-    // Logical B = Physical B^T.
-    // Physical B is [N, K]. Logical B is [K, N].
-    // So in Expr terms: LogicalB = transpose(PhysicalB, 0, 1).
-    // Let's stick to the setup:
-    // Physical B: [batch, N, K]
-    // Logical B needed for Gemm (KxN): Transpose(PhysicalB)
     auto inputB = buffer();
     auto exprB = transpose(inputB, 1, 2);
     auto exprC = constant(0.0f); // No bias for standard test
     auto exprOut = kernelOutput();
 
-    BatchGemmKernel kernel(ctx, exprA, exprB, exprC, exprOut);
+    BatchGemmKernel kernel(ctx, exprA, exprB, exprC, bufferSink(), exprOut);
     auto bufOut = ctx->allocScratchBuffer(batch * M * N * sizeof(float), "GemmOut");
 
-    Dictionary<Expr, InputInfo> inputs;
-    inputs.add(exprA, InputInfo(Shape{batch, M, K}, BufferView(bufA)));
-    inputs.add(inputB, InputInfo(Shape{batch, N, K}, BufferView(bufB)));
     auto task = ctx->createTask();
-    kernel.queueExecute(task, bufOut, M, N, K, batch, 1.0f, 0.0f, inputs);
+    kernel.queueExecute(
+        task,
+        bufOut,
+        M,
+        N,
+        K,
+        batch,
+        1.0f,
+        0.0f,
+        {InputInfo(Shape{batch, M, K}, BufferView(bufA)),
+         InputInfo(Shape{batch, N, K}, BufferView(bufB))});
     task.execute();
 
     if (!checkOutput(ctx, bufOut, Expected))
@@ -96,7 +88,6 @@ SlangResult testBatchGemm(InferencingContext* ctx)
     }
     MLKL_TEST_OK();
 }
-
 
 static void cpuFusedGemm(
     const float* A,
@@ -133,7 +124,7 @@ static void cpuFusedGemm(
                     sum += valA * valB;
                 }
                 float res = sum + pC[r * N + c];
-                pOut[r * N + c] = std::max(0.0f, res);
+                pOut[c * M + r] = std::max(0.0f, res); // Transposed output.
             }
         }
     }
@@ -177,8 +168,9 @@ SlangResult testFusedBatchGemm(InferencingContext* ctx)
     auto exprC = buffer();
     // Out: ReLU
     auto exprOut = relu(kernelOutput());
-
-    BatchGemmKernel kernel(ctx, exprA, exprB, exprC, exprOut);
+    // Sink: Permute
+    auto sinkExpr = permute(bufferSink(), {0, 2, 1});
+    BatchGemmKernel kernel(ctx, exprA, exprB, exprC, sinkExpr, exprOut);
 
     auto task = ctx->createTask();
     auto bufOut = kernel.allocResultBuffer(B, M, N);

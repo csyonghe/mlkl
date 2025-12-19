@@ -17,6 +17,7 @@ namespace Slang
 // - br: Block size in rows (Sq dimension)
 // - bc: Block size in columns (Skv dimension)
 // - d: Head dimension (D_head)
+// Output layout: Planar [B, H, Sq, D_head]
 
 class FlashAttentionKernel : public RefObject
 {

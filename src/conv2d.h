@@ -2,6 +2,9 @@
 
 #include "kernel-base.h"
 
+// 2D Convolution Kernel
+// - Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
+// - Input/Output layout: [BatchSize, Height, Width, Channels]
 class Conv2DKernel : public RefObject
 {
 private:

@@ -4,6 +4,9 @@
 #include "kernel-base.h"
 #include "linear.h"
 
+// Apply linear projection from input latent vector `x` and context embeddings to Q, K, V,
+// then apply Flash Attention and output projection, and return `x` + attention output.
+//
 class CrossAttentionKernel : public RefObject
 {
 private:
