@@ -490,8 +490,32 @@ Expr transpose(Expr inner, int dim0, int dim1);
 
 // Represent the output buffer that the kernel writes to.
 SinkExpr bufferSink();
+
+// Represent a permutation transformation (reorders dimensions) on the output buffer.
 SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
-SinkExpr partition(SinkExpr child, uint32_t dimIndex, uint32_t partitionSize);
+
+// Represent a partitioning transformation on the output buffer. The logical output
+// tensor of the kernel is split into `partitionCount` partitions along dimension `dimIndex`,
+// and each partition becomes a new outer-most dimension in the physical output buffer.
+// For example, if a kernel produces the following 2D tensor:
+//   row0: [1 2 3 4]
+//   row1: [5 6 7 8]
+// Then applying partition(bufferSink(), 1, 2) would produce two partitions along dimension 1
+// (columns):
+//   partition 0:
+//     row0: [1 2]
+//     row1: [5 6]
+//   partition 1:
+//     row0: [3 4]
+//     row1: [7 8]
+// The partitions would be laid out in the physical buffer as:
+//   partition 0, row0: [1 2]
+//   partition 0, row1: [5 6]
+//   partition 1, row0: [3 4]
+//   partition 1, row1: [7 8]
+// In short, the final physical shape would be
+// [partitionCount, originalDim0, originalDim1 / partitionCount].
+SinkExpr partition(SinkExpr child, uint32_t dimIndex, uint32_t partitionCount);
 
 Expr min(Expr l, Expr r);
 Expr max(Expr l, Expr r);
