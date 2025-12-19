@@ -95,8 +95,8 @@ void cpuLinear(
                 float sum = (biases) ? biases[o] : 0.0f;
                 for (int k = 0; k < inDim; k++)
                 {
-                    // [In, Out] Layout: weights[k * outDim + o]
-                    sum += inVec[k] * weights[k * outDim + o];
+                    // [Out In] Layout: weights[o*inDim + k]
+                    sum += inVec[k] * weights[o * inDim + k];
                 }
                 outVec[o] = sum;
             }

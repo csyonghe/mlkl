@@ -10,11 +10,10 @@ CrossAttentionKernel::CrossAttentionKernel(
     : context(ctx), headDim(headDim)
 {
     // 1. Initialize Linear Projections
-    // Assuming 32-dim head standard for headDim calculation
-    projQ = new LinearKernel(ctx, ActivationFunction::None, 256, channelDim, channelDim);
-    projK = new LinearKernel(ctx, ActivationFunction::None, 256, contextDim, channelDim);
-    projV = new LinearKernel(ctx, ActivationFunction::None, 256, contextDim, channelDim);
-    projOut = new LinearKernel(ctx, ActivationFunction::None, 256, channelDim, channelDim);
+    projQ = new LinearKernel(ctx, channelDim, channelDim);
+    projK = new LinearKernel(ctx, contextDim, channelDim);
+    projV = new LinearKernel(ctx, contextDim, channelDim);
+    projOut = new LinearKernel(ctx, channelDim, channelDim);
 
     // 2. Setup Flash Attention with Fused Permutation
     // We expect input to be [B, S, H, D] (Interleaved)
@@ -93,8 +92,6 @@ void CrossAttentionKernel::queueExecute(
     projV->queueExecute(task, bufV, contextEmb, batchSize * seqKV);
 
     // 2. Flash Attention Core
-    // This replaces Gemm1, Softmax, Gemm2, and the manual Permute!
-    // Note: Result is written out Interleaved because of eOutInterleaved
     size_t sizeAttn = (size_t)batchSize * numHeads * seqQ * headDim * sizeof(float);
     BufferView bufAttnInterleaved = context->allocScratchBuffer(sizeAttn, "Attn_Interleaved");
 

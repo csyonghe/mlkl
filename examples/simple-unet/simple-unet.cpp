@@ -59,8 +59,13 @@ UNetBlock::UNetBlock(
         outChannels,
         ActivationFunction::ReLU,
         "conv2");
-    timeEmbedTransform =
-        new LinearKernel(inferencingCtx, ActivationFunction::ReLU, 128, timeEmbedDim, outChannels);
+    timeEmbedTransform = new LinearKernel(
+        inferencingCtx,
+        buffer(),
+        relu(kernelOutput()),
+        bufferSink(),
+        timeEmbedDim,
+        outChannels);
     broadcastAdd = new BroadcastAddKernel(inferencingCtx);
 }
 

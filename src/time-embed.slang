@@ -3,7 +3,7 @@ implementing mlkl;
 struct TimeEmbeddingParams
 {
     float* output; // Layout: [Batch OutputDim]
-    float* weights; // Layout: [EmbeddingDim * OutputDim] (Row-Major: In x Out)
+    float* weights; // Layout: [OutputDim EmbeddingDim] (Row-Major: Out x In)
     float* biases; // [OutputDim]
     uint timeStep;
     uint embeddingDim; // The size of the sin/cos vector (InChannels)
@@ -47,8 +47,8 @@ void computeTimeEmbedding<int outputDim>(
         float valCos = cos(angle);
 
         // Weights are shared across the batch
-        uint weightIdxSin = i * outputDim + outChannel;
-        uint weightIdxCos = (i + halfDim) * outputDim + outChannel;
+        uint weightIdxSin = outChannel* params.embeddingDim + i;
+        uint weightIdxCos = outChannel * params.embeddingDim +(i + halfDim);
 
         sum += valSin * params.weights[weightIdxSin];
         sum += valCos * params.weights[weightIdxCos];

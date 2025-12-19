@@ -54,6 +54,22 @@ public:
             &paramData,
             sizeof(TParams));
     }
+
+    void dispatchKernel(
+        rhi::IComputePipeline* pipeline,
+        uint32_t threadGroupCountX,
+        uint32_t threadGroupCountY,
+        uint32_t threadGroupCountZ,
+        const List<uint8_t>& paramData)
+    {
+        dispatchKernel(
+            pipeline,
+            threadGroupCountX,
+            threadGroupCountY,
+            threadGroupCountZ,
+            paramData.getBuffer(),
+            (size_t)paramData.getCount());
+    }
     void execute();
 };
 

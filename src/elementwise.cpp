@@ -947,6 +947,53 @@ struct SSAGenContext
     int* globalRegCounter = nullptr;
 };
 
+template<typename Func>
+void visitAllExpr(HashSet<ExprNode*>& visited, ExprNode* node, Func f)
+{
+    if (visited.contains(node))
+        return;
+    visited.add(node);
+    f(node);
+    if (auto b = dynamic_cast<BinaryNode*>(node))
+    {
+        visitAllExpr(visited, b->left.node, f);
+        visitAllExpr(visited, b->right.node, f);
+    }
+    else if (auto u = dynamic_cast<UnaryNode*>(node))
+    {
+        visitAllExpr(visited, u->inner.node, f);
+    }
+    else if (auto br = dynamic_cast<BroadcastNode*>(node))
+    {
+        visitAllExpr(visited, br->inner.node, f);
+    }
+    else if (auto p = dynamic_cast<PermuteNode*>(node))
+    {
+        visitAllExpr(visited, p->inner.node, f);
+    }
+    else if (auto t = dynamic_cast<TransposeNode*>(node))
+    {
+        visitAllExpr(visited, t->inner.node, f);
+    }
+    else if (auto c = dynamic_cast<ConcatNode*>(node))
+    {
+        visitAllExpr(visited, c->left.node, f);
+        visitAllExpr(visited, c->right.node, f);
+    }
+    else if (auto g = dynamic_cast<GatherNode*>(node))
+    {
+        visitAllExpr(visited, g->table.node, f);
+        visitAllExpr(visited, g->indices.node, f);
+    }
+    else if (auto leaf = dynamic_cast<LeafNode*>(node))
+    {
+    }
+    else
+    {
+        throw std::runtime_error("Unknown ExprNode type in visitAllExpr");
+    }
+}
+
 void topoVisit(ExprNode* node, SSAGenContext& ctx)
 {
     if (ctx.visited.count(node))
@@ -1008,6 +1055,20 @@ ProgramNode compileExprToProgram(Expr root, int* globalRegCounter)
     SSAGenContext ssaCtx;
     ssaCtx.globalRegCounter = globalRegCounter;
     topoVisit(root.node, ssaCtx);
+    HashSet<ExprNode*> visited;
+    List<BufferNode*> bufferNodes;
+    visitAllExpr(
+        visited,
+        root.node,
+        [&](ExprNode* node)
+        {
+            if (auto bufferNode = as<BufferNode>(node))
+            {
+                bufferNodes.add(bufferNode);
+            }
+        });
+    bufferNodes.sort([](BufferNode* b1, BufferNode* b2)
+                     { return b1->sequenceNumber < b2->sequenceNumber; });
 
     int resultReg = ssaCtx.regIDs[root.node];
 
@@ -1018,6 +1079,7 @@ ProgramNode compileExprToProgram(Expr root, int* globalRegCounter)
     }
     program.resultRegID = ssaCtx.regIDs[root.node];
     program.nodeToRegID = _Move(ssaCtx.regIDs);
+    program.bufferNodes = _Move(bufferNodes);
     return _Move(program);
 }
 
@@ -1105,4 +1167,24 @@ void ElementwiseKernel::queueExecute(
         1,
         paramData.getBuffer(),
         (uint32_t)paramData.getCount());
+}
+
+EvalContext::EvalContext(ProgramNode* programNode, ArrayView<InputInfo> inputInfos)
+{
+    for (Index i = 0; i < inputs.getCount(); i++)
+    {
+        inputs.add(programNode->bufferNodes[i], inputInfos[i]);
+    }
+}
+
+EvalContext::EvalContext(
+    ProgramNode* programNode,
+    const std::initializer_list<InputInfo>& inputInfos)
+{
+    Index i = 0;
+    for (auto& inputInfo : inputInfos)
+    {
+        inputs.add(programNode->bufferNodes[i], inputInfo);
+        i++;
+    }
 }

@@ -62,11 +62,10 @@ def export_model_weights(model, filepath="model_weights.bin"):
             elif isinstance(module, nn.Linear):
                 print(f"[Layer] {name} (Linear)")
                 
-                # Transpose [Out, In] -> [In, Out]
+                # Preserve [Out, In] layout
                 w = module.weight
-                w_transposed = w.t()
                 
-                write_tensor(f, w_transposed, "Weight", f"TRANSPOSED from {list(w.shape)}")
+                write_tensor(f, w, "Weight", f"Preserved {list(w.shape)}")
                 
                 if module.bias is not None:
                     write_tensor(f, module.bias, "Bias")

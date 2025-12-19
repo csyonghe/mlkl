@@ -21,6 +21,11 @@ private:
     RefPtr<FlashAttentionKernel> flashAttn;
 
     // Expression Handles for Fused Permutation
+    Expr exprProjQ_In;
+    Expr exprProjK_In;
+    Expr exprProjV_In;
+    Expr exprProjOut_In;
+
     Expr exprQ_In;
     Expr exprK_In;
     Expr exprV_In;

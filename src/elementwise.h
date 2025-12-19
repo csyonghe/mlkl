@@ -102,6 +102,7 @@ struct InputInfo
 };
 
 class ExprNode;
+class ProgramNode;
 
 struct EvalContext
 {
@@ -122,6 +123,9 @@ struct EvalContext
         }
         return Shape();
     }
+    EvalContext() = default;
+    EvalContext(ProgramNode* programNode, ArrayView<InputInfo> inputs);
+    EvalContext(ProgramNode* programNode, const std::initializer_list<InputInfo>& inputs);
 };
 
 struct SinkExprEvalContext
@@ -226,10 +230,13 @@ struct SinkExpr
     }
 };
 
+class BufferNode;
+
 class ProgramNode : public ExprNode
 {
 public:
     List<RefPtr<ExprNode>> linearNodes;
+    List<BufferNode*> bufferNodes;
     int resultRegID = -1;
     Dictionary<ExprNode*, int> nodeToRegID;
     String getSlangTypeName() const override;
@@ -238,17 +245,22 @@ public:
     virtual size_t getAlignment() const override;
 };
 
+class LeafNode : public ExprNode
+{
+};
 
-class BufferNode : public ExprNode
+class BufferNode : public LeafNode
 {
 public:
+    uint64_t sequenceNumber; // To identify the buffer at runtime
+
     String getSlangTypeName() const override { return "BufferView"; }
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     virtual size_t getAlignment() const { return sizeof(void*); }
 };
 
-class ConstantNode : public ExprNode
+class ConstantNode : public LeafNode
 {
     float value;
 
@@ -263,7 +275,7 @@ public:
 };
 
 // Represents a runtime constant provided via InputInfo
-class UniformConstantNode : public ExprNode
+class UniformConstantNode : public LeafNode
 {
 public:
     UniformConstantNode() = default;
@@ -394,7 +406,7 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
 };
 
-class KernelOutputNode : public ExprNode
+class KernelOutputNode : public LeafNode
 {
 public:
     Shape resolveShape(const EvalContext&) const override { return Shape(); }
@@ -550,5 +562,15 @@ public:
         BufferView output,
         const Dictionary<Expr, InputInfo>& inputs);
 };
+
+inline EvalContext makeEvalContext(const Dictionary<Expr, InputInfo>& inputs)
+{
+    EvalContext ctx;
+    for (const auto& kv : inputs)
+    {
+        ctx.inputs.add(kv.first.node.get(), kv.second);
+    }
+    return ctx;
+}
 
 ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);

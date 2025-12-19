@@ -149,7 +149,7 @@ struct SimpleUNetProgram : public TestBase
 int main(int argc, char* argv[])
 {
     SimpleUNetProgram program;
-    if (SLANG_FAILED(program.testUNetModel(7)))
+    if (SLANG_FAILED(program.testUNetModel(1)))
     {
         return -1;
     }

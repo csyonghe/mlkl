@@ -62,24 +62,23 @@ public:
 
     SlangResult readParams(List<float>& result, int count);
 
-    // Read torch's exported parameters for a linear layer, and swap the weights layout to be
-    // [outFeatures, inFeatures].
+    // Read parameters for a linear layer, assuming weights layout to be [outFeatures, inFeatures].
     SlangResult readLinearLayer(
         int inFeatures,
         int outFeatures,
         bool hasBias,
         LinearLayerParams& params);
 
-    // Read torch's exported parameters for a conv2d layer, the layout is unchanged (remains
-    // [outChannels, inChannels, kernelSize, kernelSize]).
+    // Read parameters for the conv2d layer, assuming weights layout to be
+    // [InChannels, KernelSize, KernelSize, OutChannels].
     SlangResult readConv2DLayer(
         int inChannels,
         int outChannels,
         int kernelSize,
         Conv2DLayerParams& params);
 
-    // Read torch's exported parameters for a transposed conv2d layer, and swap the weights layout
-    // to be [outChannels, inChannels, kernelSize, kernelSize].
+    // Read parameters for the conv2d layer, assuming weights layout to be
+    // [InChannels, KernelSize, KernelSize, OutChannels].
     SlangResult readTransposedConv2DLayer(
         int inChannels,
         int outChannels,

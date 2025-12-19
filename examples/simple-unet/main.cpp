@@ -47,7 +47,7 @@ struct SimpleUNetProgram : public TestBase
 
     void initImage(List<float>& imageData, int width, int height, int channels = 1)
     {
-        uint32_t seed = 1723;
+        uint32_t seed = 171;
         std::mt19937 gen(seed);
 
         std::normal_distribution<float> dist(0.0f, 1.0f);

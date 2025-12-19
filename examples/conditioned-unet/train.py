@@ -50,13 +50,12 @@ def export_model_weights(model, filepath="model_weights_conditioned.bin"):
                 if module.bias is not None:
                     write_tensor(f, module.bias, "Bias")
 
-            # 3. Linear -> [In, Out] (Transpose)
+            # 3. Linear -> [Out, In] (Preserve)
             # This handles the CrossAttention projections (to_q, to_k, etc.)
             elif isinstance(module, nn.Linear):
                 print(f"[Layer] {name} (Linear)")
                 w = module.weight
-                w_transposed = w.t() # [Out, In] -> [In, Out]
-                write_tensor(f, w_transposed, "Weight", f"Transposed {list(w.shape)} -> {list(w_transposed.shape)}")
+                write_tensor(f, w, "Weight", f"Preserved {list(w.shape)}")
                 if module.bias is not None:
                     write_tensor(f, module.bias, "Bias")
 

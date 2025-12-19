@@ -45,6 +45,7 @@ struct UnitTestProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
+        SLANG_RETURN_ON_FAIL(testLinear(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTranspose(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testLeakyReluComposite(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testMaterialize(gInferencingCtx));

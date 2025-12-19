@@ -103,3 +103,6 @@ SlangResult testBroadcastAdd(InferencingContext* ctx);
 
 // Defined in test-classifier-free-guidance.cpp
 SlangResult testClassifierFreeGuidance(InferencingContext* ctx);
+
+// Defined in test-linear.cpp
+SlangResult testLinear(InferencingContext* ctx);
