@@ -47,7 +47,7 @@ LinearKernel::LinearKernel(
         inputProgram.getSlangTypeName(),
         sinkExpr.node->getSlangTypeName(),
         outputProgram.getSlangTypeName()};
-    pipeline = context->createComputePipeline("linearBruteforce", makeConstArrayView(specArgs));
+    pipeline = context->createComputePipeline("linearTiled", makeConstArrayView(specArgs));
 }
 
 SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)

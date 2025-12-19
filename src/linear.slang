@@ -11,14 +11,15 @@ struct LinearParams<TIn: IExpr, TSink: ISink, FOut: IExpr> {
     uint N; // DimOut
     uint has_bias;
 };
-
-[numthreads(32, 8, 1)]
+// Use the specialization constants directly in the attribute
+[numthreads(TILE_N, TILE_M, 1)]
 void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, TSink: ISink, FOut: IExpr>(
     uint3 groupThreadID : SV_GroupThreadID,
     uint3 groupID : SV_GroupID,
     ConstantBuffer<LinearParams<TIn, TSink, FOut>, CDataLayout> params)
 {
-    // Local SRAM for tiles
+    // 1. Shared memory tiles
+    // We use TILE_K as the shared dimension for both Input and Weights
     static groupshared float s_A[TILE_M][TILE_K];
     static groupshared float s_B[TILE_N][TILE_K];
 
@@ -27,26 +28,46 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
 
     float acc = 0.0f;
 
+    // 2. Loop over tiles along the K dimension
     uint numTiles = (params.K + TILE_K - 1) / TILE_K;
     for (uint t = 0; t < numTiles; t++)
     {
-        // 1. Collaborative load Input [M, K]
-        uint k_idx_A = t * TILE_K + groupThreadID.x % TILE_K;
-        if (row < params.M && k_idx_A < params.K)
-            s_A[groupThreadID.y][groupThreadID.x % TILE_K] = params.input.eval(row * params.K + k_idx_A, Input(0.0f));
-        else
-            s_A[groupThreadID.y][groupThreadID.x % TILE_K] = 0.0f;
+        // --- Collaborative Load Input (s_A) ---
+        // Each thread in the TILE_N x TILE_M block helps load the TILE_M x TILE_K tile.
+        // We linearize the threads to map them to the tile elements.
+        uint localThreadId = groupThreadID.y * TILE_N + groupThreadID.x;
+        uint threadsPerBlock = TILE_M * TILE_N;
 
-        // 2. Collaborative load Weight [N, K]
-        uint k_idx_B = t * TILE_K + groupThreadID.y % TILE_K;
-        if (col < params.N && k_idx_B < params.K)
-            s_B[groupThreadID.x][groupThreadID.y % TILE_K] = params.weights[col * params.K + k_idx_B];
-        else
-            s_B[groupThreadID.x][groupThreadID.y % TILE_K] = 0.0f;
+        for (uint i = localThreadId; i < TILE_M * TILE_K; i += threadsPerBlock)
+        {
+            uint localRow = i / TILE_K;
+            uint localK = i % TILE_K;
+            uint globalRow = groupID.y * TILE_M + localRow;
+            uint globalK = t * TILE_K + localK;
+
+            if (globalRow < params.M && globalK < params.K)
+                s_A[localRow][localK] = params.input.eval(globalRow * params.K + globalK, Input(0.0f));
+            else
+                s_A[localRow][localK] = 0.0f;
+        }
+
+        // --- Collaborative Load Weights (s_B) ---
+        for (uint i = localThreadId; i < TILE_N * TILE_K; i += threadsPerBlock)
+        {
+            uint localCol = i / TILE_K;
+            uint localK = i % TILE_K;
+            uint globalCol = groupID.x * TILE_N + localCol;
+            uint globalK = t * TILE_K + localK;
+
+            if (globalCol < params.N && globalK < params.K)
+                s_B[localCol][localK] = params.weights[globalCol * params.K + globalK];
+            else
+                s_B[localCol][localK] = 0.0f;
+        }
 
         GroupMemoryBarrierWithGroupSync();
 
-        // 3. Tile Compute
+        // --- 3. Compute Dot Product for Tile ---
         [unroll]
         for (uint k = 0; k < TILE_K; k++)
         {
@@ -56,19 +77,14 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
         GroupMemoryBarrierWithGroupSync();
     }
 
-    // 4. Final Writeback
+    // --- 4. Writeback ---
     if (row < params.M && col < params.N)
     {
         if (params.has_bias != 0)
             acc += params.bias[col];
         
         uint linearIdx = row * params.N + col;
-
-        // --- DUAL TRANSFORM FUSION ---
-        // 1. Value Transform (Pull): Apply ReLU, Add, etc.
         float finalVal = params.outFunc.eval(linearIdx, Input(acc));
-
-        // 2. Storage Transform (Push): Handle permutations and memory write
         params.outputSink.store(linearIdx, finalVal);
     }
 }
