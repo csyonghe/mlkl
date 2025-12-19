@@ -130,10 +130,6 @@ SlangResult testMaterialize(InferencingContext* ctx)
     // 4. Prepare Execution
     auto task = ctx->createTask();
 
-    Dictionary<Expr, InputInfo> inputs;
-    inputs.add(a, {Shape(4, 4), bufA});
-    inputs.add(b, {Shape(4, 4), bufB});
-
     // 5. Eval
     // Effectively dispatches `materialize<Program<9,
     //  Eval<0, BufferView>,
@@ -147,8 +143,8 @@ SlangResult testMaterialize(InferencingContext* ctx)
     //  Eval<8, ConstantView>,
     //  Eval<9, Mul<Reg<7>,Reg<8>>>
     //  >>`.
-    auto outputBuffer = kernel->allocateResultBuffer(inputs);
-    kernel->queueExecute(task, outputBuffer, inputs);
+    auto outputBuffer = ctx->allocScratchBuffer(bufA->getDesc().size);
+    kernel->queueExecute(task, outputBuffer, {bufA, 4, 4}, {bufB, 4, 4});
 
     // 6. Execute and Readback
     renderDocBeginFrame();

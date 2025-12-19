@@ -28,6 +28,14 @@ struct Shape
         dims.add(i2);
         dims.add(i3);
     }
+    Shape(int i0, int i1, int i2, int i3, int i4)
+    {
+        dims.add(i0);
+        dims.add(i1);
+        dims.add(i2);
+        dims.add(i3);
+        dims.add(i4);
+    }
     Shape(ArrayView<int> d)
     {
         for (auto v : d)
@@ -97,6 +105,16 @@ struct InputInfo
     InputInfo() = default;
     InputInfo(Shape shape, BufferView buf)
         : shape(shape), buffer(buf) {};
+    InputInfo(BufferView buf, int size0)
+        : shape(size0), buffer(buf) {};
+    InputInfo(BufferView buf, int size0, int size1)
+        : shape(size0, size1), buffer(buf) {};
+    InputInfo(BufferView buf, int size0, int size1, int size2)
+        : shape(size0, size1, size2), buffer(buf) {};
+    InputInfo(BufferView buf, int size0, int size1, int size2, int size3)
+        : shape(size0, size1, size2, size3), buffer(buf) {};
+    InputInfo(BufferView buf, int size0, int size1, int size2, int size3, int size4)
+        : shape(size0, size1, size2, size3, size4), buffer(buf) {};
     InputInfo(float c)
         : scalarValue(c) {};
 };
@@ -441,17 +459,23 @@ public:
     size_t getParameterAlignment() const override;
 };
 
+// Represent an input buffer to the kernel.
 Expr buffer();
+// Represent a static constant value.
 Expr constant(float v);
+// Represent a uniform constant value provided at runtime.
+Expr uniformConstant();
+// Represent the output of the current kernel before applying any output transformations.
+Expr kernelOutput();
+
 Expr broadcast(Expr inner, Expr shapeOf);
 Expr concat(Expr left, Expr right, Expr axis);
 Expr permute(Expr inner, ArrayView<int> dims);
 Expr permute(Expr inner, const std::initializer_list<int>& dims);
 Expr gather(Expr table, Expr indices);
 Expr transpose(Expr inner, int dim0, int dim1);
-Expr uniformConstant();
-Expr kernelOutput();
 
+// Represent the output buffer that the kernel writes to.
 SinkExpr bufferSink();
 SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
 
@@ -471,10 +495,16 @@ Expr ceil(Expr i);
 Expr rsqrt(Expr i);
 
 // Activations
+
+// Represent the ReLU activation function, f(x) = max(0, x)
 Expr relu(Expr i);
+// Represent the Sigmoid activation function, f(x) = 1 / (1 + exp(-x))
 Expr sigmoid(Expr i);
+// Represent the Tanh activation function, f(x) = tanh(x)
 Expr tanh(Expr i);
+// Represent the SiLU (Swish) activation function, f(x) = x * sigmoid(x)
 Expr silu(Expr i);
+// Represent the GELU activation function, f(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
 Expr gelu(Expr i);
 
 // Operator Overload for Negation
@@ -538,10 +568,6 @@ inline Expr leakyRelu(Expr x, float alpha)
     return max(x, x * alpha);
 }
 
-// Factory methods
-SinkExpr bufferSink();
-SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
-
 // =========================================================================
 // 6. Kernel Wrapper
 // =========================================================================
@@ -557,10 +583,53 @@ class ElementwiseKernel : public RefObject
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
     BufferView allocateResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
+    void queueExecute(InferencingTask& task, EvalContext& ctx, BufferView output);
     void queueExecute(
         InferencingTask& task,
         BufferView output,
         const Dictionary<Expr, InputInfo>& inputs);
+    void queueExecute(InferencingTask& task, BufferView output, ArrayView<InputInfo> inputs);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        const std::initializer_list<InputInfo>& inputs);
+
+    void queueExecute(InferencingTask& task, BufferView output) { queueExecute(task, output, {}); }
+
+    void queueExecute(InferencingTask& task, BufferView output, const InputInfo& input1)
+    {
+        queueExecute(task, output, {input1});
+    }
+
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        const InputInfo& input1,
+        const InputInfo& input2)
+    {
+        queueExecute(task, output, {input1, input2});
+    }
+
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        const InputInfo& input1,
+        const InputInfo& input2,
+        const InputInfo& input3)
+    {
+        queueExecute(task, output, {input1, input2, input3});
+    }
+
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        const InputInfo& input1,
+        const InputInfo& input2,
+        const InputInfo& input3,
+        const InputInfo& input4)
+    {
+        queueExecute(task, output, {input1, input2, input3, input4});
+    }
 };
 
 inline EvalContext makeEvalContext(const Dictionary<Expr, InputInfo>& inputs)

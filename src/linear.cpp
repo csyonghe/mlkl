@@ -4,20 +4,6 @@
 
 using namespace Slang;
 
-const char* getActivationFuncName(ActivationFunction func)
-{
-    switch (func)
-    {
-    case ActivationFunction::None:
-        return "IdentityActivation";
-    case ActivationFunction::ReLU:
-        return "ReLUActivation";
-    case ActivationFunction::SiLU:
-        return "SiLUActivation";
-    default:
-        return "IdentityActivation";
-    }
-}
 LinearKernel::LinearKernel(
     InferencingContext* context,
     Expr inputExpr,
@@ -124,6 +110,7 @@ void LinearKernel::queueExecute(
     writer.write((uint32_t)inputVectorLength); // K
     writer.write((uint32_t)outputSize);        // N
     writer.write((uint32_t)(biasesBuffer ? 1 : 0));
+    writer.finish();
 
     // 3. Dispatch
     task.dispatchKernel(pipeline, (uint32_t)gridX, (uint32_t)gridY, 1, paramData);

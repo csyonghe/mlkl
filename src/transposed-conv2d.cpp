@@ -1,4 +1,3 @@
-
 #include "transposed-conv2d.h"
 
 TransposedConv2DKernel::TransposedConv2DKernel(
@@ -8,7 +7,9 @@ TransposedConv2DKernel::TransposedConv2DKernel(
     int stride,
     int inChannels,
     int outChannels,
-    ActivationFunction activation,
+    Expr inputExpr,
+    Expr outputExpr,
+    SinkExpr sinkExpr,
     String name)
     : context(context)
     , tileSize(tileSize)
@@ -16,15 +17,22 @@ TransposedConv2DKernel::TransposedConv2DKernel(
     , kernelSize(kernelSize)
     , inChannels(inChannels)
     , outChannels(outChannels)
+    , sinkExpr(sinkExpr)
     , name(name)
 {
+    int globalRegCounter = 0;
+    inputProgram = compileExprToProgram(inputExpr, &globalRegCounter);
+    outputProgram = compileExprToProgram(outputExpr, &globalRegCounter);
+
     String specArgs[] = {
         String(tileSize),
         String(kernelSize),
         String(stride),
         String(inChannels),
         String(outChannels),
-        getActivationFuncName(activation)};
+        inputProgram.getSlangTypeName(),
+        outputProgram.getSlangTypeName(),
+        sinkExpr.node->getSlangTypeName()};
     pipeline =
         context->createComputePipeline("tiledTransposedConvolution", makeArrayView(specArgs));
 
@@ -34,10 +42,35 @@ TransposedConv2DKernel::TransposedConv2DKernel(
         String(stride),
         String(inChannels),
         String(outChannels),
-        getActivationFuncName(activation)};
+        inputProgram.getSlangTypeName(),
+        outputProgram.getSlangTypeName(),
+        sinkExpr.node->getSlangTypeName()};
     // Note: tileSize is NOT needed for flat kernel generic
     flatPipeline =
         context->createComputePipeline("flatTransposedConvolution", makeArrayView(flatArgs));
+}
+
+TransposedConv2DKernel::TransposedConv2DKernel(
+    InferencingContext* context,
+    int tileSize,
+    int kernelSize,
+    int stride,
+    int inChannels,
+    int outChannels,
+    Expr outputExpr,
+    String name)
+    : TransposedConv2DKernel(
+          context,
+          tileSize,
+          kernelSize,
+          stride,
+          inChannels,
+          outChannels,
+          buffer(),
+          outputExpr,
+          bufferSink(),
+          name)
+{
 }
 
 SlangResult TransposedConv2DKernel::loadParams(TorchParamReader& reader)
@@ -109,10 +142,11 @@ struct TransposedConv2DKernelParams
     int batchSize;
 };
 
+
 void TransposedConv2DKernel::queueExecute(
     InferencingTask& task,
-    BufferView outputImage,
-    BufferView inputImage,
+    EvalContext& ctx,
+    BufferView output,
     int inputWidth,
     int inputHeight,
     int padding,
@@ -121,18 +155,27 @@ void TransposedConv2DKernel::queueExecute(
     int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
     int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
 
-    TransposedConv2DKernelParams params = {};
-    params.inputImage = inputImage.getDeviceAddress();
-    params.outputImage = outputImage.getDeviceAddress();
-    params.inputImageWidth = inputWidth;
-    params.inputImageHeight = inputHeight;
-    params.outputImageWidth = outputWidth;
-    params.outputImageHeight = outputHeight;
-    params.stride = stride;
-    params.padding = padding;
-    params.batchSize = batchSize; // Set Batch Size
-    params.weights = weightsBuffer->getDeviceAddress();
-    params.biases = biasesBuffer->getDeviceAddress();
+    List<uint8_t> paramData;
+    ParameterWriter writer{paramData};
+    inputProgram.pack(writer, ctx);
+    outputProgram.pack(writer, ctx);
+
+    SinkExprEvalContext sinkContext;
+    sinkContext.outputBuffer = output;
+    sinkContext.logicalShape = Shape(batchSize, outputWidth, outputHeight, outChannels);
+    sinkExpr.node->pack(writer, sinkContext);
+
+    writer.align(8);
+    writer.write(weightsBuffer->getDeviceAddress());
+    writer.write(biasesBuffer->getDeviceAddress());
+    writer.write<int>(inputWidth);
+    writer.write<int>(inputHeight);
+    writer.write<int>(outputWidth);
+    writer.write<int>(outputHeight);
+    writer.write<int>(stride);
+    writer.write<int>(padding);
+    writer.write<int>(batchSize); // Set Batch Size
+    writer.finish();
 
     if (outputWidth * outputHeight <= 1024)
     {
@@ -144,7 +187,7 @@ void TransposedConv2DKernel::queueExecute(
         int groupSize = 256;
         int numGroups = (totalElements + groupSize - 1) / groupSize;
 
-        task.dispatchKernel(flatPipeline, numGroups, 1, 1, params);
+        task.dispatchKernel(flatPipeline, numGroups, 1, 1, paramData);
     }
     else
     {
@@ -159,6 +202,34 @@ void TransposedConv2DKernel::queueExecute(
             (outputWidth + tileSize - 1) / tileSize,
             (outputHeight + tileSize - 1) / tileSize,
             totalZBlocks,
-            params);
+            paramData);
     }
+}
+
+
+void TransposedConv2DKernel::queueExecute(
+    InferencingTask& task,
+    BufferView outputImage,
+    BufferView inputImage,
+    int inputWidth,
+    int inputHeight,
+    int padding,
+    int batchSize)
+{
+    EvalContext ctx;
+    if (inputProgram.bufferNodes.getCount() > 1)
+    {
+        throw std::runtime_error("insufficient input buffers for TransposeConv2D kernel.");
+    }
+    if (inputProgram.bufferNodes.getCount() < 1)
+    {
+        throw std::runtime_error("The TransposeConv2D kernel does not take any input buffers.");
+    }
+    ctx.inputs.add(
+        inputProgram.bufferNodes[0],
+        InputInfo(Shape(batchSize, inputWidth, inputHeight, inChannels), inputImage));
+
+    auto expectedInputSize = batchSize * inputWidth * inputHeight * inChannels * sizeof(float);
+    SLANG_ASSERT(inputImage.size == expectedInputSize);
+    queueExecute(task, ctx, outputImage, inputWidth, inputHeight, padding, batchSize);
 }

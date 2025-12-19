@@ -1,5 +1,6 @@
 #pragma once
 
+#include "elementwise.h"
 #include "kernel-base.h"
 
 // Transposed Conv2D Kernel
@@ -12,6 +13,9 @@ private:
     ComPtr<rhi::IComputePipeline> pipeline;
     ComPtr<rhi::IComputePipeline> flatPipeline;
     InferencingContext* context;
+    ProgramNode inputProgram;
+    ProgramNode outputProgram;
+    SinkExpr sinkExpr;
 
 public:
     int tileSize;
@@ -28,7 +32,19 @@ public:
         int stride,
         int inChannels,
         int outChannels,
-        ActivationFunction activation = ActivationFunction::None,
+        Expr inputExpr,
+        Expr outputExpr,
+        SinkExpr sinkExpr,
+        String name = "transConv2d");
+
+    TransposedConv2DKernel(
+        InferencingContext* context,
+        int tileSize,
+        int kernelSize,
+        int stride,
+        int inChannels,
+        int outChannels,
+        Expr outputExpr = kernelOutput(),
         String name = "transConv2d");
 
     SlangResult loadParams(TorchParamReader& reader);
@@ -39,6 +55,15 @@ public:
         float* biasesData);
 
     BufferView allocateResultBuffer(int inputWidth, int inputHeight, int padding, int batchSize);
+
+    void queueExecute(
+        InferencingTask& task,
+        EvalContext& ctx,
+        BufferView output,
+        int inputWidth,
+        int inputHeight,
+        int padding,
+        int batchSize);
 
     void queueExecute(
         InferencingTask& task,

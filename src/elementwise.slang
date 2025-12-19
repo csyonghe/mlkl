@@ -10,6 +10,17 @@ interface IExpr
     float eval(uint tid, Input input);
 }
 
+extension<T:IExpr> T
+{
+    __subscript(int linearIndex)->float
+    {
+        get
+        {
+            return eval(linearIndex, Input(0.0f));
+        }
+    }
+}
+
 interface IStmt
 {
     void execute(uint tid, Input input);

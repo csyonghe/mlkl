@@ -28,15 +28,8 @@ ConditionedUNet::ConditionedUNet(
     classEmbed = new GatherKernel(ctx, classCount, contextDim);
 
     // 2. Initial Conv
-    initialConv = new Conv2DKernel(
-        ctx,
-        16,
-        3,
-        1,
-        inputChannels,
-        baseChannels,
-        ActivationFunction::None,
-        "InitConv");
+    initialConv =
+        new Conv2DKernel(ctx, 16, 3, 1, inputChannels, baseChannels, kernelOutput(), "InitConv");
 
     // 3. Down Blocks
     // Block 0: 1 -> 2 (64 -> 128)
@@ -87,15 +80,8 @@ ConditionedUNet::ConditionedUNet(
 
     // 6. Final Conv
     // Output of last Up block has `baseChannels` (64).
-    finalConv = new Conv2DKernel(
-        ctx,
-        16,
-        1,
-        1,
-        baseChannels,
-        outputChannels,
-        ActivationFunction::None,
-        "FinalConv");
+    finalConv =
+        new Conv2DKernel(ctx, 16, 1, 1, baseChannels, outputChannels, kernelOutput(), "FinalConv");
 
     concat = new ConcatKernel(ctx, 2);
 }
@@ -256,7 +242,7 @@ UNetBlock::UNetBlock(
             1,
             inChannels,
             outChannels,
-            ActivationFunction::ReLU,
+            relu(kernelOutput()),
             "conv1");
         downTransform = new Conv2DKernel(
             inferencingCtx,
@@ -265,7 +251,7 @@ UNetBlock::UNetBlock(
             2,
             outChannels,
             outChannels,
-            ActivationFunction::None,
+            kernelOutput(),
             "transformDown");
     }
     else
@@ -277,7 +263,7 @@ UNetBlock::UNetBlock(
             1,
             2 * inChannels,
             outChannels,
-            ActivationFunction::ReLU,
+            relu(kernelOutput()),
             "conv1");
         upTransform = new TransposedConv2DKernel(
             inferencingCtx,
@@ -286,7 +272,7 @@ UNetBlock::UNetBlock(
             2,
             outChannels,
             outChannels,
-            ActivationFunction::None,
+            kernelOutput(),
             "transformUp");
     }
     conv2 = new Conv2DKernel(
@@ -296,7 +282,7 @@ UNetBlock::UNetBlock(
         1,
         outChannels,
         outChannels,
-        ActivationFunction::ReLU,
+        relu(kernelOutput()),
         "conv2");
     timeEmbedTransform = new LinearKernel(
         inferencingCtx,

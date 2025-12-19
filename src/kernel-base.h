@@ -5,12 +5,3 @@
 #include "torch-reader.h"
 
 using namespace Slang;
-
-enum class ActivationFunction
-{
-    None,
-    ReLU,
-    SiLU
-};
-
-const char* getActivationFuncName(ActivationFunction func);

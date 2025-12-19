@@ -21,7 +21,18 @@ class BatchGemmKernel : public RefObject
     SinkExpr sinkExpr;
 
 public:
-    BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, SinkExpr sinkExpr, Expr Out);
+    BatchGemmKernel(
+        InferencingContext* ctx,
+        Expr A,
+        Expr B,
+        Expr C,
+        SinkExpr sinkExpr,
+        Expr outExpr);
+
+    BatchGemmKernel(InferencingContext* ctx, Expr outExpr = kernelOutput())
+        : BatchGemmKernel(ctx, buffer(), buffer(), buffer(), bufferSink(), outExpr)
+    {
+    }
 
     BufferView allocateResultBuffer(int batchSize, int m, int n);
 
@@ -66,4 +77,16 @@ public:
         float alpha,
         float beta,
         const std::initializer_list<InputInfo>& inputs);
+    void queueExecute(
+        InferencingTask& task,
+        BufferView output,
+        int M,
+        int N,
+        int K,
+        int batchSize,
+        float alpha,
+        float beta,
+        BufferView A,
+        BufferView B,
+        BufferView C);
 };

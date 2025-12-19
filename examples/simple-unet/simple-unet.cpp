@@ -17,7 +17,7 @@ UNetBlock::UNetBlock(
             1,
             inChannels,
             outChannels,
-            ActivationFunction::ReLU,
+            relu(kernelOutput()),
             "conv1");
         downTransform = new Conv2DKernel(
             inferencingCtx,
@@ -26,7 +26,7 @@ UNetBlock::UNetBlock(
             2,
             outChannels,
             outChannels,
-            ActivationFunction::None,
+            kernelOutput(),
             "transformDown");
     }
     else
@@ -38,7 +38,7 @@ UNetBlock::UNetBlock(
             1,
             2 * inChannels,
             outChannels,
-            ActivationFunction::ReLU,
+            relu(kernelOutput()),
             "conv1");
         upTransform = new TransposedConv2DKernel(
             inferencingCtx,
@@ -47,7 +47,7 @@ UNetBlock::UNetBlock(
             2,
             outChannels,
             outChannels,
-            ActivationFunction::None,
+            relu(kernelOutput()),
             "transformUp");
     }
     conv2 = new Conv2DKernel(
@@ -57,7 +57,7 @@ UNetBlock::UNetBlock(
         1,
         outChannels,
         outChannels,
-        ActivationFunction::ReLU,
+        relu(kernelOutput()),
         "conv2");
     timeEmbedTransform = new LinearKernel(
         inferencingCtx,
@@ -177,7 +177,7 @@ UNetModel::UNetModel(
         1,
         inputChannels,
         channelSizes[0],
-        ActivationFunction::None,
+        kernelOutput(),
         "initialConv");
     finalConv = new Conv2DKernel(
         inferencingCtx,
@@ -186,7 +186,7 @@ UNetModel::UNetModel(
         1,
         channelSizes[0],
         outputChannels,
-        ActivationFunction::None,
+        kernelOutput(),
         "predictedNoiseConv");
     concat = new ConcatKernel(inferencingCtx, 2);
 }

@@ -150,3 +150,37 @@ void BatchGemmKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
 }
+void BatchGemmKernel::queueExecute(
+    InferencingTask& task,
+    BufferView output,
+    int M,
+    int N,
+    int K,
+    int batchSize,
+    float alpha,
+    float beta,
+    BufferView A,
+    BufferView B,
+    BufferView C)
+{
+    EvalContext ctx;
+    if (programA.bufferNodes.getCount() > 1)
+        throw std::runtime_error("The batch gemm expects more than one buffer for `A`.");
+    if (programA.bufferNodes.getCount() < 1)
+        throw std::runtime_error("The batch gemm does not need a buffer for `A`.");
+    ctx.inputs.add(programA.bufferNodes[0], InputInfo(Shape{batchSize, M, K}, A));
+
+    if (programB.bufferNodes.getCount() > 1)
+        throw std::runtime_error("The batch gemm expects more than one buffer for `B`.");
+    if (programB.bufferNodes.getCount() < 1)
+        throw std::runtime_error("The batch gemm does not need a buffer for `B`.");
+    ctx.inputs.add(programB.bufferNodes[0], InputInfo(Shape{batchSize, K, N}, B));
+
+    if (programC.bufferNodes.getCount() > 1)
+        throw std::runtime_error("The batch gemm expects more than one buffer for `C`.");
+    if (programC.bufferNodes.getCount() < 1)
+        throw std::runtime_error("The batch gemm does not need a buffer for `C`.");
+    ctx.inputs.add(programC.bufferNodes[0], InputInfo(Shape{batchSize, M, N}, C));
+
+    queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
+}

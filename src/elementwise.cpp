@@ -833,6 +833,7 @@ Expr concat(Expr left, Expr right, Expr axis)
     return Expr(new ConcatNode(left, right, axis));
 }
 
+// Represent the output buffer that the kernel will write into.
 SinkExpr bufferSink()
 {
     return SinkExpr(new BufferSinkNode());
@@ -1138,15 +1139,8 @@ BufferView ElementwiseKernel::allocateResultBuffer(const Dictionary<Expr, InputI
     return context->allocScratchBuffer(count * sizeof(float), "elementwise");
 }
 
-void ElementwiseKernel::queueExecute(
-    InferencingTask& task,
-    BufferView output,
-    const Dictionary<Expr, InputInfo>& inputs)
+void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, BufferView output)
 {
-    EvalContext ctx;
-    for (auto it : inputs)
-        ctx.inputs.add(it.first.node, it.second);
-
     Shape resultShape = root.node->resolveShape(ctx);
     size_t count = resultShape.getElementCount();
 
@@ -1167,6 +1161,53 @@ void ElementwiseKernel::queueExecute(
         1,
         paramData.getBuffer(),
         (uint32_t)paramData.getCount());
+}
+
+void ElementwiseKernel::queueExecute(
+    InferencingTask& task,
+    BufferView output,
+    const Dictionary<Expr, InputInfo>& inputs)
+{
+    EvalContext ctx;
+    for (auto it : inputs)
+        ctx.inputs.add(it.first.node, it.second);
+    queueExecute(task, ctx, output);
+}
+
+void ElementwiseKernel::queueExecute(
+    InferencingTask& task,
+    BufferView output,
+    ArrayView<InputInfo> inputs)
+{
+    EvalContext ctx;
+    if (inputs.getCount() != inputs.getCount())
+    {
+        throw std::runtime_error("ElementwiseKernel::queueExecute: Input count mismatch");
+    }
+    for (Index i = 0; i < inputs.getCount(); i++)
+    {
+        ctx.inputs.add(program.bufferNodes[i], inputs[i]);
+    }
+    queueExecute(task, ctx, output);
+}
+
+void ElementwiseKernel::queueExecute(
+    InferencingTask& task,
+    BufferView output,
+    const std::initializer_list<InputInfo>& inputs)
+{
+    EvalContext ctx;
+    if (inputs.size() != program.bufferNodes.getCount())
+    {
+        throw std::runtime_error("ElementwiseKernel::queueExecute: Input count mismatch");
+    }
+    Index i = 0;
+    for (auto& inputInfo : inputs)
+    {
+        ctx.inputs.add(program.bufferNodes[i], inputInfo);
+        i++;
+    }
+    queueExecute(task, ctx, output);
 }
 
 EvalContext::EvalContext(ProgramNode* programNode, ArrayView<InputInfo> inputInfos)
