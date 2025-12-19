@@ -32,8 +32,8 @@ public:
         SinkExpr sinkExpr,
         int inputVectorLength,
         int outputVectorLength,
-        int tileM = 2,
-        int tileN = 8,
+        int tileM = 8,
+        int tileN = 32,
         int tileK = 16);
 
     LinearKernel(
