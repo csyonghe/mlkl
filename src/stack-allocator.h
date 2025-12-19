@@ -43,6 +43,9 @@ struct BufferView
         return BufferView(buffer, offset, headSize);
     }
 
+    BufferView firstHalf() const { return head(size / 2); }
+    BufferView secondHalf() const { return tail(size / 2); }
+
     // Helper to get GPU address if needed
     uint64_t getDeviceAddress() const { return buffer->getDeviceAddress() + offset; }
 

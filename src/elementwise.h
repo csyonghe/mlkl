@@ -457,6 +457,21 @@ public:
     size_t getParameterAlignment() const override;
 };
 
+class PartitionSinkNode : public SinkExprNode
+{
+public:
+    SinkExpr child;
+    uint32_t dimIndex;       // Which coordinate index to split (e.g., 1 for Column)
+    uint32_t partitionCount; // Number of partitions to divide dimension `dimIndex` into.
+public:
+    PartitionSinkNode(SinkExpr child, uint32_t dimIndex, uint32_t partitionCount);
+    Shape getChildLogicalShape(const Shape& logicalShape) const;
+    String getSlangTypeName() const override;
+    Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override;
+    virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
+    size_t getParameterAlignment() const override;
+};
+
 // Represent an input buffer to the kernel.
 Expr buffer();
 // Represent a static constant value.
@@ -476,6 +491,7 @@ Expr transpose(Expr inner, int dim0, int dim1);
 // Represent the output buffer that the kernel writes to.
 SinkExpr bufferSink();
 SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
+SinkExpr partition(SinkExpr child, uint32_t dimIndex, uint32_t partitionSize);
 
 Expr min(Expr l, Expr r);
 Expr max(Expr l, Expr r);

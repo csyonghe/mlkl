@@ -14,8 +14,7 @@ private:
 
     // Linear Projections
     RefPtr<LinearKernel> projQ;
-    RefPtr<LinearKernel> projK;
-    RefPtr<LinearKernel> projV;
+    RefPtr<LinearKernel> projKV;
     RefPtr<LinearKernel> projOut;
 
     int headDim;
@@ -32,6 +31,9 @@ private:
     Expr exprQ_In;
     Expr exprK_In;
     Expr exprV_In;
+
+    int channelDim; // Output dimension of attention vector
+    int contextDim; // Dimension of input context embeddings
 
 public:
     CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim, int headDim);

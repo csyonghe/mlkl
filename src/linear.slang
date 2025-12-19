@@ -85,7 +85,7 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
         
         uint linearIdx = row * params.N + col;
         float finalVal = params.outFunc.eval(linearIdx, Input(acc));
-        params.outputSink.store(linearIdx, finalVal);
+        params.outputSink.store(Coord(row, col), finalVal);
     }
 }
 
@@ -130,6 +130,6 @@ void linearBruteforce<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IE
         float finalVal = params.outFunc.eval(linearIdx, Input(acc));
 
         // 6. Apply Storage Fusion (Push to Sink)
-        params.outputSink.store(linearIdx, finalVal);
+        params.outputSink.store(Coord(row, col), finalVal);
     }
 }

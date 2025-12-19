@@ -132,7 +132,7 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
         for (uint d = 0; d < headDimension; d++) {
             uint destIdx = q_global_offset + (row_idx * headDimension) + d;
             float attentionVal = acc[d] / l_prev;
-            params.sink.store(destIdx, params.outFunc.eval(destIdx, Input(attentionVal)));
+            params.sink.store(Coord(batch_idx, head_idx, row_idx, d), params.outFunc.eval(destIdx, Input(attentionVal)));
         }
     }
 }

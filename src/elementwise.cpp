@@ -594,14 +594,21 @@ void BufferSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& ev
 {
     // Ensure the output pointer is aligned for the GPU
     writer.align(8);
-    if (evalCtx.outputBuffer)
+    writer.write(evalCtx.outputBuffer.getDeviceAddress());
+
+    uint32_t rank = (uint32_t)evalCtx.logicalShape.getRank();
+    writer.write(rank);
+
+    // Calculate and write physical strides based on the current logical shape
+    // Note: We compute strides assuming Row-Major storage in the physical buffer.
+    auto strides = computeDenseStrides(evalCtx.logicalShape);
+
+    uint32_t strideArr[8] = {0};
+    for (int i = 0; i < (int)rank; ++i)
     {
-        writer.write(evalCtx.outputBuffer.getDeviceAddress());
+        strideArr[i] = (uint32_t)strides[i];
     }
-    else
-    {
-        writer.write<uint64_t>(0);
-    }
+    writer.writeBytes(strideArr, sizeof(strideArr));
 }
 
 // =========================================================================
@@ -625,12 +632,12 @@ Shape PermuteSinkNode::resolvePhysicalShape(const Shape& logicalShape) const
 {
     // 1. "Peel" or transform the current logical shape into the child's space.
     // E.g., incoming [B, H, S, D] with dims {0, 2, 1, 3} -> transformed [B, S, H, D]
-    List<int> transformedDims;
+    ShortList<int, 8> transformedDims;
     for (int i = 0; i < dims.getCount(); ++i)
     {
         transformedDims.add(logicalShape[dims[i]]);
     }
-    Shape transformedShape(transformedDims.getArrayView());
+    Shape transformedShape(transformedDims.getArrayView().arrayView);
 
     // 2. Delegate to child to find the ultimate physical layout
     return child.node->resolvePhysicalShape(transformedShape);
@@ -639,54 +646,116 @@ Shape PermuteSinkNode::resolvePhysicalShape(const Shape& logicalShape) const
 // Alignment is the max of child and local uints (4)
 size_t PermuteSinkNode::getParameterAlignment() const
 {
-    return std::max((size_t)8, child.node->getParameterAlignment());
+    return std::max((size_t)4, child.node->getParameterAlignment());
 }
 
 void PermuteSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
 {
     writer.align(getParameterAlignment());
 
-    // 1. Determine the logical shape entering THIS node
-    Shape incomingLogical = evalCtx.logicalShape;
-
-    // 2. Determine the shape entering the CHILD node (the physical layout for this node)
+    // 1. Transform the logical shape for the child
+    // e.g., if parent is [2, 3] and we swap {1, 0}, child sees [3, 2]
     List<int> childDims;
     for (int d : dims)
     {
-        childDims.add(incomingLogical[d]);
+        // dims is our permutation map
+        childDims.add(evalCtx.logicalShape[d]);
     }
-    Shape childLogical = Shape(childDims.getArrayView());
+    Shape childLogicalShape(childDims.getArrayView());
 
-    // 3. To compute strides correctly for writing, we need the child's
-    // contribution to the layout.
-    List<int> childStrides = computeDenseStrides(childLogical);
-
-    // 4. Recursively pack child
+    // 2. Update Context and pass down
     SinkExprEvalContext childCtx = evalCtx;
-    childCtx.logicalShape = childLogical;
+    childCtx.logicalShape = childLogicalShape;
     child.node->pack(writer, childCtx);
 
-    // 5. Pack Permute Metadata for the Shader
-    uint32_t rank = (uint32_t)incomingLogical.getRank();
-    writer.write(rank);
+    // 3. Write the Permutation Map (pMap) for the shader
+    // We use 0xFFFFFFFF as a sentinel for "End of Map"
+    uint32_t pMapArr[8];
+    memset(pMapArr, 0xFF, sizeof(pMapArr));
 
-    uint32_t logDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    uint32_t phyStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-    // Pack in reverse for Slang's 'temp % d' de-indexing
-    for (int i = 0; i < (int)rank; ++i)
+    for (int i = 0; i < (int)dims.getCount(); ++i)
     {
-        int logicalDimIdx = (int)rank - 1 - i;
-        logDimsArr[i] = (uint32_t)incomingLogical[logicalDimIdx];
+        pMapArr[i] = (uint32_t)dims[i];
+    }
+    writer.writeBytes(pMapArr, sizeof(pMapArr));
+}
 
-        // The stride for logical dim 'logicalDimIdx' is the physical stride
-        // of the dimension it maps to: childStrides[dims[logicalDimIdx]]
-        int physicalDimIdx = dims[logicalDimIdx];
-        phyStrideArr[i] = (uint32_t)childStrides[physicalDimIdx];
+// =========================================================================
+// PARTITION SINK
+// =========================================================================
+
+PartitionSinkNode::PartitionSinkNode(SinkExpr child, uint32_t dimIndex, uint32_t partitionCount)
+    : child(child), dimIndex(dimIndex), partitionCount(partitionCount)
+{
+}
+
+String PartitionSinkNode::getSlangTypeName() const
+{
+    return "PartitionSink<" + child.node->getSlangTypeName() + ">";
+}
+
+Shape PartitionSinkNode::getChildLogicalShape(const Shape& logicalShape) const
+{
+    // Transform the incoming logical shape into the "Partitioned" layout
+    // Logical [M, W] -> Physical [N, M, S]
+    int rank = logicalShape.getRank();
+    ShortList<int, 8> partitionedDims;
+
+    // Insert the "Partition ID" as the new outermost dimension (Dim 0)
+    int partitionSize = logicalShape[dimIndex] / (int)partitionCount;
+    if (logicalShape[dimIndex] % partitionCount != 0)
+    {
+        throw std::runtime_error("PartitionSink: Dimension size not divisible by partition count");
+    }
+    partitionedDims.add(partitionCount);
+
+    for (int i = 0; i < rank; ++i)
+    {
+        if (i == (int)dimIndex)
+        {
+            // The split dimension is reduced to the size of a single partition
+            partitionedDims.add(partitionSize);
+        }
+        else
+        {
+            partitionedDims.add(logicalShape[i]);
+        }
     }
 
-    writer.writeBytes(logDimsArr, sizeof(logDimsArr));
-    writer.writeBytes(phyStrideArr, sizeof(phyStrideArr));
+    Shape partitionedShape(partitionedDims.getArrayView().arrayView);
+    return partitionedShape;
+}
+
+Shape PartitionSinkNode::resolvePhysicalShape(const Shape& logicalShape) const
+{
+
+    Shape partitionedShape = getChildLogicalShape(logicalShape);
+
+    // Ask the child to resolve its physical shape based on this new layout
+    // If the child is a Permute, it will swap these new 3D dims.
+    // If the child is a BufferSink, it will accept this 3D shape as final.
+    return child.node->resolvePhysicalShape(partitionedShape);
+}
+
+// Alignment is the max of child and local uints (4)
+size_t PartitionSinkNode::getParameterAlignment() const
+{
+    return std::max((size_t)4, child.node->getParameterAlignment());
+}
+
+void PartitionSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
+{
+    Shape childLogicalShape = getChildLogicalShape(evalCtx.logicalShape);
+
+    // Update Context and pass down
+    SinkExprEvalContext childCtx = evalCtx;
+    childCtx.logicalShape = childLogicalShape;
+    child.node->pack(writer, childCtx);
+
+    // Write metadata for the shader
+    writer.write((uint32_t)dimIndex);
+    int partitionSize = evalCtx.logicalShape[dimIndex] / (int)partitionCount;
+    writer.write((uint32_t)partitionSize);
 }
 
 // --- BinaryNode ---
@@ -842,6 +911,11 @@ SinkExpr bufferSink()
 SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims)
 {
     return SinkExpr(new PermuteSinkNode(child, dims));
+}
+
+SinkExpr partition(SinkExpr child, uint32_t dimIndex, uint32_t numParititons)
+{
+    return SinkExpr(new PartitionSinkNode(child, dimIndex, numParititons));
 }
 
 Expr min(Expr l, Expr r)

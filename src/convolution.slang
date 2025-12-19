@@ -148,7 +148,7 @@ void tiledConvolution<int tileSize, int kernelSize, int stride, int inChannels, 
             {
                 int outIdx = (outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
                 int logicalOutIdx = outBatchOffset + outIdx;
-                params.outputImage.store(logicalOutIdx, params.outputTransform.eval(logicalOutIdx, Input(outputAccumulators[o])));
+                params.outputImage.store(Coord(batchIdx, outPos.y, outPos.x, globalOutC), params.outputTransform.eval(logicalOutIdx, Input(outputAccumulators[o])));
             }
         }
     }
@@ -217,7 +217,7 @@ void flatConvolution<int kernelSize, int stride, int inChannels, int outChannels
         }
     }
 
-    params.outputImage.store(globalIdx, params.outputTransform.eval(globalIdx, Input(sum)));
+    params.outputImage.store(Coord(batchIdx, outY, outX, outCh), params.outputTransform.eval(globalIdx, Input(sum)));
 }
 
 // --- TINY CONVOLUTION ---
@@ -276,7 +276,9 @@ void tinyConvolution<int kernelSize, int stride, int inChannels, int outChannels
     {
         // Output Layout: [Batch, H, W, C]
         int outIdx = outBatchOffset + p * outChannels + outCh;
-        params.outputImage.store(outIdx, params.outputTransform.eval(outIdx, Input(sums[p])));
+        params.outputImage.store(
+            Coord(batchIdx, p / params.outputImageWidth, p % params.outputImageWidth, outCh),
+            params.outputTransform.eval(outIdx, Input(sums[p])));
     }
 }
 
@@ -337,7 +339,7 @@ void flatConvolutionWaveReduce<int kernelSize, int stride, int inChannels, int o
                     for (int ic = laneId; ic < inChannels; ic += waveSize)
                     {
                         float val = params.inputImage[inBatchOffset + inPixelOffset + ic];
-                        float w = params.weights[wBase + ic];
+                        float w = params.weightsIOKK[wBase + ic];
                         partialSum += val * w;
                     }
                 }
@@ -349,7 +351,7 @@ void flatConvolutionWaveReduce<int kernelSize, int stride, int inChannels, int o
     if (laneId == 0)
     {
         if (outCh < outChannels) totalSum += params.bias[outCh];
-        params.outputImage.store(globalValueIdx, params.outputTransform.eval(globalValueIdx, Input(totalSum)));
+        params.outputImage.store(Coord(batchIdx, outY, outX, outCh), params.outputTransform.eval(globalValueIdx, Input(totalSum)));
     }
 }
 
@@ -498,7 +500,7 @@ void tiledTransposedConvolution<int tileSize, int kernelSize, int stride, int in
             if (globalOutC < outChannels)
             {
                 int outIdx = outBatchOffset + (outPos.y * params.outputImageWidth + outPos.x) * outChannels + globalOutC;
-                params.outputImage.store(outIdx, params.outputTransform.eval(outIdx, Input(outputAccumulators[o])));
+                params.outputImage.store(Coord(batchIdx, outPos.y, outPos.x, globalOutC), params.outputTransform.eval(outIdx, Input(outputAccumulators[o])));
             }
         }
     }
@@ -561,5 +563,5 @@ void flatTransposedConvolution<int kernelSize, int stride, int inChannels, int o
             }
         }
     }
-    params.outputImage.store(globalIdx, params.outputTransform.eval(globalIdx, Input(sum)));
+    params.outputImage.store(Coord(batchIdx, outY, outX, outCh), params.outputTransform.eval(globalIdx, Input(sum)));
 }

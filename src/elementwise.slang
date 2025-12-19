@@ -5,6 +5,50 @@ struct Input
     float value;
 }
 
+struct NDView
+{
+    uint rank;
+    uint shape[8];
+    uint strides[8];
+    uint offsets[8];
+}
+
+struct Coord
+{
+    uint baseOffset;
+    uint coords[8];
+    __subscript(int index) -> uint
+    {
+        get { return coords[index]; }
+        set { coords[index] = newValue; }
+    }
+    __init()
+    {
+        baseOffset = 0; coords = makeArrayFromElement<uint,8>(0);
+    }
+    __init(int x)
+    {
+        baseOffset = 0; coords = {x};
+    }
+    __init(int x, int y)
+    {
+        baseOffset = 0; coords = {x, y};
+    }
+    __init(int x, int y, int z)
+    {
+        baseOffset = 0; coords = {x, y, z};
+    }
+    __init(int x, int y, int z, int w)
+    {
+        baseOffset = 0; coords = {x, y, z, w};
+    }
+    __init(uint offset, uint coords[8])
+    {
+        baseOffset = offset;
+        this.coords = coords;
+    }
+}
+
 interface IExpr
 {
     float eval(uint tid, Input input);
@@ -28,7 +72,7 @@ interface IStmt
 
 interface ISink
 {
-    void store(uint index, float value);
+    void store(Coord coord, float value);
 };
 
 // Acts as both the Storage and the Expression
@@ -445,41 +489,92 @@ struct Gelu<I : IExpr> : IExpr
 }
 
 
-// The terminal node that actually writes to memory
+// BufferSink: The terminal node that actually writes to memory.
 struct BufferSink : ISink
 {
     float* data;
-    void store(uint index, float value)
+    int rank;
+    int strides[8];
+
+    void store(Coord coord, float value)
     {
-        data[index] = value;
+        uint offset = coord.baseOffset;
+        [unroll]
+        for (int i = 0; i < 8; i++)
+        {
+            if (i >= rank)
+                break;
+            offset += coord[i] * strides[i];
+        }
+        data[offset] = value;
     }
 };
 
-// Address Transformation Sink (Push-based Permute)
+// PermuteSink: permutes output dimension ordering.
 struct PermuteSink<Child : ISink> : ISink
 {
     Child child;
-    uint rank;
-    uint logicalDims[8]; // Packed in reverse
-    uint physicalStrides[8]; // Packed in reverse
+    uint pMap[8]; // Permutation map
 
-    void store(uint tid, float value)
+    void store(Coord coords, float value)
     {
-        uint physicalIdx = 0;
-        uint temp = tid;
-        
+        Coord newCoords = {coords.baseOffset, makeArrayFromElement<uint, 8>(0)};
         [unroll]
         for (uint i = 0; i < 8; i++)
         {
-            if (i < rank)
-            {
-                uint d = logicalDims[i];
-                uint c = temp % d;
-                temp /= d;
-                physicalIdx += c * physicalStrides[i];
-            }
+            if (pMap[i] == 0xFFFFFFFF)
+                break;
+            newCoords[i] = coords[pMap[i]];
         }
-        child.store(physicalIdx, value);
+        child.store(newCoords, value);
+    }
+};
+
+/**
+ * PartitionSink: Physically re-orders data by splitting a single logical dimension 
+ * into multiple contiguous physical "piles" or "partitions".
+
+ * Example:
+ * Consider a tensor of shape: [H=2, W=6]. Partition at dimIndex = 1, and partitionSize = 3.
+ * (Results in N=2 partitions).
+ * Logically, this partitions the tensor as follows:
+ * Row 0: [0, 1, 2] | [3, 4, 5]  (Part 0 | Part 1)
+ * Row 1: [6, 7, 8] | [9, 10, 11] (Part 0 | Part 1)
+ * We will store each partition contiguously in physical memory:
+    * Physical Layout:
+    * Part 0: [0, 1, 2, 6, 7, 8]
+    * Part 1: [3, 4, 5, 9, 10, 11]
+ */
+struct PartitionSink<Child : ISink> : ISink
+{
+    Child child;
+    
+    uint dimIndex;             // Which coordinate index to split (e.g., 1 for Column)
+    uint partitionSize;        // The size of a single partition block (e.g., HeadDim)
+
+    void store(Coord logicalCoord, float value)
+    {
+        uint pIdx = logicalCoord[dimIndex] / partitionSize;
+        uint localCoord = logicalCoord[dimIndex] % partitionSize;
+
+        // Create the (N+1)-D Physical Coordinate
+        Coord physicalCoord;
+        physicalCoord.baseOffset = logicalCoord.baseOffset;
+        
+        // Dim 0 is the Partition ID
+        physicalCoord[0] = pIdx;
+        
+        // Shift all original dimensions down by 1
+        [ForceUnroll]
+        for (int i = 0; i < 7; i++)
+        {
+            uint val = logicalCoord[i];
+            if (i == (int)dimIndex) val = localCoord;
+            
+            physicalCoord[i + 1] = val;
+        }
+
+        child.store(physicalCoord, value);
     }
 };
 

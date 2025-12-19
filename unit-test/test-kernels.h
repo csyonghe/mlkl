@@ -106,3 +106,4 @@ SlangResult testClassifierFreeGuidance(InferencingContext* ctx);
 
 // Defined in test-linear.cpp
 SlangResult testLinear(InferencingContext* ctx);
+SlangResult testLinearPartitioned(InferencingContext* ctx);

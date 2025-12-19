@@ -67,5 +67,5 @@ void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>(
     outInput.value = res;
     float finalVal = params.FOut.eval(idxC, outInput);
 
-    params.Sink.store(idxC, finalVal);
+    params.Sink.store(Coord(batchIdx, row, col), finalVal);
 }

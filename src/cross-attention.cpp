@@ -7,12 +7,18 @@ CrossAttentionKernel::CrossAttentionKernel(
     int channelDim,
     int contextDim,
     int headDim)
-    : context(ctx), headDim(headDim)
+    : context(ctx), channelDim(channelDim), contextDim(contextDim), headDim(headDim)
 {
     // 1. Initialize Linear Projections
     projQ = new LinearKernel(ctx, channelDim, channelDim);
-    projK = new LinearKernel(ctx, contextDim, channelDim);
-    projV = new LinearKernel(ctx, contextDim, channelDim);
+    projKV = new LinearKernel(
+        ctx,
+        buffer(),
+        kernelOutput(),
+        partition(bufferSink(), 1, 2),
+        contextDim,
+        channelDim * 2); // K, V combined.
+
     // Fuse residual add into output projection.
     projOut = new LinearKernel(
         ctx,
@@ -60,8 +66,7 @@ CrossAttentionKernel::CrossAttentionKernel(
 SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
 {
     SLANG_RETURN_ON_FAIL(projQ->loadParams(reader, false));
-    SLANG_RETURN_ON_FAIL(projK->loadParams(reader, false));
-    SLANG_RETURN_ON_FAIL(projV->loadParams(reader, false));
+    SLANG_RETURN_ON_FAIL(projKV->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projOut->loadParams(reader, true));
     return SLANG_OK;
 }
@@ -93,11 +98,12 @@ void CrossAttentionKernel::queueExecute(
     BufferView bufQ = projQ->allocateResultBuffer(batchSize * seqQ);
     projQ->queueExecute(task, bufQ, inputLatent, batchSize * seqQ);
 
-    BufferView bufK = projK->allocateResultBuffer(batchSize * seqKV);
-    projK->queueExecute(task, bufK, contextEmb, batchSize * seqKV);
+    BufferView bufKV =
+        task.context->allocScratchBuffer(batchSize * seqKV * channelDim * 2 * sizeof(float));
 
-    BufferView bufV = projV->allocateResultBuffer(batchSize * seqKV);
-    projV->queueExecute(task, bufV, contextEmb, batchSize * seqKV);
+    // Perform a fused projection to get both K and V, and store them in a single
+    // buffer next to each other.
+    projKV->queueExecute(task, bufKV, contextEmb, batchSize * seqKV);
 
     // 2. Flash Attention Core
     size_t sizeAttn = (size_t)batchSize * numHeads * seqQ * headDim * sizeof(float);
@@ -105,8 +111,12 @@ void CrossAttentionKernel::queueExecute(
 
     Dictionary<Expr, InputInfo> attnInputs;
     attnInputs.add(exprQ_In, InputInfo(Shape{batchSize, seqQ, numHeads, headDim}, bufQ));
-    attnInputs.add(exprK_In, InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufK));
-    attnInputs.add(exprV_In, InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufV));
+    attnInputs.add(
+        exprK_In,
+        InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufKV.firstHalf()));
+    attnInputs.add(
+        exprV_In,
+        InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufKV.secondHalf()));
 
     flashAttn->queueExecute(
         task,
