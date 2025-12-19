@@ -33,8 +33,6 @@ private:
     Expr exprK_In;
     Expr exprV_In;
 
-    RefPtr<BroadcastAddKernel> broadcastAdd;
-
 public:
     CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim, int headDim);
 

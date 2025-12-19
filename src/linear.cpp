@@ -115,3 +115,24 @@ void LinearKernel::queueExecute(
     // 3. Dispatch
     task.dispatchKernel(pipeline, (uint32_t)gridX, (uint32_t)gridY, 1, paramData);
 }
+
+void LinearKernel::queueExecute(
+    InferencingTask& task,
+    BufferView output,
+    int batchSize,
+    const std::initializer_list<InputInfo>& inputs)
+{
+    EvalContext ctx;
+    auto iter = inputs.begin();
+    auto consume = [&]()
+    {
+        if (iter == inputs.end())
+            throw std::runtime_error("insufficient input buffers.");
+        return *(iter++);
+    };
+    for (auto bufferNode : inputProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    for (auto bufferNode : outputProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    return queueExecute(task, output, batchSize, ctx);
+}

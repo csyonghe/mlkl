@@ -13,7 +13,14 @@ CrossAttentionKernel::CrossAttentionKernel(
     projQ = new LinearKernel(ctx, channelDim, channelDim);
     projK = new LinearKernel(ctx, contextDim, channelDim);
     projV = new LinearKernel(ctx, contextDim, channelDim);
-    projOut = new LinearKernel(ctx, channelDim, channelDim);
+    // Fuse residual add into output projection.
+    projOut = new LinearKernel(
+        ctx,
+        buffer(),
+        kernelOutput() + buffer(),
+        bufferSink(),
+        channelDim,
+        channelDim);
 
     // 2. Setup Flash Attention with Fused Permutation
     // We expect input to be [B, S, H, D] (Interleaved)
@@ -48,8 +55,6 @@ CrossAttentionKernel::CrossAttentionKernel(
         32,
         headDim,
         eSink);
-
-    broadcastAdd = new BroadcastAddKernel(ctx);
 }
 
 SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
@@ -78,6 +83,9 @@ void CrossAttentionKernel::queueExecute(
     int seqKV,
     int numHeads)
 {
+    task.context->pushAllocScope();
+    SLANG_DEFER(task.context->popAllocScope());
+
     int dim = numHeads * headDim;
     float scale = 1.0f / sqrtf((float)headDim);
 
@@ -112,11 +120,10 @@ void CrossAttentionKernel::queueExecute(
         false // Not causal for cross-attention
     );
 
-    // 3. Final Projection
-    BufferView bufProjected = projOut->allocateResultBuffer(batchSize * seqQ);
-    projOut->queueExecute(task, bufProjected, bufAttnInterleaved, batchSize * seqQ);
-
-    // 4. Residual Connection
-    Shape shape = {batchSize, seqQ, dim};
-    broadcastAdd->queueExecute(task, finalOutput, inputLatent, shape, bufProjected, shape);
+    // 3. Final Projection and Residual Connection
+    projOut->queueExecute(
+        task,
+        finalOutput,
+        batchSize * seqQ,
+        {{bufAttnInterleaved, batchSize, seqQ}, {inputLatent, batchSize, seqQ}});
 }

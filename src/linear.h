@@ -79,10 +79,7 @@ public:
         InferencingTask& task,
         BufferView output,
         int batchSize,
-        const std::initializer_list<InputInfo>& inputs)
-    {
-        return queueExecute(task, output, batchSize, EvalContext(&inputProgram, inputs));
-    }
+        const std::initializer_list<InputInfo>& inputs);
 
     void queueExecute(
         InferencingTask& task,

@@ -142,8 +142,6 @@ struct EvalContext
         return Shape();
     }
     EvalContext() = default;
-    EvalContext(ProgramNode* programNode, ArrayView<InputInfo> inputs);
-    EvalContext(ProgramNode* programNode, const std::initializer_list<InputInfo>& inputs);
 };
 
 struct SinkExprEvalContext

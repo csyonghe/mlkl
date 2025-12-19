@@ -1209,23 +1209,3 @@ void ElementwiseKernel::queueExecute(
     }
     queueExecute(task, ctx, output);
 }
-
-EvalContext::EvalContext(ProgramNode* programNode, ArrayView<InputInfo> inputInfos)
-{
-    for (Index i = 0; i < inputs.getCount(); i++)
-    {
-        inputs.add(programNode->bufferNodes[i], inputInfos[i]);
-    }
-}
-
-EvalContext::EvalContext(
-    ProgramNode* programNode,
-    const std::initializer_list<InputInfo>& inputInfos)
-{
-    Index i = 0;
-    for (auto& inputInfo : inputInfos)
-    {
-        inputs.add(programNode->bufferNodes[i], inputInfo);
-        i++;
-    }
-}
