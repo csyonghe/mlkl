@@ -556,7 +556,7 @@ class ElementwiseKernel : public RefObject
 
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
-    BufferView allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
+    BufferView allocateResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
     void queueExecute(
         InferencingTask& task,
         BufferView output,

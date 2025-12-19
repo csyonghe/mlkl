@@ -23,7 +23,7 @@ SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView TimeEmbedingKernel::allocResultBuffer(int batchSize)
+BufferView TimeEmbedingKernel::allocateResultBuffer(int batchSize)
 {
     return context->allocScratchBuffer(
         batchSize * outputChannels * sizeof(float),

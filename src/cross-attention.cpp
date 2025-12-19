@@ -61,7 +61,7 @@ SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView CrossAttentionKernel::allocResultBuffer(int batchSize, int seqQ, int dim)
+BufferView CrossAttentionKernel::allocateResultBuffer(int batchSize, int seqQ, int dim)
 {
     return context->allocScratchBuffer(
         (size_t)batchSize * seqQ * dim * sizeof(float),

@@ -144,7 +144,7 @@ SlangResult testSoftmax(InferencingContext* ctx)
     auto inputBuf = ctx->createPersistentBuffer(inputData, "SoftmaxInput");
     SoftmaxKernel kernel(ctx);
     auto task = ctx->createTask();
-    auto outputBuf = kernel.allocResultBuffer(rows, cols);
+    auto outputBuf = kernel.allocateResultBuffer(rows, cols);
     kernel.queueExecute(task, outputBuf, BufferView(inputBuf), rows, cols);
     task.execute();
 
@@ -223,7 +223,7 @@ SlangResult testCrossAttentionFull(InferencingContext* ctx)
     auto bufC = ctx->createPersistentBuffer(c, "CA_C");
     auto task = ctx->createTask();
     ctx->pushAllocScope();
-    auto bufOut = kernel.allocResultBuffer(B, SeqQ, Dim);
+    auto bufOut = kernel.allocateResultBuffer(B, SeqQ, Dim);
     kernel.queueExecute(task, bufOut, BufferView(bufX), BufferView(bufC), B, SeqQ, SeqKV, Heads);
     task.execute();
     ctx->popAllocScope();
@@ -350,7 +350,7 @@ SlangResult testFlashAttention(InferencingContext* ctx)
     auto bufQ = ctx->createPersistentBuffer(hostQ, "Q");
     auto bufK = ctx->createPersistentBuffer(hostK, "K");
     auto bufV = ctx->createPersistentBuffer(hostV, "V");
-    auto bufOut = kernel->allocResultBuffer(Sq, H, B);
+    auto bufOut = kernel->allocateResultBuffer(Sq, H, B);
 
     Dictionary<Expr, InputInfo> inputs;
     inputs.add(eQ, InputInfo(Shape{B, H, Sq, headDim}, bufQ));
@@ -476,7 +476,7 @@ SlangResult testFlashAttentionFusedPermutation(InferencingContext* ctx)
     auto bufQ = ctx->createPersistentBuffer(hostQ_Interleaved, "Q_Interleaved");
     auto bufK = ctx->createPersistentBuffer(hostK_Interleaved, "K_Interleaved");
     auto bufV = ctx->createPersistentBuffer(hostV_Interleaved, "V_Interleaved");
-    auto bufOut = kernel->allocResultBuffer(Sq, H, B);
+    auto bufOut = kernel->allocateResultBuffer(Sq, H, B);
 
     Dictionary<Expr, InputInfo> inputs;
     // We must pass the "Physical" shape of the buffers on the GPU
@@ -585,7 +585,7 @@ SlangResult testFlashAttentionInputPermutationOnly(InferencingContext* ctx)
     auto bufQ = ctx->createPersistentBuffer(hostQ_Interleaved, "Q_Interleaved");
     auto bufK = ctx->createPersistentBuffer(hostK_Interleaved, "K_Interleaved");
     auto bufV = ctx->createPersistentBuffer(hostV_Interleaved, "V_Interleaved");
-    auto bufOut = kernel->allocResultBuffer(Sq, H, B); // Standard Planar alloc
+    auto bufOut = kernel->allocateResultBuffer(Sq, H, B); // Standard Planar alloc
 
     Dictionary<Expr, InputInfo> inputs;
     // Map the raw expressions to Interleaved shapes

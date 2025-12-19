@@ -122,7 +122,7 @@ void UNetBlock::queueExecute(
     int shapeA[] = {inputHeight, inputWidth, outChannels};
     int shapeB[] = {1, 1, outChannels};
     auto added =
-        broadcastAdd->allocResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
+        broadcastAdd->allocateResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
 
     broadcastAdd->queueExecute(
         task,
@@ -219,7 +219,7 @@ void UNetModel::queueExecute(
     task.context->pushAllocScope();
     SLANG_DEFER(task.context->popAllocScope());
 
-    auto timeEmbedding = timeEmbedKernel->allocResultBuffer(batchSize);
+    auto timeEmbedding = timeEmbedKernel->allocateResultBuffer(batchSize);
     timeEmbedKernel->queueExecute(task, timeEmbedding, timeStep, batchSize);
     auto x = initialConv->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
     initialConv->queueExecute(task, x, inputImage, inputWidth, inputHeight, 1, batchSize);
@@ -241,7 +241,7 @@ void UNetModel::queueExecute(
         Shape shape = {batchSize, inputHeight, inputWidth, block->inChannels};
         Shape shapes[] = {shape, shape};
         BufferView buffers[] = {x, skipConnection};
-        auto concated = concat->allocResultBuffer(makeArrayView(shapes), 3);
+        auto concated = concat->allocateResultBuffer(makeArrayView(shapes), 3);
         concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 3);
         // Up block
         auto upsampled = block->allocateResultBuffer(inputWidth, inputHeight, batchSize);

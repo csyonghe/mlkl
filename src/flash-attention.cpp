@@ -46,7 +46,7 @@ FlashAttentionKernel::FlashAttentionKernel(
     pipeline = ctx->createComputePipeline("flashAttention2", typeArgs.getArrayView());
 }
 
-BufferView FlashAttentionKernel::allocResultBuffer(
+BufferView FlashAttentionKernel::allocateResultBuffer(
     uint32_t seqLenQ,
     uint32_t numHeads,
     uint32_t batchSize)

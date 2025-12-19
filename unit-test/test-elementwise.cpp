@@ -81,8 +81,8 @@ SlangResult testTranspose(InferencingContext* ctx)
     inputs.add(bufExpr, InputInfo(Shape{D0, D1, D2}, BufferView(bufIn)));
 
     // Allocate Output
-    // kernel.allocResultBuffer resolves the shape automatically (should be [4, 3, 2])
-    auto bufOut = kernel.allocResultBuffer(inputs);
+    // kernel.allocateResultBuffer resolves the shape automatically (should be [4, 3, 2])
+    auto bufOut = kernel.allocateResultBuffer(inputs);
 
     // 5. Execute
     kernel.queueExecute(task, bufOut, inputs);
@@ -147,7 +147,7 @@ SlangResult testMaterialize(InferencingContext* ctx)
     //  Eval<8, ConstantView>,
     //  Eval<9, Mul<Reg<7>,Reg<8>>>
     //  >>`.
-    auto outputBuffer = kernel->allocResultBuffer(inputs);
+    auto outputBuffer = kernel->allocateResultBuffer(inputs);
     kernel->queueExecute(task, outputBuffer, inputs);
 
     // 6. Execute and Readback
@@ -202,7 +202,7 @@ SlangResult testReluNegSin(InferencingContext* ctx)
 
     // Execute
     // Since it's a simple elementwise op, output shape matches input shape
-    auto outputBuffer = kernel.allocResultBuffer(inputs);
+    auto outputBuffer = kernel.allocateResultBuffer(inputs);
     kernel.queueExecute(task, outputBuffer, inputs);
 
     // 4. Readback
@@ -265,7 +265,7 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx)
     Dictionary<Expr, InputInfo> inputs;
     inputs.add(x, InputInfo(shape, inputBuf));
 
-    auto outputBuffer = kernel.allocResultBuffer(inputs);
+    auto outputBuffer = kernel.allocateResultBuffer(inputs);
     kernel.queueExecute(task, outputBuffer, inputs);
 
     // Readback
@@ -311,7 +311,7 @@ SlangResult testMultiConcat(InferencingContext* ctx)
 
     ConcatKernel kernel(ctx, 3);
     auto task = ctx->createTask();
-    auto outputBuffer = kernel.allocResultBuffer(makeArrayView(shapes), 0);
+    auto outputBuffer = kernel.allocateResultBuffer(makeArrayView(shapes), 0);
 
     kernel.queueExecute(task, outputBuffer, makeArrayView(inputs), makeArrayView(shapes), 0);
 

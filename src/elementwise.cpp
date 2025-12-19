@@ -1126,7 +1126,7 @@ ElementwiseKernel::ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
     pipeline = ctx->createComputePipeline("materialize", makeArrayView(typeArgs));
 }
 
-BufferView ElementwiseKernel::allocResultBuffer(const Dictionary<Expr, InputInfo>& inputs)
+BufferView ElementwiseKernel::allocateResultBuffer(const Dictionary<Expr, InputInfo>& inputs)
 {
     EvalContext ctx;
     for (auto it : inputs)

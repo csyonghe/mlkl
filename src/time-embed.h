@@ -16,7 +16,7 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    BufferView allocResultBuffer(int batchSize);
+    BufferView allocateResultBuffer(int batchSize);
     void queueExecute(
         InferencingTask& task,
         BufferView output,

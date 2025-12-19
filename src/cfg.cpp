@@ -19,7 +19,7 @@ ClassifierFreeGuidanceKernel::ClassifierFreeGuidanceKernel(InferencingContext* c
     kernel = new ElementwiseKernel(context, result);
 }
 
-BufferView ClassifierFreeGuidanceKernel::allocResultBuffer(int width, int height, int channels)
+BufferView ClassifierFreeGuidanceKernel::allocateResultBuffer(int width, int height, int channels)
 {
     // For CFG, shapeA and shapeB should be the same.
     size_t elementCount = Shape(width, height, channels).getElementCount();

@@ -39,7 +39,7 @@ ConcatKernel::ConcatKernel(InferencingContext* ctx, int operandCount)
     elementwiseKernel = new ElementwiseKernel(context, rootExpr);
 }
 
-BufferView ConcatKernel::allocResultBuffer(ArrayView<Shape> inputShapes, int axis)
+BufferView ConcatKernel::allocateResultBuffer(ArrayView<Shape> inputShapes, int axis)
 {
     if (inputShapes.getCount() != operandCount)
         throw std::runtime_error(
@@ -59,7 +59,7 @@ BufferView ConcatKernel::allocResultBuffer(ArrayView<Shape> inputShapes, int axi
         // Bind runtime data: Shape + Buffer Pointer
         bindings.add(e, InputInfo(inputShapes[i], {}));
     }
-    return elementwiseKernel->allocResultBuffer(bindings);
+    return elementwiseKernel->allocateResultBuffer(bindings);
 }
 
 void ConcatKernel::queueExecute(

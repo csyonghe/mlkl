@@ -15,7 +15,7 @@ private:
 
 public:
     BroadcastAddKernel(InferencingContext* context);
-    BufferView allocResultBuffer(const Shape& shapeA, const Shape& shapeB, int batchSize = 1);
+    BufferView allocateResultBuffer(const Shape& shapeA, const Shape& shapeB, int batchSize = 1);
     void queueExecute(
         InferencingTask& task,
         BufferView result,

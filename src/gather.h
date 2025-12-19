@@ -24,7 +24,7 @@ public:
     SlangResult loadParams(TorchParamReader& reader);
 
     // Helper to allocate [Batch, EmbeddingDim]
-    BufferView allocResultBuffer(int batchSize);
+    BufferView allocateResultBuffer(int batchSize);
 
     // Executes the gather: Output[b, d] = Weights[Input[b], d]
     // NOTE: inputLabels must be a buffer of FLOATs (e.g. 3.0f for class 3)

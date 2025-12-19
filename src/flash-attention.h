@@ -54,7 +54,7 @@ public:
         int d = 64,
         SinkExpr sinkExpr = bufferSink());
 
-    BufferView allocResultBuffer(uint32_t seqLenQ, uint32_t numHeads, uint32_t batchSize);
+    BufferView allocateResultBuffer(uint32_t seqLenQ, uint32_t numHeads, uint32_t batchSize);
 
     void queueExecute(
         InferencingTask& task,

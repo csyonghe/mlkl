@@ -16,7 +16,7 @@ class ClassifierFreeGuidanceKernel : public RefObject
 public:
     ClassifierFreeGuidanceKernel(InferencingContext* context);
 
-    BufferView allocResultBuffer(int width, int height, int channels);
+    BufferView allocateResultBuffer(int width, int height, int channels);
 
     void queueExecute(
         InferencingTask& task,

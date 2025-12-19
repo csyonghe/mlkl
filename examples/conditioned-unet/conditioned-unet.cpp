@@ -146,11 +146,11 @@ void ConditionedUNet::queueExecute(
     SLANG_DEFER(context->popAllocScope());
 
     // 1. Time Embedding
-    auto tEmb = timeEmbed->allocResultBuffer(batchSize);
+    auto tEmb = timeEmbed->allocateResultBuffer(batchSize);
     timeEmbed->queueExecute(task, tEmb, timeStep, batchSize);
 
     // 2. Context embedding
-    auto contextEmbedding = classEmbed->allocResultBuffer(batchSize);
+    auto contextEmbedding = classEmbed->allocateResultBuffer(batchSize);
     classEmbed->queueExecute(task, contextEmbedding, classLabels, batchSize);
 
     // 2. Init Conv
@@ -187,7 +187,7 @@ void ConditionedUNet::queueExecute(
     int heads = 4; // Check your model config!
 
     // Alloc output
-    auto attnOut = midAttn->allocResultBuffer(batchSize, seqQ, channels);
+    auto attnOut = midAttn->allocateResultBuffer(batchSize, seqQ, channels);
 
     midAttn->queueExecute(
         task,
@@ -224,7 +224,7 @@ void ConditionedUNet::queueExecute(
         BufferView buffers[] = {x, skip};
 
         // Placeholder for concat:
-        auto concated = concat->allocResultBuffer(makeArrayView(shapes), 3);
+        auto concated = concat->allocateResultBuffer(makeArrayView(shapes), 3);
         concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 3);
 
         auto res = block->allocateResultBuffer(w, h, batchSize);
@@ -361,7 +361,7 @@ void UNetBlock::queueExecute(
     int shapeA[] = {inputHeight, inputWidth, outChannels};
     int shapeB[] = {1, 1, outChannels};
     auto added =
-        broadcastAdd->allocResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
+        broadcastAdd->allocateResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
 
     broadcastAdd->queueExecute(
         task,

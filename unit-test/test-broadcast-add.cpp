@@ -35,7 +35,7 @@ SlangResult testBroadcastAdd(InferencingContext* ctx)
     // 3. Execute
     // Internally this constructs shapes [1, 2, 3] and [1, 3]
     // And broadcasts B to [1, 2, 3]
-    auto output = kernel.allocResultBuffer(shapeA, shapeB, batchSize);
+    auto output = kernel.allocateResultBuffer(shapeA, shapeB, batchSize);
     kernel.queueExecute(task, output, bufA, shapeA, bufB, shapeB, batchSize);
 
     // 4. Readback

@@ -17,7 +17,7 @@ BroadcastAddKernel::BroadcastAddKernel(InferencingContext* context)
     kernel = new ElementwiseKernel(context, resultExpr);
 }
 
-BufferView BroadcastAddKernel::allocResultBuffer(
+BufferView BroadcastAddKernel::allocateResultBuffer(
     const Shape& shapeA,
     const Shape& shapeB,
     int batchSize)

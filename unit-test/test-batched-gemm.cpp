@@ -173,7 +173,7 @@ SlangResult testFusedBatchGemm(InferencingContext* ctx)
     BatchGemmKernel kernel(ctx, exprA, exprB, exprC, sinkExpr, exprOut);
 
     auto task = ctx->createTask();
-    auto bufOut = kernel.allocResultBuffer(B, M, N);
+    auto bufOut = kernel.allocateResultBuffer(B, M, N);
 
     Dictionary<Expr, InputInfo> inputs;
     inputs.add(bufAExpr, InputInfo(Shape{B, K, M}, BufferView(bufA)));

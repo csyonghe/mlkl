@@ -37,7 +37,7 @@ SlangResult testClassifierFreeGuidance(InferencingContext* ctx)
     //  - Treat the first 4 floats as 'Uncond'
     //  - Treat the next 4 floats as 'Cond'
     //  - Apply the formula
-    auto outputBuffer = kernel.allocResultBuffer(width, height, channels);
+    auto outputBuffer = kernel.allocateResultBuffer(width, height, channels);
     kernel.queueExecute(
         task,
         outputBuffer,

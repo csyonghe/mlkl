@@ -27,7 +27,7 @@ BatchGemmKernel::BatchGemmKernel(
 }
 
 // Allocate output buffer C [BatchSize, M, N]
-BufferView BatchGemmKernel::allocResultBuffer(int batchSize, int m, int n)
+BufferView BatchGemmKernel::allocateResultBuffer(int batchSize, int m, int n)
 {
     size_t size = (size_t)batchSize * m * n * sizeof(float);
     return context->allocScratchBuffer(size, "BatchGemm_Result");

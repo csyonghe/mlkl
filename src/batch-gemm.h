@@ -23,7 +23,7 @@ class BatchGemmKernel : public RefObject
 public:
     BatchGemmKernel(InferencingContext* ctx, Expr A, Expr B, Expr C, SinkExpr sinkExpr, Expr Out);
 
-    BufferView allocResultBuffer(int batchSize, int m, int n);
+    BufferView allocateResultBuffer(int batchSize, int m, int n);
 
     // Eval takes shape params explicitly, plus inputs for all expressions
     void queueExecute(

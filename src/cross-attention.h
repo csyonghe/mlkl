@@ -40,7 +40,7 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    BufferView allocResultBuffer(int batchSize, int seqQ, int dim);
+    BufferView allocateResultBuffer(int batchSize, int seqQ, int dim);
 
     void queueExecute(
         InferencingTask& task,

@@ -10,7 +10,7 @@ private:
 public:
     SoftmaxKernel(InferencingContext* ctx);
 
-    BufferView allocResultBuffer(int rows, int cols);
+    BufferView allocateResultBuffer(int rows, int cols);
 
     // rows: Number of independent vectors (Batch * Heads * SeqQ)
     // cols: Length of each vector (SeqKV)

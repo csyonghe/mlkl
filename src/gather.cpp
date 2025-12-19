@@ -35,7 +35,7 @@ SlangResult GatherKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView GatherKernel::allocResultBuffer(int batchSize)
+BufferView GatherKernel::allocateResultBuffer(int batchSize)
 {
     size_t size = (size_t)batchSize * embeddingDim * sizeof(float);
     return context->allocScratchBuffer(size, "GatherOutput");

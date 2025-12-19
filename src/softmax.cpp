@@ -6,7 +6,7 @@ SoftmaxKernel::SoftmaxKernel(InferencingContext* ctx)
     pipeline = context->createComputePipeline("softmax", {});
 }
 
-BufferView SoftmaxKernel::allocResultBuffer(int rows, int cols)
+BufferView SoftmaxKernel::allocateResultBuffer(int rows, int cols)
 {
     size_t size = (size_t)rows * cols * sizeof(float);
     return context->allocScratchBuffer(size, "Softmax_Result");

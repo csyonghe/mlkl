@@ -14,7 +14,7 @@ class ConcatKernel : public RefObject
 public:
     ConcatKernel(InferencingContext* ctx, int operandCount);
 
-    BufferView allocResultBuffer(ArrayView<Shape> inputShapes, int axis);
+    BufferView allocateResultBuffer(ArrayView<Shape> inputShapes, int axis);
 
     // Concatenates N inputs along the specified axis.
     // inputs: List of buffers
