@@ -5,14 +5,6 @@ struct Input
     float value;
 }
 
-struct NDView
-{
-    uint rank;
-    uint shape[8];
-    uint strides[8];
-    uint offsets[8];
-}
-
 struct Coord
 {
     uint baseOffset;
