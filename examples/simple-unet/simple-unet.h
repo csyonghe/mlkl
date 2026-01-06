@@ -49,7 +49,7 @@ public:
 
 class UNetModel : public RefObject
 {
-protected:
+public:
     RefPtr<InferencingContext> inferencingCtx;
     RefPtr<TimeEmbedingKernel> timeEmbedKernel;
     RefPtr<Conv2DKernel> initialConv;

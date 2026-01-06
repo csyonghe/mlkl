@@ -1,6 +1,10 @@
-from diffmodel import *;
-
 ## Training
+
+# Run this script with no arguments to train a simple U-Net on MNIST,
+# and export the model weights to "model_weights.bin".
+# The C++ application will find and load this file for inference.
+
+from diffmodel import *;
 
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms

@@ -47,7 +47,7 @@ UNetBlock::UNetBlock(
             2,
             outChannels,
             outChannels,
-            relu(kernelOutput()),
+            kernelOutput(),  // No ReLU - matches PyTorch's self.transform
             "transformUp");
     }
     conv2 = new Conv2DKernel(

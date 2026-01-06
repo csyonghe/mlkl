@@ -1,3 +1,10 @@
+# This file defines a simple U-NET architecture to be used as the
+# noise predictor in a diffusion model.
+
+# See train.py for training code and sampling code.
+
+# simple-unet.cpp contains the native C++ implementation of the same model.
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

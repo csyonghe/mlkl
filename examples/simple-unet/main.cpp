@@ -7,10 +7,12 @@
 #include "inference-context.h"
 #include "kernels.h"
 #include "simple-unet.h"
+#include "test-unet-model.h"
 #include "torch-reader.h"
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <random>
 
 static const ExampleResources resourceBase("simple-unet");
@@ -26,6 +28,36 @@ struct SimpleUNetProgram : public TestBase
         parseOption(argc, argv);
 
         gInferencingCtx = new InferencingContext();
+
+        // Check for comparison test flags
+        for (int i = 1; i < argc; i++)
+        {
+            if (strcmp(argv[i], "--compare-up0") == 0)
+            {
+                printf("Running up block 0 comparison test...\n\n");
+                return testUpBlock0(gInferencingCtx);
+            }
+            if (strcmp(argv[i], "--compare-down0") == 0)
+            {
+                printf("Running down block 0 comparison test...\n\n");
+                return testDownBlock0(gInferencingCtx);
+            }
+            if (strcmp(argv[i], "--compare-conv0") == 0)
+            {
+                printf("Running initial conv (conv0) comparison test...\n\n");
+                return testInitialConv(gInferencingCtx);
+            }
+            if (strcmp(argv[i], "--compare-time-embed") == 0)
+            {
+                printf("Running time embedding comparison test...\n\n");
+                return testTimeEmbedding(gInferencingCtx);
+            }
+            if (strcmp(argv[i], "--compare") == 0)
+            {
+                printf("Running full UNet PyTorch comparison test...\n\n");
+                return testUNetModelAgainstPyTorch(gInferencingCtx);
+            }
+        }
 
         SLANG_RETURN_ON_FAIL(testUNetModel());
 
@@ -123,73 +155,6 @@ struct SimpleUNetProgram : public TestBase
             model.queueExecute(task, predictedNoise, imageA, t);
 
             sampler.step(task, imageB, imageA, predictedNoise, step);
-
-            // Debug: Check intermediate tensors on first step
-            if (step == inferenceSteps - 1)
-            {
-                task.execute(); // Execute what we have so far
-
-                // Check predicted noise
-                auto noiseData = gInferencingCtx->readBuffer<float>(predictedNoise);
-                float minVal = noiseData[0], maxVal = noiseData[0], sum = 0;
-                for (auto v : noiseData)
-                {
-                    minVal = std::min(minVal, v);
-                    maxVal = std::max(maxVal, v);
-                    sum += v;
-                }
-                printf(
-                    "Step %d: predictedNoise stats - min=%.4f, max=%.4f, mean=%.4f\n",
-                    step,
-                    minVal,
-                    maxVal,
-                    sum / noiseData.getCount());
-
-                // Check sampler output (imageB after sampler.step)
-                auto samplerOutput = gInferencingCtx->readBuffer<float>(imageB);
-                float sMinVal = samplerOutput[0], sMaxVal = samplerOutput[0], sSum = 0;
-                for (auto v : samplerOutput)
-                {
-                    sMinVal = std::min(sMinVal, v);
-                    sMaxVal = std::max(sMaxVal, v);
-                    sSum += v;
-                }
-                printf(
-                    "Step %d: sampler output stats - min=%.4f, max=%.4f, mean=%.4f\n",
-                    step,
-                    sMinVal,
-                    sMaxVal,
-                    sSum / samplerOutput.getCount());
-
-                // Check for NaN or extreme values
-                if (std::isnan(sSum) || std::isinf(sSum))
-                {
-                    printf("WARNING: Detected NaN/Inf in sampler output!\n");
-                }
-
-                task = gInferencingCtx->createTask(); // Create new task for remaining work
-            }
-
-            // Also check a middle step and the last step
-            if (step == inferenceSteps / 2 || step == 0)
-            {
-                task.execute();
-                auto imgData = gInferencingCtx->readBuffer<float>(imageB);
-                float minV = imgData[0], maxV = imgData[0], sumV = 0;
-                for (auto v : imgData)
-                {
-                    minV = std::min(minV, v);
-                    maxV = std::max(maxV, v);
-                    sumV += v;
-                }
-                printf(
-                    "Step %d: imageB stats - min=%.4f, max=%.4f, mean=%.4f\n",
-                    step,
-                    minV,
-                    maxV,
-                    sumV / imgData.getCount());
-                task = gInferencingCtx->createTask();
-            }
 
             outputImage = imageB;
             Swap(imageA, imageB);
