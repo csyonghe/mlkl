@@ -63,7 +63,8 @@ SlangResult testTranspose(InferencingContext* ctx)
     cpuTranspose3D(inputData.getBuffer(), expected.getBuffer(), D0, D1, D2, 0, 2);
 
     // 2. GPU Setup
-    auto bufIn = ctx->createPersistentBuffer(inputData, "TransposeIn");
+    auto bufIn =
+        ctx->createTensor(ElementType::Float32, Shape(D0, D1, D2), inputData, "TransposeIn");
 
     // 3. Construct Expression: Transpose(Buffer, 0, 2)
     // Input Shape is implicitly provided via InputInfo later
@@ -78,11 +79,11 @@ SlangResult testTranspose(InferencingContext* ctx)
     Dictionary<Expr, InputInfo> inputs;
     // Note: expr->inner is the BufferNode created by buffer()
     // We bind the shape [2, 3, 4] to it.
-    inputs.add(bufExpr, InputInfo(Shape{D0, D1, D2}, BufferView(bufIn)));
+    inputs.add(bufExpr, bufIn->getView());
 
     // Allocate Output
     // kernel.allocateResultBuffer resolves the shape automatically (should be [4, 3, 2])
-    auto bufOut = kernel.allocateResultBuffer(inputs);
+    auto bufOut = kernel.allocateResultBuffer(ElementType::Float32, inputs);
 
     // 5. Execute
     kernel.queueExecute(task, bufOut, inputs);
@@ -104,7 +105,8 @@ SlangResult testMaterialize(InferencingContext* ctx)
 
     // 1. Setup Input Data
     // Create two 4x4 arrays
-    const int count = 16;
+    const int width = 4;
+    const int count = width * width;
     float dataA[count];
     float dataB[count];
     for (int i = 0; i < count; i++)
@@ -113,8 +115,10 @@ SlangResult testMaterialize(InferencingContext* ctx)
         dataB[i] = 100.0f;   // 100, 100...
     }
 
-    auto bufA = ctx->createPersistentBuffer(dataA, count * sizeof(float));
-    auto bufB = ctx->createPersistentBuffer(dataB, count * sizeof(float));
+    auto bufA =
+        ctx->createTensor(ElementType::Float32, Shape(width, width), count * sizeof(float), dataA);
+    auto bufB =
+        ctx->createTensor(ElementType::Float32, Shape(width, width), count * sizeof(float), dataB);
 
     // 2. Build Expression Tree: (A + B) * 0.5
     auto a = buffer();
@@ -143,8 +147,8 @@ SlangResult testMaterialize(InferencingContext* ctx)
     //  Eval<8, ConstantView>,
     //  Eval<9, Mul<Reg<7>,Reg<8>>>
     //  >>`.
-    auto outputBuffer = ctx->allocScratchBuffer(bufA->getDesc().size);
-    kernel->queueExecute(task, outputBuffer, {bufA, 4, 4}, {bufB, 4, 4});
+    auto outputBuffer = ctx->allocScratchTensor(ElementType::Float32, Shape(width, width));
+    kernel->queueExecute(task, outputBuffer, bufA->getView(), bufB->getView());
 
     // 6. Execute and Readback
     renderDocBeginFrame();
@@ -181,7 +185,7 @@ SlangResult testReluNegSin(InferencingContext* ctx)
     int count = 4;
     Shape shape = {count}; // [4]
 
-    auto inputBuf = ctx->createPersistentBuffer(inputData, sizeof(inputData));
+    auto inputBuf = ctx->createTensor(ElementType::Float32, shape, sizeof(inputData), inputData);
 
     // 1. Build Expression Tree
     // Expr = relu( -sin(x) )
@@ -194,11 +198,11 @@ SlangResult testReluNegSin(InferencingContext* ctx)
 
     // 3. Bind Inputs & Execute
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(x, InputInfo(shape, inputBuf));
+    inputs.add(x, inputBuf->getView());
 
     // Execute
     // Since it's a simple elementwise op, output shape matches input shape
-    auto outputBuffer = kernel.allocateResultBuffer(inputs);
+    auto outputBuffer = kernel.allocateResultBuffer(ElementType::Float32, inputs);
     kernel.queueExecute(task, outputBuffer, inputs);
 
     // 4. Readback
@@ -249,7 +253,7 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx)
     int count = 2;
     Shape shape = {count};
 
-    auto inputBuf = ctx->createPersistentBuffer(inputData, sizeof(inputData));
+    auto inputBuf = ctx->createTensor(ElementType::Float32, shape, sizeof(inputData), inputData);
 
     auto x = buffer();
     // Use the C++ helper function
@@ -259,9 +263,9 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx)
     auto task = ctx->createTask();
 
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(x, InputInfo(shape, inputBuf));
+    inputs.add(x, inputBuf->getView());
 
-    auto outputBuffer = kernel.allocateResultBuffer(inputs);
+    auto outputBuffer = kernel.allocateResultBuffer(ElementType::Float32, inputs);
     kernel.queueExecute(task, outputBuffer, inputs);
 
     // Readback
@@ -298,18 +302,18 @@ SlangResult testMultiConcat(InferencingContext* ctx)
     float dataB[] = {3, 4, 5};
     float dataC[] = {6};
 
-    auto bufA = ctx->createPersistentBuffer(dataA, sizeof(dataA));
-    auto bufB = ctx->createPersistentBuffer(dataB, sizeof(dataB));
-    auto bufC = ctx->createPersistentBuffer(dataC, sizeof(dataC));
+    auto bufA = ctx->createTensor(ElementType::Float32, Shape(2), sizeof(dataA), dataA);
+    auto bufB = ctx->createTensor(ElementType::Float32, Shape(3), sizeof(dataB), dataB);
+    auto bufC = ctx->createTensor(ElementType::Float32, Shape(1), sizeof(dataC), dataC);
 
-    BufferView inputs[] = {bufA, bufB, bufC};
+    TensorView inputs[] = {bufA->getView(), bufB->getView(), bufC->getView()};
     Shape shapes[] = {Shape({2}), Shape({3}), Shape({1})};
 
     ConcatKernel kernel(ctx, 3);
     auto task = ctx->createTask();
-    auto outputBuffer = kernel.allocateResultBuffer(makeArrayView(shapes), 0);
+    auto outputBuffer = kernel.allocateResultBuffer(ElementType::Float32, makeArrayView(shapes), 0);
 
-    kernel.queueExecute(task, outputBuffer, makeArrayView(inputs), makeArrayView(shapes), 0);
+    kernel.queueExecute(task, outputBuffer, makeArrayView(inputs), 0);
 
     // Readback
     renderDocBeginFrame();
@@ -342,12 +346,12 @@ SlangResult testIdentityPermute(InferencingContext* ctx)
     RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, ePerm);
 
     List<float> data = {0, 1, 2, 3, 4, 5, 6, 7};
-    auto bufIn = ctx->createPersistentBuffer(data, "In");
-    auto bufOut = ctx->allocScratchBuffer(8 * sizeof(float), "Out");
+    auto bufIn = ctx->createTensor(ElementType::Float32, Shape{1, 2, 2, 2}, data, "In");
+    auto bufOut = ctx->allocScratchTensor(ElementType::Float32, Shape{1, 2, 2, 2}, "Out");
 
     Dictionary<Expr, InputInfo> inputs;
     // Note: The physical shape MUST be provided to the node
-    inputs.add(eBuf, InputInfo(Shape{1, 2, 2, 2}, bufIn));
+    inputs.add(eBuf, bufIn->getView());
 
     auto task = ctx->createTask();
     kernel->queueExecute(task, bufOut, inputs);

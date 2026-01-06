@@ -63,23 +63,14 @@ public:
         float* weightsData,
         float* biasesData);
 
-    BufferView allocateResultBuffer(int inputWidth, int inputHeight, int padding, int batchSize);
-
-    void queueExecute(
-        InferencingTask& task,
-        EvalContext& evalCtx,
-        BufferView output,
+    TensorView allocateResultBuffer(
+        ElementType elementType,
         int inputWidth,
         int inputHeight,
         int padding,
         int batchSize);
 
-    void queueExecute(
-        InferencingTask& task,
-        BufferView output,
-        BufferView inputImage,
-        int inputWidth,
-        int inputHeight,
-        int padding,
-        int batchSize = 1);
+    void queueExecute(InferencingTask& task, EvalContext& evalCtx, TensorView output, int padding);
+
+    void queueExecute(InferencingTask& task, TensorView output, TensorView inputImage, int padding);
 };

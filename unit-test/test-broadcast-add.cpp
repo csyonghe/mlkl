@@ -21,22 +21,23 @@ SlangResult testBroadcastAdd(InferencingContext* ctx)
 
     float dataB[] = {100, 200, 300}; // 1x3
 
-    auto bufA = ctx->createPersistentBuffer(dataA, sizeof(dataA));
-    auto bufB = ctx->createPersistentBuffer(dataB, sizeof(dataB));
+    auto bufA = ctx->createTensor(
+        ElementType::Float32,
+        Shape(batchSize, height, width),
+        sizeof(dataA),
+        dataA);
+    auto bufB =
+        ctx->createTensor(ElementType::Float32, Shape(batchSize, width), sizeof(dataB), dataB);
 
     // 2. Prepare Kernel
     BroadcastAddKernel kernel(ctx);
     auto task = ctx->createTask();
 
-    // Shapes excluding batch dimension
-    Shape shapeA = {height, width};
-    Shape shapeB = {width};
-
     // 3. Execute
     // Internally this constructs shapes [1, 2, 3] and [1, 3]
     // And broadcasts B to [1, 2, 3]
-    auto output = kernel.allocateResultBuffer(shapeA, shapeB, batchSize);
-    kernel.queueExecute(task, output, bufA, shapeA, bufB, shapeB, batchSize);
+    auto output = kernel.allocateResultBuffer(ElementType::Float32, bufA->shape, bufB->shape);
+    kernel.queueExecute(task, output, bufA->getView(), bufB->getView());
 
     // 4. Readback
     renderDocBeginFrame();

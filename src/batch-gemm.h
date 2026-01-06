@@ -34,59 +34,39 @@ public:
     {
     }
 
-    BufferView allocateResultBuffer(int batchSize, int m, int n);
+    TensorView allocateResultBuffer(ElementType elementType, int batchSize, int m, int n);
 
     // Eval takes shape params explicitly, plus inputs for all expressions
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int M,
-        int N,
-        int K,
-        int batchSize,
+        TensorView output,
         float alpha,
         float beta,
         EvalContext& ctx);
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int M,
-        int N,
-        int K,
-        int batchSize,
+        TensorView output,
         float alpha,
         float beta,
         const Dictionary<Expr, InputInfo>& inputs);
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int M,
-        int N,
-        int K,
-        int batchSize,
+        TensorView output,
         float alpha,
         float beta,
         ArrayView<InputInfo> inputs);
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int M,
-        int N,
-        int K,
-        int batchSize,
+        TensorView output,
         float alpha,
         float beta,
         const std::initializer_list<InputInfo>& inputs);
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int M,
-        int N,
-        int K,
-        int batchSize,
+        TensorView output,
         float alpha,
         float beta,
-        BufferView A,
-        BufferView B,
-        BufferView C);
+        TensorView A,
+        TensorView B,
+        TensorView C);
 };

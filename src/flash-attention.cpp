@@ -46,7 +46,8 @@ FlashAttentionKernel::FlashAttentionKernel(
     pipeline = ctx->createComputePipeline("flashAttention2", typeArgs.getArrayView());
 }
 
-BufferView FlashAttentionKernel::allocateResultBuffer(
+TensorView FlashAttentionKernel::allocateResultBuffer(
+    ElementType elementType,
     uint32_t seqLenQ,
     uint32_t numHeads,
     uint32_t batchSize)
@@ -55,12 +56,15 @@ BufferView FlashAttentionKernel::allocateResultBuffer(
     // The Slang kernel writes to indices calculated as:
     // (batch_idx * batch_stride) + (head_idx * head_stride) + (row_idx * headDim) + d
     size_t elementCount = (size_t)batchSize * numHeads * seqLenQ * headDim;
-    return context->allocScratchBuffer(elementCount * sizeof(float), "flash_attention_output");
+    return context->allocScratchTensor(
+        elementType,
+        Shape(batchSize, numHeads, seqLenQ, headDim),
+        "flash_attention_output");
 }
 
 void FlashAttentionKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
+    TensorView output,
     const Dictionary<Expr, InputInfo>& inputs,
     uint32_t seqLenQ,
     uint32_t seqLenKV,

@@ -34,16 +34,17 @@ public:
 
     void writeResult(const char* name, BufferView buffer);
 
-    BufferView allocateResultBuffer(int inputWidth, int inputHeight, int batchSize);
+    TensorView allocateResultBuffer(
+        ElementType elementType,
+        int inputWidth,
+        int inputHeight,
+        int batchSize);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        BufferView inputImage,
-        int inputWidth,
-        int inputHeight,
-        int batchSize,
-        BufferView timeEmbedding);
+        TensorView output,
+        TensorView inputImage,
+        TensorView timeEmbedding);
 };
 
 class UNetModel : public RefObject
@@ -64,10 +65,7 @@ public:
 
     void queueExecute(
         InferencingTask& task,
-        BufferView outputImage,
-        BufferView inputImage,
-        int inputWidth,
-        int inputHeight,
-        int timeStep,
-        int batchSize);
+        TensorView outputImage,
+        TensorView inputImage,
+        int timeStep);
 };

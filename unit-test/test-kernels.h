@@ -14,6 +14,7 @@ void initRandom(List<float>& data, int count);
 
 // Compares GPU buffer content with expected CPU results
 bool checkOutput(InferencingContext* ctx, BufferView outputBuffer, const List<float>& expected);
+bool checkOutput(InferencingContext* ctx, TensorView outputBuffer, const List<float>& expected);
 
 // Writes weights/biases to file stream (compatible with TorchParamReader)
 void writeLinearWeights(Stream* fs, const List<float>& weights, const List<float>& biases);

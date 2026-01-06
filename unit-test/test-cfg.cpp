@@ -26,7 +26,11 @@ SlangResult testClassifierFreeGuidance(InferencingContext* ctx)
 
     float guidanceScale = 2.0f;
 
-    auto inputBuf = ctx->createPersistentBuffer(inputData, sizeof(inputData));
+    auto inputBuf = ctx->createTensor(
+        ElementType::Float32,
+        Shape(2, height, width, channels),
+        sizeof(inputData),
+        inputData);
 
     // 2. Prepare Kernel
     ClassifierFreeGuidanceKernel kernel(ctx);
@@ -37,15 +41,8 @@ SlangResult testClassifierFreeGuidance(InferencingContext* ctx)
     //  - Treat the first 4 floats as 'Uncond'
     //  - Treat the next 4 floats as 'Cond'
     //  - Apply the formula
-    auto outputBuffer = kernel.allocateResultBuffer(width, height, channels);
-    kernel.queueExecute(
-        task,
-        outputBuffer,
-        BufferView(inputBuf),
-        width,
-        height,
-        channels,
-        guidanceScale);
+    auto outputBuffer = kernel.allocateResultBuffer(ElementType::Float32, width, height, channels);
+    kernel.queueExecute(task, outputBuffer, inputBuf->getView(), guidanceScale);
 
     // 4. Readback
     renderDocBeginFrame();

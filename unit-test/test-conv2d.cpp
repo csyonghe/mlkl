@@ -8,14 +8,15 @@ SlangResult testConv2D(InferencingContext* ctx)
     float inputData[] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,
                          14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25};
     auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-    auto inputBuffer = ctx->createPersistentBuffer(inputData, 5 * 5 * sizeof(float));
+    auto inputBuffer =
+        ctx->createTensor(ElementType::Float32, Shape(1, 5, 5, 1), sizeof(inputData), inputData);
     float convWeights[9] = {0.1, 0.5, 0.2, 0.5, 1.0, 0.5, 0.2, 0.5, 0.4};
     float convBiases[] = {1000.0f};
     Conv2DKernel convKernel = Conv2DKernel(ctx, 4, 3, 1, 1, 1);
     auto task = ctx->createTask();
     convKernel.loadParams(3, 1, convWeights, convBiases);
-    auto outputBuffer = convKernel.allocateResultBuffer(5, 5, 1, 1);
-    convKernel.queueExecute(task, outputBuffer, BufferView(inputBuffer), 5, 5, 1);
+    auto outputBuffer = convKernel.allocateResultBuffer(ElementType::Float32, 5, 5, 1, 1);
+    convKernel.queueExecute(task, outputBuffer, inputBuffer->getView(), 1);
 
     auto readWeight = [&](int x, int y) { return convWeights[y * 3 + x]; };
 

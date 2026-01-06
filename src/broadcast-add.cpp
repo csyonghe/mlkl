@@ -17,51 +17,29 @@ BroadcastAddKernel::BroadcastAddKernel(InferencingContext* context)
     kernel = new ElementwiseKernel(context, resultExpr);
 }
 
-BufferView BroadcastAddKernel::allocateResultBuffer(
+TensorView BroadcastAddKernel::allocateResultBuffer(
+    ElementType elementType,
     const Shape& shapeA,
-    const Shape& shapeB,
-    int batchSize)
+    const Shape& shapeB)
 {
-    return context->allocScratchBuffer(
-        shapeA.getElementCount() * batchSize * sizeof(float),
-        "broadcastAdd");
+    return context->allocScratchTensor(elementType, shapeA, "broadcastAdd");
 }
 
 
 void BroadcastAddKernel::queueExecute(
     InferencingTask& task,
-    BufferView result,
-    BufferView inputA,
-    const Shape& shapeA,
-    BufferView inputB,
-    const Shape& shapeB,
-    int batchSize)
+    TensorView result,
+    TensorView inputA,
+    TensorView inputB)
 {
-    // 1. Construct Runtime Shapes
-    // Prepend batch dimension to shapes
-    List<int> dimsA;
-    dimsA.add(batchSize);
-    for (int s : shapeA.getDims())
-        dimsA.add(s);
-
-    List<int> dimsB;
-    dimsB.add(batchSize);
-    for (int s : shapeB.getDims())
-        dimsB.add(s);
-
-    Shape fullShapeA(dimsA.getArrayView());
-    Shape fullShapeB(dimsB.getArrayView());
-
-    // 2. Bind Inputs
     Dictionary<Expr, InputInfo> inputs;
 
     // Bind A: InputInfo(Shape, Buffer, Offset)
-    inputs.add(inputAExpr, InputInfo(fullShapeA, inputA));
+    inputs.add(inputAExpr, InputInfo(inputA));
 
     // Bind B
-    inputs.add(inputBExpr, InputInfo(fullShapeB, inputB));
+    inputs.add(inputBExpr, InputInfo(inputB));
 
-    // 3. Execute
     // The kernel will resolve the output shape (which is A's shape) and dispatch.
     kernel->queueExecute(task, result, inputs);
 }

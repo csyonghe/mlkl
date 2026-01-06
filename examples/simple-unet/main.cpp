@@ -10,6 +10,7 @@
 #include "torch-reader.h"
 
 #include <chrono>
+#include <cmath>
 #include <random>
 
 static const ExampleResources resourceBase("simple-unet");
@@ -93,13 +94,16 @@ struct SimpleUNetProgram : public TestBase
         int inferenceSteps = 50;
         DDIMSampler sampler(gInferencingCtx, 500, 50);
 
-        auto imageAStorage = gInferencingCtx->createPersistentBuffer(
+        auto imageAStorage = gInferencingCtx->createTensor(
+            ElementType::Float32,
+            Shape(1, imageSize, imageSize, inputChannelCount),
+            inputImageData.getCount() * sizeof(float),
             inputImageData.getBuffer(),
-            inputImageData.getCount() * sizeof(float),
             "imageA");
-        auto imageA = BufferView(imageAStorage);
-        auto imageB = gInferencingCtx->allocScratchBuffer(
-            inputImageData.getCount() * sizeof(float),
+        auto imageA = imageAStorage->getView();
+        auto imageB = gInferencingCtx->allocScratchTensor(
+            ElementType::Float32,
+            Shape(1, imageSize, imageSize, inputChannelCount),
             "imageB");
         auto outputImage = imageA;
         static const int largePrime = 15485863;
@@ -108,15 +112,85 @@ struct SimpleUNetProgram : public TestBase
         gInferencingCtx->pushAllocScope();
         SLANG_DEFER(gInferencingCtx->popAllocScope());
 
-        auto predictedNoise = gInferencingCtx->allocScratchBuffer(
-            inputImageData.getCount() * sizeof(float),
+        auto predictedNoise = gInferencingCtx->allocScratchTensor(
+            ElementType::Float32,
+            Shape(1, imageSize, imageSize, inputChannelCount),
             "predictedNoise");
         for (int step = inferenceSteps - 1; step >= 0; step--)
         {
             // Use 't' for the model, but 'step' for the loop logic
             int t = sampler.timesteps[step];
-            model.queueExecute(task, predictedNoise, imageA, imageSize, imageSize, t, 1);
-            sampler.step(task, imageB, imageA, predictedNoise, step, Shape(imageSize, imageSize));
+            model.queueExecute(task, predictedNoise, imageA, t);
+
+            sampler.step(task, imageB, imageA, predictedNoise, step);
+
+            // Debug: Check intermediate tensors on first step
+            if (step == inferenceSteps - 1)
+            {
+                task.execute(); // Execute what we have so far
+
+                // Check predicted noise
+                auto noiseData = gInferencingCtx->readBuffer<float>(predictedNoise);
+                float minVal = noiseData[0], maxVal = noiseData[0], sum = 0;
+                for (auto v : noiseData)
+                {
+                    minVal = std::min(minVal, v);
+                    maxVal = std::max(maxVal, v);
+                    sum += v;
+                }
+                printf(
+                    "Step %d: predictedNoise stats - min=%.4f, max=%.4f, mean=%.4f\n",
+                    step,
+                    minVal,
+                    maxVal,
+                    sum / noiseData.getCount());
+
+                // Check sampler output (imageB after sampler.step)
+                auto samplerOutput = gInferencingCtx->readBuffer<float>(imageB);
+                float sMinVal = samplerOutput[0], sMaxVal = samplerOutput[0], sSum = 0;
+                for (auto v : samplerOutput)
+                {
+                    sMinVal = std::min(sMinVal, v);
+                    sMaxVal = std::max(sMaxVal, v);
+                    sSum += v;
+                }
+                printf(
+                    "Step %d: sampler output stats - min=%.4f, max=%.4f, mean=%.4f\n",
+                    step,
+                    sMinVal,
+                    sMaxVal,
+                    sSum / samplerOutput.getCount());
+
+                // Check for NaN or extreme values
+                if (std::isnan(sSum) || std::isinf(sSum))
+                {
+                    printf("WARNING: Detected NaN/Inf in sampler output!\n");
+                }
+
+                task = gInferencingCtx->createTask(); // Create new task for remaining work
+            }
+
+            // Also check a middle step and the last step
+            if (step == inferenceSteps / 2 || step == 0)
+            {
+                task.execute();
+                auto imgData = gInferencingCtx->readBuffer<float>(imageB);
+                float minV = imgData[0], maxV = imgData[0], sumV = 0;
+                for (auto v : imgData)
+                {
+                    minV = std::min(minV, v);
+                    maxV = std::max(maxV, v);
+                    sumV += v;
+                }
+                printf(
+                    "Step %d: imageB stats - min=%.4f, max=%.4f, mean=%.4f\n",
+                    step,
+                    minV,
+                    maxV,
+                    sumV / imgData.getCount());
+                task = gInferencingCtx->createTask();
+            }
+
             outputImage = imageB;
             Swap(imageA, imageB);
         }
@@ -129,7 +203,22 @@ struct SimpleUNetProgram : public TestBase
         renderDocEndFrame();
 
         // Read back final image
+        printf(
+            "Output tensor shape: [%d, %d, %d, %d], element count: %zu\n",
+            outputImage.shape[0],
+            outputImage.shape[1],
+            outputImage.shape[2],
+            outputImage.shape[3],
+            outputImage.shape.getElementCount());
+        printf(
+            "Expected: [1, %d, %d, %d], element count: %zu\n",
+            imageSize,
+            imageSize,
+            outputChannelCount,
+            (size_t)(imageSize * imageSize * outputChannelCount));
+
         List<float> outputImageData = gInferencingCtx->readBuffer<float>(outputImage);
+        printf("Read %zu floats from output buffer\n", outputImageData.getCount());
 
         // Save to disk as png
         writeImagePNG("output.png", imageSize, imageSize, outputChannelCount, outputImageData);

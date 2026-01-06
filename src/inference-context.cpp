@@ -163,6 +163,42 @@ ComPtr<rhi::IBuffer> InferencingContext::createPersistentBuffer(
     return buffer;
 }
 
+RefPtr<Tensor> InferencingContext::createTensor(
+    ElementType elementType,
+    const Shape& shape,
+    size_t initialDataSize,
+    const void* initialData,
+    const char* label)
+{
+    RefPtr<Tensor> tensor = new Tensor();
+    tensor->elementType = elementType;
+    tensor->shape = shape;
+    size_t bufferSize = tensor->getBufferSize();
+    if (initialData != nullptr && bufferSize > initialDataSize)
+    {
+        reportError(
+            "Initial data size %zu is smaller than tensor buffer size %zu\n",
+            initialDataSize,
+            bufferSize);
+        return nullptr;
+    }
+    tensor->buffer = createPersistentBuffer(initialData, bufferSize, label);
+    return tensor;
+}
+
+TensorView InferencingContext::allocScratchTensor(
+    ElementType elementType,
+    const Shape& shape,
+    const char* label)
+{
+    TensorView tensorView = {};
+    tensorView.elementType = elementType;
+    tensorView.shape = shape;
+    size_t bufferSize = tensorView.getBufferSize();
+    tensorView.bufferView = allocScratchBuffer(bufferSize, label);
+    return tensorView;
+}
+
 ComPtr<rhi::IShaderObject> InferencingTask::createKernelParamObject(
     slang::TypeLayoutReflection* typeLayout)
 {

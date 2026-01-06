@@ -161,7 +161,8 @@ SlangResult Conv2DKernel::loadParams(
     return SLANG_OK;
 }
 
-BufferView Conv2DKernel::allocateResultBuffer(
+TensorView Conv2DKernel::allocateResultBuffer(
+    ElementType elementType,
     int inputWidth,
     int inputHeight,
     int padding,
@@ -175,8 +176,9 @@ BufferView Conv2DKernel::allocateResultBuffer(
                               String(outChannels) + "_B" + String(batchSize);
 
     // Allocation includes BatchSize
-    auto outputBuffer = context->allocScratchBuffer(
-        batchSize * outputWidth * outputHeight * outChannels * sizeof(float),
+    auto outputBuffer = context->allocScratchTensor(
+        elementType,
+        Shape(batchSize, outputHeight, outputWidth, outChannels),
         resultBufferName.getBuffer());
     return outputBuffer;
 }
@@ -198,12 +200,19 @@ struct Conv2DKernelParams
 void Conv2DKernel::queueExecute(
     InferencingTask& task,
     EvalContext& ctx,
-    BufferView output,
-    int inputWidth,
-    int inputHeight,
-    int padding,
-    int batchSize)
+    TensorView output,
+    int padding)
 {
+    auto inputShape = inputProgram.resolveShape(ctx);
+    if (inputShape.dims.getLast() != inChannels)
+        throw std::runtime_error("Conv2DKernel: Input channel count mismatch.");
+    if (inputShape.getRank() != 4)
+    {
+        throw std::runtime_error("Conv2DKernel: Input shape must be [B, H, W, C].");
+    }
+    int batchSize = inputShape[0];
+    int inputHeight = inputShape[1];
+    int inputWidth = inputShape[2];
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
 
@@ -214,7 +223,7 @@ void Conv2DKernel::queueExecute(
 
     SinkExprEvalContext sinkContext;
     sinkContext.outputBuffer = output;
-    sinkContext.logicalShape = Shape(batchSize, outputWidth, outputHeight, outChannels);
+    sinkContext.logicalShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
     sinkExpr.node->pack(writer, sinkContext);
     writer.align(8);
     writer.write(weightsBuffer->getDeviceAddress());
@@ -271,12 +280,9 @@ void Conv2DKernel::queueExecute(
 
 void Conv2DKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    BufferView inputImage,
-    int inputWidth,
-    int inputHeight,
-    int padding,
-    int batchSize)
+    TensorView output,
+    TensorView inputImage,
+    int padding)
 {
     EvalContext ctx;
     if (inputProgram.bufferNodes.getCount() > 1)
@@ -287,11 +293,7 @@ void Conv2DKernel::queueExecute(
     {
         throw std::runtime_error("The Conv2D kernel does not take any input buffers.");
     }
-    ctx.inputs.add(
-        inputProgram.bufferNodes[0],
-        InputInfo(Shape(batchSize, inputWidth, inputHeight, inChannels), inputImage));
+    ctx.inputs.add(inputProgram.bufferNodes[0], inputImage);
 
-    auto expectedInputSize = batchSize * inputWidth * inputHeight * inChannels * sizeof(float);
-    SLANG_ASSERT(inputImage.size == expectedInputSize);
-    queueExecute(task, ctx, output, inputWidth, inputHeight, padding, batchSize);
+    queueExecute(task, ctx, output, padding);
 }

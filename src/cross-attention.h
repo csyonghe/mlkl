@@ -40,13 +40,13 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    BufferView allocateResultBuffer(int batchSize, int seqQ, int dim);
+    TensorView allocateResultBuffer(ElementType elementType, int batchSize, int seqQ, int dim);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        BufferView inputLatent,
-        BufferView contextEmb,
+        TensorView output,
+        TensorView inputLatent,
+        TensorView contextEmb,
         int batchSize,
         int seqQ,
         int seqKV,

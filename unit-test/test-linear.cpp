@@ -47,15 +47,15 @@ SlangResult testLinear(InferencingContext* context)
     hInput.setCount(batchSize * inDim);
     for (Index i = 0; i < hInput.getCount(); ++i)
         hInput[i] = (float)i * 0.1f;
-    auto inputBuffer = context->createPersistentBuffer(hInput);
+    auto inputBuffer = context->createTensor(ElementType::Float32, Shape(batchSize, inDim), hInput);
 
     // Allocate Output Buffer
     // Note: Because of PermuteSink {1, 0}, the physical shape is [Out, Batch]
-    auto outputBuffer = context->allocScratchBuffer(batchSize * outDim * sizeof(float));
+    auto outputBuffer = context->allocScratchTensor(ElementType::Float32, Shape(outDim, batchSize));
 
     // Execute
     auto task = context->createTask();
-    kernel.queueExecute(task, BufferView(outputBuffer), inputBuffer, batchSize);
+    kernel.queueExecute(task, outputBuffer, inputBuffer->getView());
     task.execute();
 
     // CPU Reference Calculation
@@ -141,7 +141,7 @@ SlangResult testLinearPartitioned(InferencingContext* context)
     hInput.setCount(batchSize * inDim);
     for (Index i = 0; i < hInput.getCount(); ++i)
         hInput[i] = (float)i * 0.1f;
-    auto inputBuffer = context->createPersistentBuffer(hInput);
+    auto inputBuffer = context->createTensor(ElementType::Float32, Shape(batchSize, inDim), hInput);
 
     // 4. Resolve Physical Shape and Allocate
     // This calls our recursive resolvePhysicalShape:
@@ -149,12 +149,11 @@ SlangResult testLinearPartitioned(InferencingContext* context)
     Shape logicalShape = {batchSize, outDim};
     Shape physicalShape = outputSink.node->resolvePhysicalShape(logicalShape);
 
-    auto outputBuffer =
-        context->allocScratchBuffer(physicalShape.getElementCount() * sizeof(float));
+    auto outputBuffer = context->allocScratchTensor(ElementType::Float32, physicalShape);
 
     // 5. Execute
     auto task = context->createTask();
-    kernel.queueExecute(task, BufferView(outputBuffer), inputBuffer, batchSize);
+    kernel.queueExecute(task, outputBuffer, inputBuffer->getView());
     task.execute();
 
     // 6. CPU Reference Calculation

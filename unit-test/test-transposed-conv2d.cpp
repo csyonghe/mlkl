@@ -9,12 +9,16 @@ SlangResult testTransposedConv2D(InferencingContext* ctx)
     float convWeights[9] = {0.1, 0.5, 0.2, 0.5, 1.0, 0.5, 0.2, 0.5, 0.4};
     float convBiases[] = {1000.0f};
     auto readInput = [&](int x, int y) { return inputData[y * 5 + x]; };
-    auto inputBuffer = ctx->createPersistentBuffer(inputData, 5 * 5 * sizeof(float));
+    auto inputBuffer = ctx->createTensor(
+        ElementType::Float32,
+        Shape(1, 5, 5, 1),
+        5 * 5 * sizeof(float),
+        inputData);
     TransposedConv2DKernel transposedConvKernel = TransposedConv2DKernel(ctx, 4, 3, 1, 1, 1);
     auto task = ctx->createTask();
     transposedConvKernel.loadParams(3, 1, convWeights, convBiases);
-    auto outputBuffer = transposedConvKernel.allocateResultBuffer(5, 5, 1, 1);
-    transposedConvKernel.queueExecute(task, outputBuffer, BufferView(inputBuffer), 5, 5, 1);
+    auto outputBuffer = transposedConvKernel.allocateResultBuffer(ElementType::Float32, 5, 5, 1, 1);
+    transposedConvKernel.queueExecute(task, outputBuffer, inputBuffer->getView(), 1);
     auto readWeight = [&](int x, int y) { return convWeights[y * 3 + x]; };
     renderDocBeginFrame();
     task.execute();

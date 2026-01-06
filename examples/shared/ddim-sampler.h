@@ -79,11 +79,10 @@ public:
     // Takes the Loop Index 'i' (from inference_steps-1 down to 0)
     int step(
         InferencingTask& task,
-        BufferView out_x_prev,
-        BufferView in_x_t,
-        BufferView in_eps,
-        int index,
-        const Shape& shape)
+        TensorView out_x_prev,
+        TensorView in_x_t,
+        TensorView in_eps,
+        int index)
     {
         // 1. Map Index -> Training Timestep
         // Current Step t
@@ -121,8 +120,8 @@ public:
 
         // 4. Execute
         Dictionary<Expr, InputInfo> inputs;
-        inputs.add(x_t, InputInfo(shape, in_x_t));
-        inputs.add(eps, InputInfo(shape, in_eps));
+        inputs.add(x_t, in_x_t);
+        inputs.add(eps, in_eps);
         inputs.add(c1, InputInfo(val_c1));
         inputs.add(c2, InputInfo(val_c2));
 

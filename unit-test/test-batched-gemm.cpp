@@ -54,8 +54,8 @@ SlangResult testBatchGemm(InferencingContext* ctx)
     // Standard case: A @ B^T
     cpuBatchGemm(A.getBuffer(), B.getBuffer(), Expected.getBuffer(), batch, M, N, K, false, true);
 
-    auto bufA = ctx->createPersistentBuffer(A, "GemmA");
-    auto bufB = ctx->createPersistentBuffer(B, "GemmB");
+    auto bufA = ctx->createTensor(ElementType::Float32, Shape(batch, M, K), A, "GemmA");
+    auto bufB = ctx->createTensor(ElementType::Float32, Shape(batch, N, K), B, "GemmB");
 
     // Construct Exprs
     auto exprA = buffer();
@@ -65,20 +65,10 @@ SlangResult testBatchGemm(InferencingContext* ctx)
     auto exprOut = kernelOutput();
 
     BatchGemmKernel kernel(ctx, exprA, exprB, exprC, bufferSink(), exprOut);
-    auto bufOut = ctx->allocScratchBuffer(batch * M * N * sizeof(float), "GemmOut");
+    auto bufOut = ctx->allocScratchTensor(ElementType::Float32, Shape(batch, M, N), "GemmOut");
 
     auto task = ctx->createTask();
-    kernel.queueExecute(
-        task,
-        bufOut,
-        M,
-        N,
-        K,
-        batch,
-        1.0f,
-        0.0f,
-        {InputInfo(Shape{batch, M, K}, BufferView(bufA)),
-         InputInfo(Shape{batch, N, K}, BufferView(bufB))});
+    kernel.queueExecute(task, bufOut, 1.0f, 0.0f, {bufA->getView(), bufB->getView()});
     task.execute();
 
     if (!checkOutput(ctx, bufOut, Expected))
@@ -153,9 +143,9 @@ SlangResult testFusedBatchGemm(InferencingContext* ctx)
         N,
         K);
 
-    auto bufA = ctx->createPersistentBuffer(dataA, "bufA");
-    auto bufB = ctx->createPersistentBuffer(dataB, "bufB");
-    auto bufC = ctx->createPersistentBuffer(dataC, "bufC");
+    auto bufA = ctx->createTensor(ElementType::Float32, Shape(B, K, M), dataA, "bufA");
+    auto bufB = ctx->createTensor(ElementType::Float32, Shape(B, K, N), dataB, "bufB");
+    auto bufC = ctx->createTensor(ElementType::Float32, Shape(B, N, M), dataC, "bufC");
 
     // Expressions
     // A: [B, K, M] -> Transpose(1, 2) -> [B, M, K]
@@ -173,14 +163,14 @@ SlangResult testFusedBatchGemm(InferencingContext* ctx)
     BatchGemmKernel kernel(ctx, exprA, exprB, exprC, sinkExpr, exprOut);
 
     auto task = ctx->createTask();
-    auto bufOut = kernel.allocateResultBuffer(B, M, N);
+    auto bufOut = kernel.allocateResultBuffer(ElementType::Float32, B, M, N);
 
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(bufAExpr, InputInfo(Shape{B, K, M}, BufferView(bufA)));
-    inputs.add(leafB, InputInfo(Shape{B, K, N}, BufferView(bufB)));
-    inputs.add(exprC, InputInfo(Shape{B, M, N}, BufferView(bufC)));
+    inputs.add(bufAExpr, bufA->getView());
+    inputs.add(leafB, bufB->getView());
+    inputs.add(exprC, bufC->getView());
 
-    kernel.queueExecute(task, bufOut, M, N, K, B, 1.0f, 1.0f, inputs);
+    kernel.queueExecute(task, bufOut, 1.0f, 1.0f, inputs);
     task.execute();
 
     if (!checkOutput(ctx, bufOut, expected))

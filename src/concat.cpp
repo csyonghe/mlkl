@@ -39,7 +39,10 @@ ConcatKernel::ConcatKernel(InferencingContext* ctx, int operandCount)
     elementwiseKernel = new ElementwiseKernel(context, rootExpr);
 }
 
-BufferView ConcatKernel::allocateResultBuffer(ArrayView<Shape> inputShapes, int axis)
+TensorView ConcatKernel::allocateResultBuffer(
+    ElementType elementType,
+    ArrayView<Shape> inputShapes,
+    int axis)
 {
     if (inputShapes.getCount() != operandCount)
         throw std::runtime_error(
@@ -57,20 +60,17 @@ BufferView ConcatKernel::allocateResultBuffer(ArrayView<Shape> inputShapes, int 
         Expr e = mapOperandToExprNode[i];
 
         // Bind runtime data: Shape + Buffer Pointer
-        bindings.add(e, InputInfo(inputShapes[i], {}));
+        bindings.add(e, TensorView(BufferView(), elementType, inputShapes[i]));
     }
-    return elementwiseKernel->allocateResultBuffer(bindings);
+    return elementwiseKernel->allocateResultBuffer(elementType, bindings);
 }
 
 void ConcatKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    ArrayView<BufferView> inputs,
-    ArrayView<Shape> inputShapes,
+    TensorView output,
+    ArrayView<TensorView> inputs,
     int axis)
 {
-    if (inputs.getCount() != inputShapes.getCount())
-        throw std::runtime_error("ConcatKernel: Input buffer count and shape count mismatch");
     if (inputs.getCount() != operandCount)
         throw std::runtime_error(
             "ConcatKernel: Mismatched kernel operand count configuration and actual operand count");
@@ -87,7 +87,7 @@ void ConcatKernel::queueExecute(
         Expr e = mapOperandToExprNode[i];
 
         // Bind runtime data: Shape + Buffer Pointer
-        bindings.add(e, InputInfo(inputShapes[i], inputs[i]));
+        bindings.add(e, inputs[i]);
     }
 
     // 4. Execute

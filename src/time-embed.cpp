@@ -23,10 +23,11 @@ SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView TimeEmbedingKernel::allocateResultBuffer(int batchSize)
+TensorView TimeEmbedingKernel::allocateResultBuffer(ElementType elementType, int batchSize)
 {
-    return context->allocScratchBuffer(
-        batchSize * outputChannels * sizeof(float),
+    return context->allocScratchTensor(
+        elementType,
+        Shape(batchSize, outputChannels),
         "time_embed_output");
 }
 
@@ -42,12 +43,10 @@ struct TimeEmbeddingKernelParams
     uint32_t batchSize;
 };
 
-void TimeEmbedingKernel::queueExecute(
-    InferencingTask& task,
-    BufferView output,
-    uint32_t timeStep,
-    int batchSize)
+void TimeEmbedingKernel::queueExecute(InferencingTask& task, TensorView output, uint32_t timeStep)
 {
+    output = output.ensureRank(2);
+
     TimeEmbeddingKernelParams params = {};
     params.output = output.getDeviceAddress();
     params.weights = weightsBuffer->getDeviceAddress();
@@ -55,10 +54,10 @@ void TimeEmbedingKernel::queueExecute(
     params.embeddingDim = outputChannels;
     params.maxPeriod = 10000.0f;
     params.timeStep = timeStep;
-    params.batchSize = batchSize;
+    params.batchSize = (uint32_t)output.shape.dims[0];
 
     // Dispatch: X=Channels, Y=Batch
     // Group size is 32 in X.
     uint32_t threadsX = (outputChannels + 31) / 32;
-    task.dispatchKernel(pipeline, threadsX, batchSize, 1, params);
+    task.dispatchKernel(pipeline, threadsX, params.batchSize, 1, params);
 }

@@ -84,47 +84,6 @@ String getSlangUnaryOpName(UnaryOp op)
     }
 }
 
-// [Shape Implementation Unchanged] ...
-size_t Shape::getElementCount() const
-{
-    if (isScalar())
-        return 1;
-    size_t count = 1;
-    for (Index i = 0; i < dims.getCount(); i++)
-        count *= dims[i];
-    return count;
-}
-bool Shape::operator==(const Shape& other) const
-{
-    if (dims.getCount() != other.dims.getCount())
-        return false;
-    for (Index i = 0; i < dims.getCount(); i++)
-        if (dims[i] != other.dims[i])
-            return false;
-    return true;
-}
-bool Shape::isCompatibleWith(const Shape& other) const
-{
-    if (this->isScalar() || other.isScalar())
-        return true;
-    return *this == other;
-}
-
-List<int> computeDenseStrides(const Shape& shape)
-{
-    List<int> strides;
-    for (int i = 0; i < shape.getRank(); i++)
-        strides.add(0);
-
-    int s = 1;
-    for (int i = shape.getRank() - 1; i >= 0; i--)
-    {
-        strides[i] = s;
-        s *= shape[i];
-    }
-    return strides;
-}
-
 String genExprType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
 String genDefType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
 ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);
@@ -139,7 +98,7 @@ Shape BufferNode::resolveShape(const EvalContext& ctx) const
 {
     InputInfo info;
     if (ctx.inputs.tryGetValue((ExprNode*)this, info))
-        return info.shape;
+        return info.tensorView.shape;
     return Shape();
 }
 
@@ -149,9 +108,9 @@ void BufferNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     writer.align(8);
     if (ctx.inputs.tryGetValue((ExprNode*)this, info))
     {
-        if (info.buffer)
+        if (info.tensorView)
         {
-            writer.write(info.buffer.getDeviceAddress());
+            writer.write(info.tensorView.getDeviceAddress());
             return;
         }
     }
@@ -287,6 +246,7 @@ void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 PermuteNode::PermuteNode(Expr inner, ArrayView<int> dims)
     : inner(inner), dims(dims)
 {
+    validateDims();
 }
 
 PermuteNode::PermuteNode(Expr inner, const std::initializer_list<int>& dims)
@@ -294,6 +254,7 @@ PermuteNode::PermuteNode(Expr inner, const std::initializer_list<int>& dims)
 {
     for (auto d : dims)
         this->dims.add(d);
+    validateDims();
 }
 
 
@@ -372,6 +333,26 @@ void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
     writer.writeBytes(outDimsArr, sizeof(outDimsArr));
     writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
+}
+
+void PermuteNode::validateDims()
+{
+    Index maxRank = dims.getCount();
+    if (maxRank > 8)
+        throw std::runtime_error("Permute: Max rank supported is 8");
+
+    Array<bool, 8> seen;
+    seen.setCount(maxRank);
+    for (Index i = 0; i < seen.getCount(); i++)
+        seen[i] = false;
+    for (auto d : dims)
+    {
+        if (d < 0 || d >= maxRank)
+            throw std::runtime_error("Permute: Dimension index out of range");
+        if (seen[d])
+            throw std::runtime_error("Permute: Duplicate dimension index");
+        seen[d] = true;
+    }
 }
 
 // --- GatherNode ---
@@ -493,7 +474,7 @@ int ConcatNode::getAxis(const EvalContext& ctx) const
     auto axisInput = ctx.inputs.tryGetValue(axis.node);
     if (!axisInput)
         throw std::runtime_error("axis of concat not provided");
-    if (axisInput->buffer)
+    if (axisInput->tensorView)
         throw std::runtime_error("axis of concat must be static const");
     return (int)axisInput->scalarValue;
 }
@@ -592,6 +573,12 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
 void BufferSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
 {
+    // Verify that the logical shape matches the output buffer shape.
+    if (evalCtx.logicalShape != evalCtx.outputBuffer.shape)
+    {
+        throw std::runtime_error("BufferSink: Logical shape does not match output buffer shape.");
+    }
+
     // Ensure the output pointer is aligned for the GPU
     writer.align(8);
     writer.write(evalCtx.outputBuffer.getDeviceAddress());
@@ -1201,7 +1188,9 @@ ElementwiseKernel::ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
     pipeline = ctx->createComputePipeline("materialize", makeArrayView(typeArgs));
 }
 
-BufferView ElementwiseKernel::allocateResultBuffer(const Dictionary<Expr, InputInfo>& inputs)
+TensorView ElementwiseKernel::allocateResultBuffer(
+    ElementType elementType,
+    const Dictionary<Expr, InputInfo>& inputs)
 {
     EvalContext ctx;
     for (auto it : inputs)
@@ -1210,16 +1199,21 @@ BufferView ElementwiseKernel::allocateResultBuffer(const Dictionary<Expr, InputI
     }
     Shape resultShape = root.node->resolveShape(ctx);
     size_t count = resultShape.getElementCount();
-    return context->allocScratchBuffer(count * sizeof(float), "elementwise");
+    return context->allocScratchTensor(elementType, resultShape, "elementwise");
 }
 
-void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, BufferView output)
+void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, TensorView output)
 {
     Shape resultShape = root.node->resolveShape(ctx);
     size_t count = resultShape.getElementCount();
 
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
+
+    if (output.shape != resultShape)
+    {
+        throw std::runtime_error("ElementwiseKernel: Output shape mismatch");
+    }
 
     writer.write(output.getDeviceAddress());
     writer.write((uint32_t)count);
@@ -1239,7 +1233,7 @@ void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, Bu
 
 void ElementwiseKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
+    TensorView output,
     const Dictionary<Expr, InputInfo>& inputs)
 {
     EvalContext ctx;
@@ -1250,7 +1244,7 @@ void ElementwiseKernel::queueExecute(
 
 void ElementwiseKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
+    TensorView output,
     ArrayView<InputInfo> inputs)
 {
     EvalContext ctx;
@@ -1267,7 +1261,7 @@ void ElementwiseKernel::queueExecute(
 
 void ElementwiseKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
+    TensorView output,
     const std::initializer_list<InputInfo>& inputs)
 {
     EvalContext ctx;

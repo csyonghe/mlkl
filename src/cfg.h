@@ -16,14 +16,11 @@ class ClassifierFreeGuidanceKernel : public RefObject
 public:
     ClassifierFreeGuidanceKernel(InferencingContext* context);
 
-    BufferView allocateResultBuffer(int width, int height, int channels);
+    TensorView allocateResultBuffer(ElementType elementType, int width, int height, int channels);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        BufferView batchedInput,
-        int width,
-        int height,
-        int channels,
+        TensorView output,
+        TensorView batchedInput,
         float guidanceScale);
 };

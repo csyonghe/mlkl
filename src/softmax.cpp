@@ -6,18 +6,12 @@ SoftmaxKernel::SoftmaxKernel(InferencingContext* ctx)
     pipeline = context->createComputePipeline("softmax", {});
 }
 
-BufferView SoftmaxKernel::allocateResultBuffer(int rows, int cols)
+TensorView SoftmaxKernel::allocateResultBuffer(ElementType elementType, int rows, int cols)
 {
-    size_t size = (size_t)rows * cols * sizeof(float);
-    return context->allocScratchBuffer(size, "Softmax_Result");
+    return context->allocScratchTensor(elementType, Shape(rows, cols), "Softmax_Result");
 }
 
-void SoftmaxKernel::queueExecute(
-    InferencingTask& task,
-    BufferView output,
-    BufferView input,
-    int rows,
-    int cols)
+void SoftmaxKernel::queueExecute(InferencingTask& task, TensorView output, TensorView input)
 {
     struct
     {
@@ -25,6 +19,17 @@ void SoftmaxKernel::queueExecute(
         uint32_t stride;
         uint32_t rowCount; // Added
     } params;
+
+    if (input.shape.getRank() != 2)
+    {
+        throw std::runtime_error("SoftmaxKernel: Input must be a rank 2 tensor.");
+    }
+    if (input.shape != output.shape)
+    {
+        throw std::runtime_error("SoftmaxKernel: Input and output shapes must match.");
+    }
+    int rows = (int)input.shape.dims[0];
+    int cols = (int)input.shape.dims[1];
 
     params.input = input.getDeviceAddress();
     params.output = output.getDeviceAddress();

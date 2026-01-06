@@ -1,5 +1,7 @@
 #include "gather.h"
 
+ElementType kGatherKernelWeightsElementType = ElementType::Float32;
+
 GatherKernel::GatherKernel(InferencingContext* ctx, int nClasses, int dim)
     : context(ctx), numClasses(nClasses), embeddingDim(dim)
 {
@@ -35,27 +37,47 @@ SlangResult GatherKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView GatherKernel::allocateResultBuffer(int batchSize)
+TensorView GatherKernel::allocateResultBuffer(ElementType elementType, int batchSize)
 {
     size_t size = (size_t)batchSize * embeddingDim * sizeof(float);
-    return context->allocScratchBuffer(size, "GatherOutput");
+    return context->allocScratchTensor(elementType, Shape(batchSize, embeddingDim), "GatherOutput");
 }
 
-void GatherKernel::queueExecute(
-    InferencingTask& task,
-    BufferView output,
-    BufferView inputLabels,
-    int batchSize)
+void GatherKernel::queueExecute(InferencingTask& task, TensorView output, TensorView inputLabels)
 {
+    // Validate shapes.
+    if (inputLabels.shape.getRank() != 1)
+    {
+        throw std::runtime_error("Input labels must be a 1D tensor [BatchSize]");
+    }
+    if (output.shape.getRank() != 2)
+    {
+        throw std::runtime_error("Output tensor must be a 2D tensor [BatchSize, EmbeddingDim]");
+    }
+    if (output.shape[0] != inputLabels.shape[0])
+    {
+        throw std::runtime_error(
+            "Output tensor first dimension (BatchSize) must match input labels size.");
+    }
+    if (output.shape[1] != embeddingDim)
+    {
+        throw std::runtime_error("Output tensor second dimension must match embedding dimension.");
+    }
+
     Dictionary<Expr, InputInfo> inputs;
 
     // Bind the Weights (Table)
     // Shape: [NumClasses, EmbeddingDim]
-    inputs.add(tableExpr, InputInfo(Shape{numClasses, embeddingDim}, weightsBuffer));
+    inputs.add(
+        tableExpr,
+        TensorView(
+            weightsBuffer,
+            kGatherKernelWeightsElementType,
+            Shape{numClasses, embeddingDim}));
 
     // Bind the Labels (Indices)
     // Shape: [BatchSize]
-    inputs.add(indicesExpr, InputInfo(Shape{batchSize}, inputLabels));
+    inputs.add(indicesExpr, inputLabels);
 
     // Execute
     kernel->queueExecute(task, output, inputs);

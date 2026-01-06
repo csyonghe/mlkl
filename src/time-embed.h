@@ -16,10 +16,6 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader);
 
-    BufferView allocateResultBuffer(int batchSize);
-    void queueExecute(
-        InferencingTask& task,
-        BufferView output,
-        uint32_t timeStep,
-        int batchSize = 1);
+    TensorView allocateResultBuffer(ElementType elementType, int batchSize);
+    void queueExecute(InferencingTask& task, TensorView output, uint32_t timeStep);
 };

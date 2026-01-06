@@ -71,18 +71,23 @@ SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
     return SLANG_OK;
 }
 
-BufferView CrossAttentionKernel::allocateResultBuffer(int batchSize, int seqQ, int dim)
+TensorView CrossAttentionKernel::allocateResultBuffer(
+    ElementType elementType,
+    int batchSize,
+    int seqQ,
+    int dim)
 {
-    return context->allocScratchBuffer(
-        (size_t)batchSize * seqQ * dim * sizeof(float),
+    return context->allocScratchTensor(
+        elementType,
+        Shape(batchSize * seqQ, dim),
         "CrossAttn_Final");
 }
 
 void CrossAttentionKernel::queueExecute(
     InferencingTask& task,
-    BufferView finalOutput,
-    BufferView inputLatent,
-    BufferView contextEmb,
+    TensorView finalOutput,
+    TensorView inputLatent,
+    TensorView contextEmb,
     int batchSize,
     int seqQ,
     int seqKV,
@@ -95,28 +100,30 @@ void CrossAttentionKernel::queueExecute(
     float scale = 1.0f / sqrtf((float)headDim);
 
     // 1. Projections (Remain Interleaved: [B, S, H, D])
-    BufferView bufQ = projQ->allocateResultBuffer(batchSize * seqQ);
-    projQ->queueExecute(task, bufQ, inputLatent, batchSize * seqQ);
+    TensorView bufQ = projQ->allocateResultBuffer(finalOutput.elementType, batchSize * seqQ);
+    projQ->queueExecute(task, bufQ, inputLatent);
 
-    BufferView bufKV =
-        task.context->allocScratchBuffer(batchSize * seqKV * channelDim * 2 * sizeof(float));
+    TensorView bufKV = task.context->allocScratchTensor(
+        finalOutput.elementType,
+        Shape(2, batchSize * seqKV, channelDim));
 
     // Perform a fused projection to get both K and V, and store them in a single
     // buffer next to each other.
-    projKV->queueExecute(task, bufKV, contextEmb, batchSize * seqKV);
+    projKV->queueExecute(task, bufKV, contextEmb);
 
     // 2. Flash Attention Core
     size_t sizeAttn = (size_t)batchSize * numHeads * seqQ * headDim * sizeof(float);
-    BufferView bufAttnInterleaved = context->allocScratchBuffer(sizeAttn, "Attn_Interleaved");
+    TensorView bufAttnInterleaved = context->allocScratchTensor(
+        finalOutput.elementType,
+        Shape(batchSize, seqQ, numHeads, headDim),
+        "Attn_Interleaved");
 
     Dictionary<Expr, InputInfo> attnInputs;
-    attnInputs.add(exprQ_In, InputInfo(Shape{batchSize, seqQ, numHeads, headDim}, bufQ));
-    attnInputs.add(
-        exprK_In,
-        InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufKV.firstHalf()));
-    attnInputs.add(
-        exprV_In,
-        InputInfo(Shape{batchSize, seqKV, numHeads, headDim}, bufKV.secondHalf()));
+    attnInputs.add(exprQ_In, bufQ.reshape({batchSize, seqQ, numHeads, headDim}));
+
+    Shape shapeKV = {batchSize, numHeads, seqKV, channelDim / numHeads};
+    attnInputs.add(exprK_In, bufKV.slice(0, 1).reshape(shapeKV));
+    attnInputs.add(exprV_In, bufKV.slice(1, 1).reshape(shapeKV));
 
     flashAttn->queueExecute(
         task,
@@ -134,6 +141,5 @@ void CrossAttentionKernel::queueExecute(
     projOut->queueExecute(
         task,
         finalOutput,
-        batchSize * seqQ,
-        {{bufAttnInterleaved, batchSize, seqQ}, {inputLatent, batchSize, seqQ}});
+        {bufAttnInterleaved.reshape({batchSize * seqQ, dim}), inputLatent});
 }

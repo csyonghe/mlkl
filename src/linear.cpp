@@ -52,29 +52,42 @@ SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
 }
 
 
-BufferView LinearKernel::allocateResultBuffer(int batchSize)
+TensorView LinearKernel::allocateResultBuffer(ElementType elementType, int batchSize)
 {
-    auto outputBuffer = context->allocScratchBuffer(
-        batchSize * outputVectorLength * sizeof(float),
+    auto outputBuffer = context->allocScratchTensor(
+        elementType,
+        Shape(batchSize, outputVectorLength),
         "linear_output");
     return outputBuffer;
 }
 
-void LinearKernel::queueExecute(
-    InferencingTask& task,
-    BufferView output,
-    int batchSize,
-    const EvalContext& ctx)
+void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx)
 {
+    // Validate Input/Output Shapes.
+    auto inputShape = inputProgram.resolveShape(ctx);
+    int batchSize = inputShape[0];
+    if (inputShape.getRank() != 2)
+    {
+        throw std::runtime_error("Input tensor must be rank 2 (batch_size, input_size).");
+    }
+    if (inputShape.getDims().getLast() != inputVectorLength)
+    {
+        throw std::runtime_error("Input tensor's last dimension does not match input size.");
+    }
+    if (inputShape.getRank() > 1)
+    {
+        if (inputShape.getDims()[0] != batchSize)
+            throw std::runtime_error("Input tensor's batch size does not match output batch size.");
+    }
+    else
+    {
+        if (batchSize != 1)
+            throw std::runtime_error("Input tensor is missing batch dimension.");
+    }
+
     // 1. Calculate Grid Dimensions
     // tileN covers the output features (N), tileM covers the batch/rows (M)
-    // The outputSize (N) is implicitly handled by the dispatch grid and weights
-    // We'll calculate N based on the weights buffer size if not stored,
-    // but usually, it's safer to have outputSize as a member.
-    // For now, let's assume outputSize is (weightsBuffer->getSize() / sizeof(float)) /
-    // inputVectorLength;
-    int outputSize = (int)((weightsBuffer->getDesc().size / sizeof(float)) / inputVectorLength);
-
+    int outputSize = outputVectorLength;
     int gridX = (outputSize + tileN - 1) / tileN;
     int gridY = (batchSize + tileM - 1) / tileM;
 
@@ -118,8 +131,7 @@ void LinearKernel::queueExecute(
 
 void LinearKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int batchSize,
+    TensorView output,
     const std::initializer_list<InputInfo>& inputs)
 {
     EvalContext ctx;
@@ -134,5 +146,5 @@ void LinearKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     for (auto bufferNode : outputProgram.bufferNodes)
         ctx.inputs.add(bufferNode, consume());
-    return queueExecute(task, output, batchSize, ctx);
+    return queueExecute(task, output, ctx);
 }

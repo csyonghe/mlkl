@@ -58,39 +58,25 @@ public:
 
     SlangResult loadParams(TorchParamReader& reader, bool loadBiass = true);
 
-    BufferView allocateResultBuffer(int batchSize);
+    TensorView allocateResultBuffer(ElementType elementType, int batchSize);
+
+    void queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int batchSize,
-        const EvalContext& ctx);
-
-    void queueExecute(
-        InferencingTask& task,
-        BufferView output,
-        int batchSize,
+        TensorView output,
         const Dictionary<Expr, InputInfo>& inputs)
     {
-        return queueExecute(task, output, batchSize, makeEvalContext(inputs));
+        return queueExecute(task, output, makeEvalContext(inputs));
     }
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        int batchSize,
+        TensorView output,
         const std::initializer_list<InputInfo>& inputs);
 
-    void queueExecute(
-        InferencingTask& task,
-        BufferView output,
-        BufferView inputVector,
-        int batchSize = 1)
+    void queueExecute(InferencingTask& task, TensorView output, TensorView inputVector)
     {
-        return queueExecute(
-            task,
-            output,
-            batchSize,
-            {InputInfo(Shape(batchSize, inputVectorLength), inputVector)});
+        return queueExecute(task, output, std::initializer_list<InputInfo>{inputVector});
     }
 };

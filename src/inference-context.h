@@ -6,6 +6,7 @@
 #include "slang-com-ptr.h"
 #include "slang.h"
 #include "stack-allocator.h"
+#include "tensor.h"
 
 using namespace Slang;
 
@@ -106,6 +107,18 @@ public:
         size_t size,
         const char* label = nullptr);
 
+    RefPtr<Tensor> createTensor(
+        ElementType elementType,
+        const Shape& shape,
+        size_t initialDataSize,
+        const void* initialData = nullptr,
+        const char* label = nullptr);
+
+    TensorView allocScratchTensor(
+        ElementType elementType,
+        const Shape& shape,
+        const char* label = nullptr);
+
     template<typename T>
     List<T> readBuffer(BufferView buffer)
     {
@@ -117,9 +130,36 @@ public:
     }
 
     template<typename T>
+    List<T> readBuffer(TensorView tensorView)
+    {
+        return readBuffer<T>(tensorView.bufferView);
+    }
+
+    template<typename T>
     ComPtr<rhi::IBuffer> createPersistentBuffer(const List<T>& data, const char* label = nullptr)
     {
         return createPersistentBuffer(data.getBuffer(), data.getCount() * sizeof(T), label);
+    }
+
+    template<typename T>
+    RefPtr<Tensor> createTensor(
+        ElementType elementType,
+        const Shape& shape,
+        const List<T>& data,
+        const char* label = nullptr)
+    {
+        if (data.getCount() * sizeof(T) !=
+            shape.getElementCount() * getElementTypeSize(elementType))
+        {
+            throw std::runtime_error("InferencingContext::createTensor: Data size does not match "
+                                     "shape and element type");
+        }
+        return createTensor(
+            elementType,
+            shape,
+            data.getCount() * sizeof(T),
+            data.getBuffer(),
+            label);
     }
 };
 

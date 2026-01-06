@@ -141,11 +141,12 @@ SlangResult testSoftmax(InferencingContext* ctx)
 
     cpuSoftmax(inputData.getBuffer(), expectedOutput.getBuffer(), cols, rows);
 
-    auto inputBuf = ctx->createPersistentBuffer(inputData, "SoftmaxInput");
+    auto inputBuf =
+        ctx->createTensor(ElementType::Float32, Shape(rows, cols), inputData, "SoftmaxInput");
     SoftmaxKernel kernel(ctx);
     auto task = ctx->createTask();
-    auto outputBuf = kernel.allocateResultBuffer(rows, cols);
-    kernel.queueExecute(task, outputBuf, BufferView(inputBuf), rows, cols);
+    auto outputBuf = kernel.allocateResultBuffer(ElementType::Float32, rows, cols);
+    kernel.queueExecute(task, outputBuf, inputBuf->getView());
     task.execute();
 
     if (!checkOutput(ctx, outputBuf, expectedOutput))
@@ -219,12 +220,12 @@ SlangResult testCrossAttentionFull(InferencingContext* ctx)
             return SLANG_FAIL;
     }
 
-    auto bufX = ctx->createPersistentBuffer(x, "CA_X");
-    auto bufC = ctx->createPersistentBuffer(c, "CA_C");
+    auto bufX = ctx->createTensor(ElementType::Float32, Shape(B * SeqQ, Dim), x, "CA_X");
+    auto bufC = ctx->createTensor(ElementType::Float32, Shape(B * SeqKV, ContextDim), c, "CA_C");
     auto task = ctx->createTask();
     ctx->pushAllocScope();
-    auto bufOut = kernel.allocateResultBuffer(B, SeqQ, Dim);
-    kernel.queueExecute(task, bufOut, BufferView(bufX), BufferView(bufC), B, SeqQ, SeqKV, Heads);
+    auto bufOut = kernel.allocateResultBuffer(ElementType::Float32, B, SeqQ, Dim);
+    kernel.queueExecute(task, bufOut, bufX->getView(), bufC->getView(), B, SeqQ, SeqKV, Heads);
     task.execute();
     ctx->popAllocScope();
 
@@ -347,15 +348,15 @@ SlangResult testFlashAttention(InferencingContext* ctx)
     RefPtr<FlashAttentionKernel> kernel =
         new FlashAttentionKernel(ctx, eQ, eK, eV, eOutFunc, 32, 32, headDim);
 
-    auto bufQ = ctx->createPersistentBuffer(hostQ, "Q");
-    auto bufK = ctx->createPersistentBuffer(hostK, "K");
-    auto bufV = ctx->createPersistentBuffer(hostV, "V");
-    auto bufOut = kernel->allocateResultBuffer(Sq, H, B);
+    auto bufQ = ctx->createTensor(ElementType::Float32, Shape{B, H, Sq, headDim}, hostQ, "Q");
+    auto bufK = ctx->createTensor(ElementType::Float32, Shape{B, H, Skv, headDim}, hostK, "K");
+    auto bufV = ctx->createTensor(ElementType::Float32, Shape{B, H, Skv, headDim}, hostV, "V");
+    auto bufOut = kernel->allocateResultBuffer(ElementType::Float32, Sq, H, B);
 
     Dictionary<Expr, InputInfo> inputs;
-    inputs.add(eQ, InputInfo(Shape{B, H, Sq, headDim}, bufQ));
-    inputs.add(eK, InputInfo(Shape{B, H, Skv, headDim}, bufK));
-    inputs.add(eV, InputInfo(Shape{B, H, Skv, headDim}, bufV));
+    inputs.add(eQ, bufQ->getView());
+    inputs.add(eK, bufK->getView());
+    inputs.add(eV, bufV->getView());
 
     auto task = ctx->createTask();
     kernel->queueExecute(task, bufOut, inputs, Sq, Skv, H, B, scale, false);
@@ -473,16 +474,29 @@ SlangResult testFlashAttentionFusedPermutation(InferencingContext* ctx)
         eSink);
 
     // 6. Execute GPU
-    auto bufQ = ctx->createPersistentBuffer(hostQ_Interleaved, "Q_Interleaved");
-    auto bufK = ctx->createPersistentBuffer(hostK_Interleaved, "K_Interleaved");
-    auto bufV = ctx->createPersistentBuffer(hostV_Interleaved, "V_Interleaved");
-    auto bufOut = kernel->allocateResultBuffer(Sq, H, B);
+    auto bufQ = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Sq, H, headDim},
+        hostQ_Interleaved,
+        "Q_Interleaved");
+    auto bufK = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Skv, H, headDim},
+        hostK_Interleaved,
+        "K_Interleaved");
+    auto bufV = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Skv, H, headDim},
+        hostV_Interleaved,
+        "V_Interleaved");
+    auto bufOut =
+        kernel->allocateResultBuffer(ElementType::Float32, Sq, H, B).reshape({B, Sq, H, headDim});
 
     Dictionary<Expr, InputInfo> inputs;
     // We must pass the "Physical" shape of the buffers on the GPU
-    inputs.add(eQ_Raw, InputInfo(Shape{B, Sq, H, headDim}, bufQ));
-    inputs.add(eK_Raw, InputInfo(Shape{B, Skv, H, headDim}, bufK));
-    inputs.add(eV_Raw, InputInfo(Shape{B, Skv, H, headDim}, bufV));
+    inputs.add(eQ_Raw, bufQ->getView());
+    inputs.add(eK_Raw, bufK->getView());
+    inputs.add(eV_Raw, bufV->getView());
 
     auto task = ctx->createTask();
     kernel->queueExecute(task, bufOut, inputs, Sq, Skv, H, B, scale, false);
@@ -582,16 +596,29 @@ SlangResult testFlashAttentionInputPermutationOnly(InferencingContext* ctx)
         new FlashAttentionKernel(ctx, eQ_Fused, eK_Fused, eV_Fused, eOutPlanar, 32, 32, headDim);
 
     // 6. Execute GPU
-    auto bufQ = ctx->createPersistentBuffer(hostQ_Interleaved, "Q_Interleaved");
-    auto bufK = ctx->createPersistentBuffer(hostK_Interleaved, "K_Interleaved");
-    auto bufV = ctx->createPersistentBuffer(hostV_Interleaved, "V_Interleaved");
-    auto bufOut = kernel->allocateResultBuffer(Sq, H, B); // Standard Planar alloc
+    auto bufQ = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Sq, H, headDim},
+        hostQ_Interleaved,
+        "Q_Interleaved");
+    auto bufK = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Skv, H, headDim},
+        hostK_Interleaved,
+        "K_Interleaved");
+    auto bufV = ctx->createTensor(
+        ElementType::Float32,
+        Shape{B, Skv, H, headDim},
+        hostV_Interleaved,
+        "V_Interleaved");
+    auto bufOut =
+        kernel->allocateResultBuffer(ElementType::Float32, Sq, H, B); // Standard Planar alloc
 
     Dictionary<Expr, InputInfo> inputs;
     // Map the raw expressions to Interleaved shapes
-    inputs.add(eQ_Raw, InputInfo(Shape{B, Sq, H, headDim}, bufQ));
-    inputs.add(eK_Raw, InputInfo(Shape{B, Skv, H, headDim}, bufK));
-    inputs.add(eV_Raw, InputInfo(Shape{B, Skv, H, headDim}, bufV));
+    inputs.add(eQ_Raw, bufQ->getView());
+    inputs.add(eK_Raw, bufK->getView());
+    inputs.add(eV_Raw, bufV->getView());
 
     auto task = ctx->createTask();
     kernel->queueExecute(task, bufOut, inputs, Sq, Skv, H, B, scale, false);

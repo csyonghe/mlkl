@@ -27,23 +27,42 @@ BatchGemmKernel::BatchGemmKernel(
 }
 
 // Allocate output buffer C [BatchSize, M, N]
-BufferView BatchGemmKernel::allocateResultBuffer(int batchSize, int m, int n)
+TensorView BatchGemmKernel::allocateResultBuffer(
+    ElementType elementType,
+    int batchSize,
+    int m,
+    int n)
 {
-    size_t size = (size_t)batchSize * m * n * sizeof(float);
-    return context->allocScratchBuffer(size, "BatchGemm_Result");
+    return context->allocScratchTensor(elementType, {batchSize, m, n}, "BatchGemm_Result");
 }
 
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int M,
-    int N,
-    int K,
-    int batchSize,
+    TensorView output,
     float alpha,
     float beta,
     EvalContext& ctx)
 {
+    auto shapeA = this->programA.resolveShape(ctx);
+    auto shapeB = this->programB.resolveShape(ctx);
+    auto shapeC = this->programC.resolveShape(ctx);
+    if (shapeA.getRank() != 3)
+        throw std::runtime_error("Input A to BatchGemm must be 3 (B, M, K).");
+    if (shapeB.getRank() != 3)
+        throw std::runtime_error("Input B to BatchGemm must be 3 (B, K, N).");
+    int M = shapeA[1];
+    int K = shapeA[2];
+    int N = shapeB[2];
+    if (shapeB[1] != K)
+        throw std::runtime_error("Input B to BatchGemm inner dimension does not match A.");
+    if (shapeB[0] != shapeA[0])
+        throw std::runtime_error("Input B to BatchGemm batch dimension does not match A.");
+    if (!shapeC.isCompatibleWith(Shape(shapeA[0], M, N)))
+    {
+        throw std::runtime_error("Input C to BatchGemm shape does not match A and B.");
+    }
+    int batchSize = shapeA[0];
+
     SinkExprEvalContext sinkExprCtx;
     sinkExprCtx.outputBuffer = output;
     sinkExprCtx.logicalShape = Shape(batchSize, M, N);
@@ -79,11 +98,7 @@ void BatchGemmKernel::queueExecute(
 
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int M,
-    int N,
-    int K,
-    int batchSize,
+    TensorView output,
     float alpha,
     float beta,
     const Dictionary<Expr, InputInfo>& inputs)
@@ -92,16 +107,12 @@ void BatchGemmKernel::queueExecute(
     for (auto it : inputs)
         ctx.inputs.add(it.first.node, it.second);
 
-    queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
+    queueExecute(task, output, alpha, beta, ctx);
 }
 
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int M,
-    int N,
-    int K,
-    int batchSize,
+    TensorView output,
     float alpha,
     float beta,
     ArrayView<InputInfo> inputs)
@@ -120,16 +131,12 @@ void BatchGemmKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     for (auto bufferNode : programC.bufferNodes)
         ctx.inputs.add(bufferNode, consume());
-    queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
+    queueExecute(task, output, alpha, beta, ctx);
 }
 
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int M,
-    int N,
-    int K,
-    int batchSize,
+    TensorView output,
     float alpha,
     float beta,
     const std::initializer_list<InputInfo>& inputs)
@@ -148,39 +155,35 @@ void BatchGemmKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     for (auto bufferNode : programC.bufferNodes)
         ctx.inputs.add(bufferNode, consume());
-    queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
+    queueExecute(task, output, alpha, beta, ctx);
 }
 void BatchGemmKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    int M,
-    int N,
-    int K,
-    int batchSize,
+    TensorView output,
     float alpha,
     float beta,
-    BufferView A,
-    BufferView B,
-    BufferView C)
+    TensorView A,
+    TensorView B,
+    TensorView C)
 {
     EvalContext ctx;
     if (programA.bufferNodes.getCount() > 1)
         throw std::runtime_error("The batch gemm expects more than one buffer for `A`.");
     if (programA.bufferNodes.getCount() < 1)
         throw std::runtime_error("The batch gemm does not need a buffer for `A`.");
-    ctx.inputs.add(programA.bufferNodes[0], InputInfo(Shape{batchSize, M, K}, A));
+    ctx.inputs.add(programA.bufferNodes[0], InputInfo(A));
 
     if (programB.bufferNodes.getCount() > 1)
         throw std::runtime_error("The batch gemm expects more than one buffer for `B`.");
     if (programB.bufferNodes.getCount() < 1)
         throw std::runtime_error("The batch gemm does not need a buffer for `B`.");
-    ctx.inputs.add(programB.bufferNodes[0], InputInfo(Shape{batchSize, K, N}, B));
+    ctx.inputs.add(programB.bufferNodes[0], InputInfo(B));
 
     if (programC.bufferNodes.getCount() > 1)
         throw std::runtime_error("The batch gemm expects more than one buffer for `C`.");
     if (programC.bufferNodes.getCount() < 1)
         throw std::runtime_error("The batch gemm does not need a buffer for `C`.");
-    ctx.inputs.add(programC.bufferNodes[0], InputInfo(Shape{batchSize, M, N}, C));
+    ctx.inputs.add(programC.bufferNodes[0], InputInfo(C));
 
-    queueExecute(task, output, M, N, K, batchSize, alpha, beta, ctx);
+    queueExecute(task, output, alpha, beta, ctx);
 }

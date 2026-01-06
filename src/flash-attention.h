@@ -54,11 +54,15 @@ public:
         int d = 64,
         SinkExpr sinkExpr = bufferSink());
 
-    BufferView allocateResultBuffer(uint32_t seqLenQ, uint32_t numHeads, uint32_t batchSize);
+    TensorView allocateResultBuffer(
+        ElementType elementType,
+        uint32_t seqLenQ,
+        uint32_t numHeads,
+        uint32_t batchSize);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
+        TensorView output,
         const Dictionary<Expr, InputInfo>& inputs,
         uint32_t seqLenQ,
         uint32_t seqLenKV,

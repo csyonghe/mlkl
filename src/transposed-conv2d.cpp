@@ -107,7 +107,8 @@ SlangResult TransposedConv2DKernel::loadParams(
     return SLANG_OK;
 }
 
-BufferView TransposedConv2DKernel::allocateResultBuffer(
+TensorView TransposedConv2DKernel::allocateResultBuffer(
+    ElementType elementType,
     int inputWidth,
     int inputHeight,
     int padding,
@@ -120,8 +121,9 @@ BufferView TransposedConv2DKernel::allocateResultBuffer(
     String resultBufferName = StringBuilder() << name << "_" + outputWidth << "x" << outputHeight
                                               << "x" << outChannels << "_B" << batchSize;
 
-    auto outputBuffer = context->allocScratchBuffer(
-        batchSize * outputWidth * outputHeight * outChannels * sizeof(float),
+    auto outputBuffer = context->allocScratchTensor(
+        elementType,
+        Shape(batchSize, outputHeight, outputWidth, outChannels),
         resultBufferName.getBuffer());
     return outputBuffer;
 }
@@ -146,12 +148,20 @@ struct TransposedConv2DKernelParams
 void TransposedConv2DKernel::queueExecute(
     InferencingTask& task,
     EvalContext& ctx,
-    BufferView output,
-    int inputWidth,
-    int inputHeight,
-    int padding,
-    int batchSize)
+    TensorView output,
+    int padding)
 {
+    auto inputShape = inputProgram.resolveShape(ctx);
+    if (inputShape.getRank() != 4)
+        throw std::runtime_error("TransposedConv2DKernel: Input rank must be 4.");
+    int batchSize = inputShape[0];
+    int inputHeight = inputShape[1];
+    int inputWidth = inputShape[2];
+    int inputChannels = inputShape[3];
+    if (inputChannels != inChannels)
+    {
+        throw std::runtime_error("TransposedConv2DKernel: Input channel count mismatch.");
+    }
     int outputWidth = (inputWidth - 1) * stride - 2 * padding + kernelSize;
     int outputHeight = (inputHeight - 1) * stride - 2 * padding + kernelSize;
 
@@ -162,7 +172,7 @@ void TransposedConv2DKernel::queueExecute(
 
     SinkExprEvalContext sinkContext;
     sinkContext.outputBuffer = output;
-    sinkContext.logicalShape = Shape(batchSize, outputWidth, outputHeight, outChannels);
+    sinkContext.logicalShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
     sinkExpr.node->pack(writer, sinkContext);
 
     writer.align(8);
@@ -209,12 +219,9 @@ void TransposedConv2DKernel::queueExecute(
 
 void TransposedConv2DKernel::queueExecute(
     InferencingTask& task,
-    BufferView outputImage,
-    BufferView inputImage,
-    int inputWidth,
-    int inputHeight,
-    int padding,
-    int batchSize)
+    TensorView outputImage,
+    TensorView inputImage,
+    int padding)
 {
     EvalContext ctx;
     if (inputProgram.bufferNodes.getCount() > 1)
@@ -225,11 +232,7 @@ void TransposedConv2DKernel::queueExecute(
     {
         throw std::runtime_error("The TransposeConv2D kernel does not take any input buffers.");
     }
-    ctx.inputs.add(
-        inputProgram.bufferNodes[0],
-        InputInfo(Shape(batchSize, inputWidth, inputHeight, inChannels), inputImage));
+    ctx.inputs.add(inputProgram.bufferNodes[0], inputImage);
 
-    auto expectedInputSize = batchSize * inputWidth * inputHeight * inChannels * sizeof(float);
-    SLANG_ASSERT(inputImage.size == expectedInputSize);
-    queueExecute(task, ctx, outputImage, inputWidth, inputHeight, padding, batchSize);
+    queueExecute(task, ctx, outputImage, padding);
 }

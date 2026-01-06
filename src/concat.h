@@ -14,7 +14,10 @@ class ConcatKernel : public RefObject
 public:
     ConcatKernel(InferencingContext* ctx, int operandCount);
 
-    BufferView allocateResultBuffer(ArrayView<Shape> inputShapes, int axis);
+    TensorView allocateResultBuffer(
+        ElementType elementType,
+        ArrayView<Shape> inputShapes,
+        int axis);
 
     // Concatenates N inputs along the specified axis.
     // inputs: List of buffers
@@ -22,8 +25,7 @@ public:
     // axis: The dimension to concatenate along
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        ArrayView<BufferView> inputs,
-        ArrayView<Shape> inputShapes,
+        TensorView output,
+        ArrayView<TensorView> inputs,
         int axis);
 };

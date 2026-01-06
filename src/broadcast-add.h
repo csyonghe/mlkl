@@ -2,6 +2,7 @@
 
 #include "elementwise.h"
 #include "kernel-base.h"
+#include "tensor.h"
 
 class BroadcastAddKernel : public RefObject
 {
@@ -15,13 +16,13 @@ private:
 
 public:
     BroadcastAddKernel(InferencingContext* context);
-    BufferView allocateResultBuffer(const Shape& shapeA, const Shape& shapeB, int batchSize = 1);
+    TensorView allocateResultBuffer(
+        ElementType elementType,
+        const Shape& shapeA,
+        const Shape& shapeB);
     void queueExecute(
         InferencingTask& task,
-        BufferView result,
-        BufferView inputA,
-        const Shape& shapeA,
-        BufferView inputB,
-        const Shape& shapeB,
-        int batchSize = 1);
+        TensorView result,
+        TensorView inputA,
+        TensorView inputB);
 };

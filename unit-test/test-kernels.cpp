@@ -45,6 +45,11 @@ bool checkOutput(InferencingContext* ctx, BufferView outputBuffer, const List<fl
     return true;
 }
 
+bool checkOutput(InferencingContext* ctx, TensorView outputBuffer, const List<float>& expected)
+{
+    return checkOutput(ctx, outputBuffer.getBufferView(), expected);
+}
+
 void writeLinearWeights(Stream* fs, const List<float>& weights, const List<float>& biases)
 {
     fs->write(weights.getBuffer(), weights.getCount() * sizeof(float));

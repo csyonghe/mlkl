@@ -4,63 +4,6 @@
 
 #include <initializer_list>
 
-struct Shape
-{
-    Array<int, 8> dims;
-
-    Shape() = default;
-    Shape(int i0) { dims.add(i0); }
-    Shape(int i0, int i1)
-    {
-        dims.add(i0);
-        dims.add(i1);
-    }
-    Shape(int i0, int i1, int i2)
-    {
-        dims.add(i0);
-        dims.add(i1);
-        dims.add(i2);
-    }
-    Shape(int i0, int i1, int i2, int i3)
-    {
-        dims.add(i0);
-        dims.add(i1);
-        dims.add(i2);
-        dims.add(i3);
-    }
-    Shape(int i0, int i1, int i2, int i3, int i4)
-    {
-        dims.add(i0);
-        dims.add(i1);
-        dims.add(i2);
-        dims.add(i3);
-        dims.add(i4);
-    }
-    Shape(ArrayView<int> d)
-    {
-        for (auto v : d)
-            dims.add(v);
-    }
-    Shape(const std::initializer_list<int>& d)
-    {
-        for (auto v : d)
-            dims.add(v);
-    }
-
-    bool isScalar() const { return dims.getCount() == 0; }
-    int getRank() const { return (int)dims.getCount(); }
-    int operator[](int i) const { return dims[i]; }
-    ArrayView<int> getDims() const
-    {
-        return ArrayView<int>((int*)dims.getBuffer(), dims.getCount());
-    }
-    size_t getElementCount() const;
-
-    bool operator==(const Shape& other) const;
-    bool operator!=(const Shape& other) const { return !(*this == other); }
-    bool isCompatibleWith(const Shape& other) const;
-};
-
 enum class BinaryOp
 {
     Add,
@@ -96,27 +39,20 @@ String getSlangUnaryOpName(UnaryOp op);
 struct InputInfo
 {
     // For Buffer inputs
-    BufferView buffer;
-    Shape shape;
+    TensorView tensorView;
 
     // For Uniform Constant inputs
     float scalarValue = 0.0f;
 
     InputInfo() = default;
-    InputInfo(Shape shape, BufferView buf)
-        : shape(shape), buffer(buf) {};
-    InputInfo(BufferView buf, int size0)
-        : shape(size0), buffer(buf) {};
-    InputInfo(BufferView buf, int size0, int size1)
-        : shape(size0, size1), buffer(buf) {};
-    InputInfo(BufferView buf, int size0, int size1, int size2)
-        : shape(size0, size1, size2), buffer(buf) {};
-    InputInfo(BufferView buf, int size0, int size1, int size2, int size3)
-        : shape(size0, size1, size2, size3), buffer(buf) {};
-    InputInfo(BufferView buf, int size0, int size1, int size2, int size3, int size4)
-        : shape(size0, size1, size2, size3, size4), buffer(buf) {};
+    InputInfo(TensorView tensorView)
+        : tensorView(tensorView)
+    {
+    }
     InputInfo(float c)
-        : scalarValue(c) {};
+        : scalarValue(c)
+    {
+    }
 };
 
 class ExprNode;
@@ -130,7 +66,7 @@ struct EvalContext
     {
         if (auto info = inputs.tryGetValue(node))
         {
-            return info->shape;
+            return info->tensorView.shape;
         }
         if (additionalShapeMap)
         {
@@ -147,7 +83,7 @@ struct EvalContext
 struct SinkExprEvalContext
 {
     Shape logicalShape; // The shape provided by the kernel (e.g., [B, H, S, D])
-    BufferView outputBuffer;
+    TensorView outputBuffer;
 };
 
 struct ParameterWriter
@@ -334,6 +270,7 @@ public:
     String getSlangTypeName() const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    void validateDims();
 };
 
 class TransposeNode : public ExprNode
@@ -620,28 +557,30 @@ class ElementwiseKernel : public RefObject
 
 public:
     ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
-    BufferView allocateResultBuffer(const Dictionary<Expr, InputInfo>& inputs);
-    void queueExecute(InferencingTask& task, EvalContext& ctx, BufferView output);
-    void queueExecute(
-        InferencingTask& task,
-        BufferView output,
+    TensorView allocateResultBuffer(
+        ElementType elementType,
         const Dictionary<Expr, InputInfo>& inputs);
-    void queueExecute(InferencingTask& task, BufferView output, ArrayView<InputInfo> inputs);
+    void queueExecute(InferencingTask& task, EvalContext& ctx, TensorView output);
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
+        TensorView output,
+        const Dictionary<Expr, InputInfo>& inputs);
+    void queueExecute(InferencingTask& task, TensorView output, ArrayView<InputInfo> inputs);
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
         const std::initializer_list<InputInfo>& inputs);
 
-    void queueExecute(InferencingTask& task, BufferView output) { queueExecute(task, output, {}); }
+    void queueExecute(InferencingTask& task, TensorView output) { queueExecute(task, output, {}); }
 
-    void queueExecute(InferencingTask& task, BufferView output, const InputInfo& input1)
+    void queueExecute(InferencingTask& task, TensorView output, const InputInfo& input1)
     {
         queueExecute(task, output, {input1});
     }
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
+        TensorView output,
         const InputInfo& input1,
         const InputInfo& input2)
     {
@@ -650,7 +589,7 @@ public:
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
+        TensorView output,
         const InputInfo& input1,
         const InputInfo& input2,
         const InputInfo& input3)
@@ -660,7 +599,7 @@ public:
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
+        TensorView output,
         const InputInfo& input1,
         const InputInfo& input2,
         const InputInfo& input3,

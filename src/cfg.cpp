@@ -19,30 +19,42 @@ ClassifierFreeGuidanceKernel::ClassifierFreeGuidanceKernel(InferencingContext* c
     kernel = new ElementwiseKernel(context, result);
 }
 
-BufferView ClassifierFreeGuidanceKernel::allocateResultBuffer(int width, int height, int channels)
+TensorView ClassifierFreeGuidanceKernel::allocateResultBuffer(
+    ElementType elementType,
+    int width,
+    int height,
+    int channels)
 {
     // For CFG, shapeA and shapeB should be the same.
-    size_t elementCount = Shape(width, height, channels).getElementCount();
-    return context->allocScratchBuffer(elementCount * sizeof(float), "cfg");
+    return context->allocScratchTensor(elementType, Shape(width, height, channels), "cfg");
 }
 
 void ClassifierFreeGuidanceKernel::queueExecute(
     InferencingTask& task,
-    BufferView output,
-    BufferView batchedInput,
-    int width,
-    int height,
-    int channels,
+    TensorView output,
+    TensorView batchedInput,
     float guidanceScale)
 {
-    auto shape = Shape(width, height, channels);
+    if (batchedInput.shape.getRank() != output.shape.getRank() + 1)
+    {
+        throw std::runtime_error(
+            "Batched input rank must be output rank + 1 (for batch dimension).");
+    }
+
+    if (batchedInput.shape.dims[0] != 2)
+    {
+        throw std::runtime_error("Batched input first dimension (batch) must be 2 (uncond, cond).");
+    }
 
     Dictionary<Expr, InputInfo> inputs;
+    auto uncondSlice = batchedInput.slice(0, 1).reshape(batchedInput.shape.tail(1));
+    auto condSlice = batchedInput.slice(1, 1).reshape(uncondSlice.shape);
+
     // Batch 0: Uncond (Offset 0)
-    inputs[uncond] = InputInfo(shape, batchedInput);
+    inputs[uncond] = uncondSlice;
 
     // Batch 1: Cond (Offset count * sizeof(float))
-    inputs[cond] = InputInfo(shape, batchedInput.tail(shape.getElementCount() * sizeof(float)));
+    inputs[cond] = condSlice;
 
     // Scale (Scalar Value)
     inputs[scale] = guidanceScale;
