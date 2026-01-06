@@ -13,17 +13,16 @@ using namespace Slang;
 
 static const ExampleResources resourceBase("conditioned-unet");
 
-
 // ============================================================================
-// IMAGE WRITER
+// HELPERS
 // ============================================================================
 
-static void fillRandom(List<float>& list, int count)
+static void initImage(List<float>& list, int width, int height, int channels)
 {
     static std::mt19937 gen(7391);
     std::normal_distribution<float> dist(0.0f, 1.0f);
-    list.setCount(count);
-    for (int i = 0; i < count; ++i)
+    list.setCount(width * height * channels);
+    for (int i = 0; i < list.getCount(); ++i)
         list[i] = dist(gen);
 }
 
@@ -75,72 +74,76 @@ struct SimpleUNetProgram : public TestBase
         }
 
         // 3. Prepare Sampler
-        RefPtr<DDIMSampler> sampler = new DDIMSampler(ctx, train_steps, inference_steps);
+        DDIMSampler sampler(ctx, train_steps, inference_steps);
 
-        // 4. Prepare Buffers
-        int pixelCount = batchSize * channels * imgSize * imgSize;
+        // 4. Prepare Tensors (NHWC layout)
+        List<float> noiseData;
+        initImage(noiseData, imgSize, imgSize, channels);
 
         // Initial Noise x_T
-        List<float> noiseData;
-        fillRandom(noiseData, pixelCount);
-        auto bufX = ctx->createPersistentBuffer(noiseData, "x_t");
+        auto imageAStorage = ctx->createTensor(
+            ElementType::Float32,
+            Shape(batchSize, imgSize, imgSize, channels),
+            noiseData.getCount() * sizeof(float),
+            noiseData.getBuffer(),
+            "imageA");
+        auto imageA = imageAStorage->getView();
 
         // Buffer for x_{t-1} (Ping-Pong)
-        auto bufNextX = ctx->createPersistentBuffer(noiseData, "x_prev");
+        auto imageB = ctx->allocScratchTensor(
+            ElementType::Float32,
+            Shape(batchSize, imgSize, imgSize, channels),
+            "imageB");
 
         // Buffer for Predicted Noise (Eps)
-        auto bufEps = ctx->allocScratchBuffer(pixelCount * sizeof(float), "eps");
+        auto predictedNoise = ctx->allocScratchTensor(
+            ElementType::Float32,
+            Shape(batchSize, imgSize, imgSize, channels),
+            "predictedNoise");
 
-        // Random Noise buffer for the update step (z)
-        // We refill this every step on CPU for simplicity, or generate on GPU if we had RNG kernel
-        List<float> stepNoiseData;
-        stepNoiseData.setCount(pixelCount);
-        auto bufZ = ctx->createPersistentBuffer(stepNoiseData, "z"); // Re-used buffer
-
-        // Context Label (Target = 7)
+        // Context Label (Target digit as float for gather kernel)
         List<float> labelData;
         labelData.add((float)targetDigit);
-        auto bufLabel = ctx->createPersistentBuffer(labelData, "label");
+        auto labelStorage = ctx->createTensor(
+            ElementType::Float32,
+            Shape(batchSize),
+            labelData.getCount() * sizeof(float),
+            labelData.getBuffer(),
+            "classLabel");
+        auto classLabel = labelStorage->getView();
 
+        auto outputImage = imageA;
 
         // 5. Diffusion Loop
-        // Loop backwards from T-1 to 0
-        printf("Sampling...\n");
-        // Loop over INFERENCE steps indices (199 -> 0)
-        for (int i = inference_steps - 1; i >= 0; i--)
+        printf("Sampling digit %d...\n", targetDigit);
+
+        ctx->pushAllocScope();
+        SLANG_DEFER(ctx->popAllocScope());
+
+        for (int step = inference_steps - 1; step >= 0; step--)
         {
-            // Get the actual training timestep (e.g., 995)
-            int t = sampler->timesteps[i];
+            // Get the actual training timestep
+            int t = sampler.timesteps[step];
 
             auto task = ctx->createTask();
 
             // 1. Predict Noise
-            model->queueExecute(
-                task,
-                bufEps,   // Output
-                bufX,     // Input
-                bufLabel, // Condition
-                imgSize,
-                imgSize,
-                t,
-                batchSize);
+            model->queueExecute(task, predictedNoise, imageA, classLabel, t);
 
-            // 2. DDIM Update (No Random Noise z needed!)
-            Shape shape = {batchSize, channels, imgSize, imgSize};
-            sampler->step(task, bufNextX, bufX, bufEps, i, shape);
+            // 2. DDIM Update
+            sampler.step(task, imageB, imageA, predictedNoise, step);
 
             task.execute();
 
-            // Swap
-            std::swap(bufX, bufNextX);
+            outputImage = imageB;
+            Swap(imageA, imageB);
         }
 
         // 6. Save Result
-        // The final result is in bufX (because we swapped after the last write to bufNextX)
-        auto finalPixels = ctx->readBuffer<float>(bufX);
-        writeImagePNG("result_digit.png", imgSize, imgSize, 1, finalPixels);
+        auto finalPixels = ctx->readBuffer<float>(outputImage);
+        writeImagePNG("result_digit.png", imgSize, imgSize, channels, finalPixels);
 
-        printf("Done.\n");
+        printf("Done. Saved to result_digit.png\n");
         return SLANG_OK;
     }
 };

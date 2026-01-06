@@ -120,109 +120,101 @@ SlangResult ConditionedUNet::loadParams(TorchParamReader& reader)
 
 void ConditionedUNet::queueExecute(
     InferencingTask& task,
-    BufferView outputImage,
-    BufferView inputImage,
-    BufferView classLabels,
-    int inputWidth,
-    int inputHeight,
-    int timeStep,
-    int batchSize)
+    TensorView outputImage,
+    TensorView inputImage,
+    TensorView classLabels,
+    int timeStep)
 {
     context->pushAllocScope();
     SLANG_DEFER(context->popAllocScope());
 
+    SLANG_ASSERT(inputImage.shape.getRank() == 4);
+
+    int batchSize = inputImage.shape[0];
+    int inputHeight = inputImage.shape[1];
+    int inputWidth = inputImage.shape[2];
+
     // 1. Time Embedding
-    auto tEmb = timeEmbed->allocateResultBuffer(batchSize);
-    timeEmbed->queueExecute(task, tEmb, timeStep, batchSize);
+    auto tEmb = timeEmbed->allocateResultBuffer(outputImage.elementType, batchSize);
+    timeEmbed->queueExecute(task, tEmb, timeStep);
 
     // 2. Context embedding
-    auto contextEmbedding = classEmbed->allocateResultBuffer(batchSize);
-    classEmbed->queueExecute(task, contextEmbedding, classLabels, batchSize);
+    auto contextEmbedding = classEmbed->allocateResultBuffer(outputImage.elementType, batchSize);
+    classEmbed->queueExecute(task, contextEmbedding, classLabels);
 
-    // 2. Init Conv
-    auto x = initialConv->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
-    initialConv->queueExecute(task, x, inputImage, inputWidth, inputHeight, 1, batchSize);
+    // 3. Init Conv
+    auto x =
+        initialConv
+            ->allocateResultBuffer(outputImage.elementType, inputWidth, inputHeight, 1, batchSize);
+    initialConv->queueExecute(task, x, inputImage, 1);
 
-    // 3. Down Blocks
-    List<BufferView> skipConnections;
+    // 4. Down Blocks
+    ShortList<TensorView> skipConnections;
     int w = inputWidth;
     int h = inputHeight;
 
     for (auto& block : downBlocks)
     {
         // Down Block Output
-        auto out = block->allocateResultBuffer(w, h, batchSize);
-        block->queueExecute(task, out, x, w, h, batchSize, tEmb);
+        auto out = block->allocateResultBuffer(outputImage.elementType, w, h, batchSize);
+        block->queueExecute(task, out, x, tEmb);
 
         skipConnections.add(out);
         x = out;
 
-        // Downsample for next layer (handled by block or explicitly?)
-        // Standard UNetBlock usually returns the result *before* pooling if it's separate,
-        // or *after* if it includes stride.
-        // Assuming block includes stride/pool:
+        // Block includes stride, so dimensions halve
         w /= 2;
         h /= 2;
     }
 
-    // 4. Mid Attention (Bottleneck)
-    // x is now [Batch, 256, H/4, W/4]
+    // 5. Mid Attention (Bottleneck)
+    // x is now [Batch, H/4, W/4, 256] in NHWC
     int seqQ = w * h;
-    int channels = 256;
-    int seqKV = 1; // Assuming context is [Batch, 1, 128]
-    int heads = 4; // Check your model config!
+    int channels = baseChannels * channelMultipliers[channelMultipliers.getCount() - 1];
+    int seqKV = 1; // Context is [Batch, 1, contextDim]
+    int heads = 4;
 
     // Alloc output
-    auto attnOut = midAttn->allocateResultBuffer(batchSize, seqQ, channels);
+    auto attnOut =
+        midAttn->allocateResultBuffer(outputImage.elementType, batchSize, seqQ, channels);
 
     midAttn->queueExecute(
         task,
         attnOut,
-        x,                // Input Latent
-        contextEmbedding, // Context
+        x.reshape({batchSize * seqQ, channels}), // Input Latent
+        contextEmbedding,                        // Context
         batchSize,
         seqQ,
         seqKV,
         heads);
     x = attnOut; // Shape is preserved.
 
-    // 5. Up Blocks
+    // 6. Up Blocks
     for (Index i = 0; i < upBlocks.getCount(); i++)
     {
         auto& block = upBlocks[i];
         auto skip = skipConnections[skipConnections.getCount() - 1 - i];
 
-        // Resize/Upsample x to match skip dimension
-        // If we lack NearestNeighborUpsampleKernel, we assume the UpBlock handles it?
-        // Let's assume we use standard bilinear/nearest.
-        // For this simple port, let's assume we need to provide the concatenated input.
-
-        // Define Shapes for Concat
-        // x: [Batch, H, W, InCh] (after upsample)
-        // skip: [Batch, H, W, InCh]
-        // Note: The memory layout of our Conv2D is [Batch, C, H, W]?
-        // If kernels use NHWC or NCHW matters here.
-        // Our Conv2DKernel usually works with NCHW or similar.
-        // Let's assume NCHW.
-
-        Shape shape = {batchSize, h, w, block->inChannels}; // Assuming symmetric
+        // Define Shapes for Concat (NHWC layout)
+        Shape shape = {batchSize, h, w, block->inChannels};
         Shape shapes[] = {shape, shape};
-        BufferView buffers[] = {x, skip};
+        TensorView buffers[] = {x.reshape(shape), skip};
 
-        // Placeholder for concat:
-        auto concated = concat->allocateResultBuffer(makeArrayView(shapes), 3);
-        concat->queueExecute(task, concated, makeArrayView(buffers), makeArrayView(shapes), 3);
+        // Concat along channel axis (axis 3 in NHWC)
+        auto concated =
+            concat->allocateResultBuffer(outputImage.elementType, makeArrayView(shapes), 3);
+        concat->queueExecute(task, concated, makeArrayView(buffers), 3);
 
-        auto res = block->allocateResultBuffer(w, h, batchSize);
-        block->queueExecute(task, res, concated, w, h, batchSize, tEmb);
+        auto res = block->allocateResultBuffer(outputImage.elementType, w, h, batchSize);
+        block->queueExecute(task, res, concated, tEmb);
         x = res;
 
         w *= 2;
         h *= 2;
     }
 
-    // 6. Final Conv
-    finalConv->queueExecute(task, outputImage, x, w, h, 0, batchSize);
+    // 7. Final Conv
+    finalConv->queueExecute(task, outputImage, x, 0);
 }
 
 UNetBlock::UNetBlock(
@@ -314,59 +306,67 @@ void UNetBlock::writeResult(const char* name, BufferView buffer)
     File::writeAllBytes(String(name) + ".bin", blob->getBufferPointer(), blob->getBufferSize());
 }
 
-BufferView UNetBlock::allocateResultBuffer(int inputWidth, int inputHeight, int batchSize)
+TensorView UNetBlock::allocateResultBuffer(
+    ElementType elementType,
+    int inputWidth,
+    int inputHeight,
+    int batchSize)
 {
     if (downTransform)
     {
-        return downTransform->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+        return downTransform
+            ->allocateResultBuffer(elementType, inputWidth, inputHeight, 1, batchSize);
     }
     else
     {
-        return upTransform->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
+        return upTransform
+            ->allocateResultBuffer(elementType, inputWidth, inputHeight, 1, batchSize);
     }
 }
 void UNetBlock::queueExecute(
     InferencingTask& task,
-    BufferView outputImage,
-    BufferView inputImage,
-    int inputWidth,
-    int inputHeight,
-    int batchSize,
-    BufferView timeEmbedding)
+    TensorView outputImage,
+    TensorView inputImage,
+    TensorView timeEmbedding)
 {
     task.context->pushAllocScope();
     SLANG_DEFER(task.context->popAllocScope());
 
-    auto transformedTimeEmbedding = timeEmbedTransform->allocateResultBuffer(batchSize);
+    SLANG_ASSERT(inputImage.shape.getRank() == 4);
 
-    timeEmbedTransform->queueExecute(task, transformedTimeEmbedding, timeEmbedding, batchSize);
+    int batchSize = inputImage.shape[0];
+    int inputHeight = inputImage.shape[1];
+    int inputWidth = inputImage.shape[2];
 
-    auto convResult = conv1->allocateResultBuffer(inputWidth, inputHeight, 1, batchSize);
-    conv1->queueExecute(task, convResult, inputImage, inputWidth, inputHeight, 1, batchSize);
+    auto transformedTimeEmbedding =
+        timeEmbedTransform->allocateResultBuffer(outputImage.elementType, batchSize);
 
-    int shapeA[] = {inputHeight, inputWidth, outChannels};
-    int shapeB[] = {1, 1, outChannels};
-    auto added =
-        broadcastAdd->allocateResultBuffer(makeArrayView(shapeA), makeArrayView(shapeB), batchSize);
+    timeEmbedTransform->queueExecute(task, transformedTimeEmbedding, timeEmbedding);
 
-    broadcastAdd->queueExecute(
-        task,
-        added,
-        convResult,
+    auto convResult =
+        conv1->allocateResultBuffer(outputImage.elementType, inputWidth, inputHeight, 1, batchSize);
+    conv1->queueExecute(task, convResult, inputImage, 1);
+
+    int shapeA[] = {batchSize, inputHeight, inputWidth, outChannels};
+    int shapeB[] = {batchSize, 1, 1, outChannels};
+    auto added = broadcastAdd->allocateResultBuffer(
+        outputImage.elementType,
         makeArrayView(shapeA),
-        transformedTimeEmbedding,
-        makeArrayView(shapeB),
-        batchSize);
-    conv2->queueExecute(task, convResult, added, inputWidth, inputHeight, 1, batchSize);
+        makeArrayView(shapeB));
+
+    // Reshape time embedding from [B, C] to [B, 1, 1, C] for proper broadcasting
+    // across spatial dimensions (H, W).
+    auto reshapedTimeEmbedding =
+        transformedTimeEmbedding.reshape(Shape(batchSize, 1, 1, outChannels));
+    broadcastAdd->queueExecute(task, added, convResult, reshapedTimeEmbedding);
+    conv2->queueExecute(task, convResult, added, 1);
 
     if (downTransform)
     {
-        downTransform
-            ->queueExecute(task, outputImage, convResult, inputWidth, inputHeight, 1, batchSize);
+        downTransform->queueExecute(task, outputImage, convResult, 1);
     }
     else
     {
-        upTransform
-            ->queueExecute(task, outputImage, convResult, inputWidth, inputHeight, 1, batchSize);
+        upTransform->queueExecute(task, outputImage, convResult, 1);
     }
 }

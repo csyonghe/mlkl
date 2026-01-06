@@ -37,16 +37,17 @@ public:
 
     void writeResult(const char* name, BufferView buffer);
 
-    BufferView allocateResultBuffer(int inputWidth, int inputHeight, int batchSize);
+    TensorView allocateResultBuffer(
+        ElementType elementType,
+        int inputWidth,
+        int inputHeight,
+        int batchSize);
 
     void queueExecute(
         InferencingTask& task,
-        BufferView output,
-        BufferView inputImage,
-        int inputWidth,
-        int inputHeight,
-        int batchSize,
-        BufferView timeEmbedding);
+        TensorView output,
+        TensorView inputImage,
+        TensorView timeEmbedding);
 };
 
 class ConditionedUNet : public RefObject
@@ -91,15 +92,11 @@ public:
     // NOTE: This assumes the standard diffmodel.py order.
     SlangResult loadParams(TorchParamReader& reader);
 
-    // Allocates output buffer and runs the network.
-    // contextEmbedding must be [Batch, 1, ContextDim] (or similar broadcastable shape)
+    // Runs the network.
     void queueExecute(
         InferencingTask& task,
-        BufferView outputImage,
-        BufferView inputImage,
-        BufferView classLabels,
-        int inputWidth,
-        int inputHeight,
-        int timeStep,
-        int batchSize);
+        TensorView outputImage,
+        TensorView inputImage,
+        TensorView classLabels,
+        int timeStep);
 };
