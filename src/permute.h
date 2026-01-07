@@ -2,6 +2,16 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+// Standalone permutation kernel.
+//
+// FUSION OPPORTUNITY: Consider fusing into adjacent kernels instead!
+// - For BatchGemm: use transpose(buffer(), dim1, dim2) in the input expression
+// - For Conv2D/Linear: use permute(buffer(), {dims}) in input expression
+// - For elementwise ops: combine with other ops in single ElementwiseKernel
+//
+// Only use this standalone kernel when:
+// - The permutation result is used by multiple downstream kernels
+// - No adjacent kernel supports input expression fusion
 class PermuteKernel : public RefObject
 {
 private:

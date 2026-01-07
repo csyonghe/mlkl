@@ -592,6 +592,31 @@ inline Expr leakyRelu(Expr x, float alpha)
 // =========================================================================
 // 6. Kernel Wrapper
 // =========================================================================
+//
+// Standalone elementwise operation kernel.
+//
+// FUSION OPPORTUNITY: Many elementwise ops can be fused into other kernels!
+//
+// Instead of:
+//   ElementwiseKernel siluKernel(ctx, silu(buffer()));
+//   siluKernel.queueExecute(task, siluOut, normOut);
+//   conv.queueExecute(task, convOut, siluOut, padding);
+//
+// Prefer (fused into conv input):
+//   Conv2DKernel conv(ctx, ..., silu(buffer()), kernelOutput(), bufferSink());
+//   conv.queueExecute(task, convOut, normOut, padding);
+//
+// Common fusable operations:
+// - silu(), relu(), gelu() -> fuse into Conv2D/Linear input expression
+// - clamp() -> fuse into Conv2D/Linear output expression
+// - upsample2x() -> fuse into Conv2D input expression
+// - a + b (residual) -> consider if one input can write directly
+// - permute() -> use transpose() in BatchGemm expressions
+//
+// Only use standalone ElementwiseKernel when:
+// - The result is consumed by multiple downstream kernels
+// - The adjacent kernel doesn't support expression fusion
+// - Complex expression trees that span multiple operations
 
 class ElementwiseKernel : public RefObject
 {

@@ -3,6 +3,16 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+// Concatenation kernel for joining tensors along an axis.
+//
+// FUSION OPPORTUNITY: Consider if concat can be avoided!
+// - If concatenating then immediately processing, consider processing separately
+// - For attention Q/K/V: compute separately rather than concat then split
+// - Check if upstream kernels can write to different regions of same buffer
+//
+// This kernel is appropriate when:
+// - Multiple tensors genuinely need to be joined for downstream processing
+// - The concat result is used by a kernel that requires contiguous input
 class ConcatKernel : public RefObject
 {
     InferencingContext* context;

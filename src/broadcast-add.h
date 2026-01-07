@@ -4,6 +4,16 @@
 #include "kernel-base.h"
 #include "tensor.h"
 
+// Standalone broadcast addition kernel.
+//
+// FUSION OPPORTUNITY: Consider fusing into adjacent kernels instead!
+// - For residual connections: use (a + b) expression in ElementwiseKernel
+// - Can combine with activation: silu(a + b), relu(a + b)
+// - For bias addition after matmul: use kernel's built-in bias support
+//
+// Only use this standalone kernel when:
+// - Broadcast semantics are specifically needed
+// - No adjacent kernel supports the addition fusion
 class BroadcastAddKernel : public RefObject
 {
 private:

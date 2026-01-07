@@ -9,6 +9,15 @@ class SafeTensorsReader;
 // In is of shape [batchSize, inputVectorLength]
 // Out is of shape [batchSize, outputVectorLength]
 // Underlying implementation uses tiled matrix multiplication.
+//
+// IMPORTANT: Input must be 2D tensor [batchSize, inputVectorLength]
+// For 4D tensors [B, H, W, C], reshape to [B*H*W, C] before calling.
+//
+// CONSTRUCTOR: LinearKernel(ctx, inputDim, outputDim)
+//
+// COMMON MISTAKES:
+// - Passing 4D tensor - causes "Input tensor must be rank 2" error
+// - Confusing input/output dimensions
 class LinearKernel : public RefObject
 {
 private:

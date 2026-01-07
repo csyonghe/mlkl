@@ -11,6 +11,13 @@ class SafeTensorsReader;
 //
 // For each (batch, group), normalizes across (Height, Width, ChannelsPerGroup)
 // then applies per-channel scale (gamma) and bias (beta).
+//
+// CONSTRUCTOR PARAMETER ORDER:
+//   GroupNormKernel(ctx, numChannels, numGroups)
+//   NOTE: numChannels FIRST, numGroups SECOND (easy to confuse!)
+//
+// COMMON MISTAKES:
+// - Swapping numChannels and numGroups - causes "channels don't match" error
 class GroupNormKernel : public RefObject
 {
 private:

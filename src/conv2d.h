@@ -8,6 +8,27 @@ class SafeTensorsReader;
 // 2D Convolution Kernel
 // - Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
 // - Input/Output layout: [BatchSize, Height, Width, Channels]
+//
+// CONSTRUCTORS:
+// 1. Simple (Float32, buffer input, custom output):
+//    Conv2DKernel(ctx, tileSize, kernelSize, stride, inCh, outCh, outputExpr)
+//
+// 2. Full (custom input/output expressions):
+//    Conv2DKernel(ctx, elemType, tileSize, kernelSize, stride, inCh, outCh,
+//                 inputExpr, outputExpr, sinkExpr)
+//
+// QUEUEEXECUTE:
+//   queueExecute(task, output, input, padding)
+//   - padding: Use 0 for 1x1 conv, 1 for 3x3 conv (to maintain spatial dims)
+//
+// FUSION OPPORTUNITIES:
+// - Fuse SiLU/ReLU into inputExpr:  Conv2DKernel(..., silu(buffer()), ...)
+// - Fuse clamp into outputExpr:     Conv2DKernel(..., clamp(kernelOutput(), -1, 1), ...)
+// - Fuse upsample into inputExpr:   Conv2DKernel(..., upsample2x(buffer()), ...)
+//
+// COMMON MISTAKES:
+// - Forgetting padding argument in queueExecute
+// - Using wrong constructor (ElementType in wrong position)
 class Conv2DKernel : public RefObject
 {
 private:

@@ -7,15 +7,26 @@
 // Flash Attention Kernel
 // Implements Flash Attention 2 algorithm that computes:
 //  Attention(Q, K, V) = mul(softmax(mul(Q,  transpose(K)) / sqrt(d)), V)
+//
 // Inputs:
 // - Q: Query tensor of shape [B, H, Sq, D_head]
 // - K: Key tensor of shape [B, H, Skv, D_head]
 // - V: Value tensor of shape [B, H, Skv, D_head]
-// - outFunc: Output function to write results
+// - outFunc: Output TRANSFORMATION expression (use kernelOutput() for identity)
+//            NOTE: This is NOT an input buffer - it transforms the output value.
 // - br: Block size in rows (Sq dimension)
 // - bc: Block size in columns (Skv dimension)
 // - d: Head dimension (D_head)
 // Output layout: Planar [B, H, Sq, D_head]
+//
+// IMPORTANT LIMITATIONS:
+// - headDim (d) must be <= 256 due to GPU shared memory limits
+// - For larger head dimensions (e.g., single-head attention with 512 dims),
+//   use standard attention instead: BatchGemmKernel + SoftmaxKernel
+//
+// COMMON MISTAKES:
+// - Using buffer() for outFunc - use kernelOutput() for no transformation
+// - Passing headDim > 256 - will throw exception, use BatchGemm+Softmax instead
 
 class FlashAttentionKernel : public RefObject
 {

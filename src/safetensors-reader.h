@@ -6,6 +6,27 @@
 
 using namespace Slang;
 
+// SafeTensors Reader for loading model weights
+//
+// SafeTensors is a safe, fast format for storing tensors (https://huggingface.co/docs/safetensors)
+// This reader provides zero-copy memory-mapped access to tensor data.
+//
+// USAGE:
+//   SafeTensorsReader reader;
+//   reader.load("model.safetensors");
+//   
+//   // Check available tensors
+//   List<String> names;
+//   reader.getTensorNames(names);  // Useful for debugging weight names
+//   
+//   // Read with optional permutation and type conversion
+//   List<uint8_t> data;
+//   reader.readTensor("layer.weight", ElementType::Float32, data, {1,2,3,0});
+//
+// TIPS:
+// - Use getTensorNames() to discover exact weight names in a model file
+// - Weight naming conventions vary by model architecture
+
 // Tensor metadata from SafeTensors header
 struct SafeTensorInfo
 {

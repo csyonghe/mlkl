@@ -9,6 +9,26 @@
 // - C: [BatchSize M N]
 // Output: [BatchSize M N]
 //
+// USAGE PATTERNS:
+//
+// 1. Simple matrix multiply (no bias):
+//    Use constant(0.0f) for C expression and beta=0:
+//      BatchGemmKernel(ctx, bufA, bufB, constant(0.0f), bufferSink(), kernelOutput())
+//      kernel.queueExecute(task, out, alpha, 0.0f, {inputA, inputB})
+//
+// 2. Fused transpose (e.g., for Q @ K^T):
+//    Use transpose() in the B expression:
+//      auto kExpr = buffer();
+//      BatchGemmKernel(ctx, qExpr, transpose(kExpr, 1, 2), constant(0.0f), ...)
+//
+// 3. With initializer_list inputs (order matches buffer() order in expressions):
+//    kernel.queueExecute(task, out, alpha, beta, {tensorA, tensorB})
+//
+// See testBatchGemm and testFusedBatchGemm for complete examples.
+//
+// COMMON MISTAKES:
+// - Using buffer() for C but not binding it - use constant(0.0f) with beta=0 instead
+// - Using permute() instead of transpose() - transpose(expr, dim1, dim2) is cleaner
 class BatchGemmKernel : public RefObject
 {
     ComPtr<rhi::IComputePipeline> pipeline;
