@@ -175,6 +175,8 @@ These define how data flows into the kernel:
 | `broadcast(expr, shapeOf)` | Broadcast to match another tensor's shape |
 | `gather(table, indices)` | Index into a lookup table |
 | `concat(left, right, axis)` | Concatenate along an axis |
+| `upsample(expr, factor)` | Spatial upsampling (nearest-neighbor) |
+| `upsample2x(expr)` | Convenience for 2x nearest-neighbor upsampling |
 
 #### Math Operations
 

@@ -491,6 +491,61 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 }
 
 // =========================================================================
+// UPSAMPLE NODE
+// =========================================================================
+
+UpsampleNode::UpsampleNode(Expr inner, uint32_t factor, uint32_t heightDim, uint32_t widthDim)
+    : inner(inner), factor(factor), heightDim(heightDim), widthDim(widthDim)
+{
+    int regCounter = 0;
+    innerProgram = new ProgramNode();
+    *innerProgram = compileExprToProgram(inner, &regCounter);
+}
+
+String UpsampleNode::getSlangTypeName(ElementType elemType) const
+{
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return StringBuilder() << "Upsample<" << elemTypeName << ", "
+                           << innerProgram->getSlangTypeName(elemType) << ">";
+}
+
+Shape UpsampleNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape innerShape = inner.node->resolveShape(ctx);
+    
+    // Upsample the spatial dimensions
+    Shape result;
+    for (int i = 0; i < innerShape.getRank(); i++)
+    {
+        if (i == (int)heightDim || i == (int)widthDim)
+        {
+            result.dims.add(innerShape[i] * factor);
+        }
+        else
+        {
+            result.dims.add(innerShape[i]);
+        }
+    }
+    return result;
+}
+
+void UpsampleNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // 1. Pack inner program
+    innerProgram->pack(writer, ctx);
+    
+    // 2. Pack upsample parameters
+    writer.write(factor);
+    writer.write(heightDim);
+    writer.write(widthDim);
+}
+
+Expr upsample(Expr inner, uint32_t factor, uint32_t heightDim, uint32_t widthDim)
+{
+    return new UpsampleNode(inner, factor, heightDim, widthDim);
+}
+
+// =========================================================================
 // BUFFER SINK (The Terminal Node)
 // =========================================================================
 
@@ -976,6 +1031,10 @@ void visitAllExpr(HashSet<ExprNode*>& visited, ExprNode* node, Func f)
         visitAllExpr(visited, g->table.node, f);
         visitAllExpr(visited, g->indices.node, f);
     }
+    else if (auto up = dynamic_cast<UpsampleNode*>(node))
+    {
+        visitAllExpr(visited, up->inner.node, f);
+    }
     else if (auto leaf = dynamic_cast<LeafNode*>(node))
     {
     }
@@ -1035,6 +1094,13 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
 
         g->indicesProgram = new ProgramNode();
         *g->indicesProgram = compileExprToProgram(g->indices, ctx.globalRegCounter);
+    }
+    else if (auto up = dynamic_cast<UpsampleNode*>(node))
+    {
+        // Inner program is already compiled in the constructor
+        // Just re-compile if needed for proper register numbering
+        up->innerProgram = new ProgramNode();
+        *up->innerProgram = compileExprToProgram(up->inner, ctx.globalRegCounter);
     }
     ctx.visited.insert(node);
     ctx.topoOrder.add(node);

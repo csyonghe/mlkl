@@ -338,6 +338,23 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
+class UpsampleNode : public ExprNode
+{
+public:
+    Expr inner;
+    uint32_t factor;         // Upsampling factor (e.g., 2 for 2x)
+    uint32_t heightDim;      // Which dimension is height (default: 1 for NHWC)
+    uint32_t widthDim;       // Which dimension is width (default: 2 for NHWC)
+
+    RefPtr<ProgramNode> innerProgram;
+
+    UpsampleNode(Expr inner, uint32_t factor, uint32_t heightDim = 1, uint32_t widthDim = 2);
+
+    String getSlangTypeName(ElementType elemType) const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
 class BinaryNode : public ExprNode
 {
 public:
@@ -443,6 +460,16 @@ Expr permute(Expr inner, ArrayView<int> dims);
 Expr permute(Expr inner, const std::initializer_list<int>& dims);
 Expr gather(Expr table, Expr indices);
 Expr transpose(Expr inner, int dim0, int dim1);
+
+// Upsample spatial dimensions by the given factor (nearest-neighbor)
+// Assumes NHWC layout by default (heightDim=1, widthDim=2)
+Expr upsample(Expr inner, uint32_t factor, uint32_t heightDim = 1, uint32_t widthDim = 2);
+
+// Convenience: 2x nearest-neighbor upsampling (most common case)
+inline Expr upsample2x(Expr inner)
+{
+    return upsample(inner, 2);
+}
 
 // Represent the output buffer that the kernel writes to.
 SinkExpr bufferSink();

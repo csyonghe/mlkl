@@ -370,6 +370,150 @@ SlangResult testIdentityPermute(InferencingContext* ctx)
     MLKL_TEST_OK();
 }
 
+SlangResult testUpsample(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    // Test 1: 2x upsample on a 2D image (NHWC: [1, 2, 2, 1])
+    // Input:  [[1, 2],     Output: [[1, 1, 2, 2],
+    //          [3, 4]]              [1, 1, 2, 2],
+    //                               [3, 3, 4, 4],
+    //                               [3, 3, 4, 4]]
+    {
+        Expr eBuf = buffer();
+        Expr eUp = upsample(eBuf, 2); // 2x upsample, default NHWC (heightDim=1, widthDim=2)
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, eUp);
+
+        // Input: [N=1, H=2, W=2, C=1] = 4 elements
+        List<float> inputData = {1, 2, 3, 4};
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{1, 2, 2, 1}, inputData, "UpsampleIn");
+
+        // Output: [1, 4, 4, 1] = 16 elements
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto bufOut = kernel->allocateResultBuffer(ElementType::Float32, inputs);
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        // Expected: nearest-neighbor 2x upscale
+        // Row 0: [1, 1, 2, 2]
+        // Row 1: [1, 1, 2, 2]
+        // Row 2: [3, 3, 4, 4]
+        // Row 3: [3, 3, 4, 4]
+        List<float> expected = {1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4};
+        for (int i = 0; i < 16; i++)
+        {
+            if (result[i] != expected[i])
+            {
+                printf("Upsample 2x Mismatch at %d: got %f, expected %f\n", i, result[i], expected[i]);
+                return SLANG_FAIL;
+            }
+        }
+    }
+
+    // Test 2: 3x upsample with multiple channels [1, 2, 2, 2]
+    {
+        Expr eBuf = buffer();
+        Expr eUp = upsample(eBuf, 3); // 3x upsample
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, eUp);
+
+        // Input: [N=1, H=2, W=2, C=2] = 8 elements
+        // Pixel (0,0): [1, 2], Pixel (0,1): [3, 4]
+        // Pixel (1,0): [5, 6], Pixel (1,1): [7, 8]
+        List<float> inputData = {1, 2, 3, 4, 5, 6, 7, 8};
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{1, 2, 2, 2}, inputData, "Upsample3xIn");
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto bufOut = kernel->allocateResultBuffer(ElementType::Float32, inputs);
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        // Output: [1, 6, 6, 2] = 72 elements
+        // Verify a few key positions using nearest-neighbor logic:
+        // output[n, h, w, c] = input[n, h/3, w/3, c]
+        auto getExpected = [&](int n, int h, int w, int c) -> float
+        {
+            int srcH = h / 3;
+            int srcW = w / 3;
+            int srcIdx = n * (2 * 2 * 2) + srcH * (2 * 2) + srcW * 2 + c;
+            return inputData[srcIdx];
+        };
+
+        bool allMatch = true;
+        for (int h = 0; h < 6; h++)
+        {
+            for (int w = 0; w < 6; w++)
+            {
+                for (int c = 0; c < 2; c++)
+                {
+                    int outIdx = h * (6 * 2) + w * 2 + c;
+                    float exp = getExpected(0, h, w, c);
+                    if (result[outIdx] != exp)
+                    {
+                        printf(
+                            "Upsample 3x Mismatch at [%d,%d,%d]: got %f, expected %f\n",
+                            h,
+                            w,
+                            c,
+                            result[outIdx],
+                            exp);
+                        allMatch = false;
+                    }
+                }
+            }
+        }
+        if (!allMatch)
+            return SLANG_FAIL;
+    }
+
+    // Test 3: upsample2x convenience function
+    {
+        Expr eBuf = buffer();
+        Expr eUp = upsample2x(eBuf); // Convenience 2x
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, eUp);
+
+        List<float> inputData = {10, 20, 30, 40};
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{1, 2, 2, 1}, inputData, "Upsample2xIn");
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto bufOut = kernel->allocateResultBuffer(ElementType::Float32, inputs);
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        List<float> expected = {10, 10, 20, 20, 10, 10, 20, 20, 30, 30, 40, 40, 30, 30, 40, 40};
+        for (int i = 0; i < 16; i++)
+        {
+            if (result[i] != expected[i])
+            {
+                printf("upsample2x Mismatch at %d: got %f, expected %f\n", i, result[i], expected[i]);
+                return SLANG_FAIL;
+            }
+        }
+    }
+
+    MLKL_TEST_OK();
+}
+
 SlangResult testNonTrivialPermute(InferencingContext* ctx)
 {
     MLKL_TEST_BEGIN();

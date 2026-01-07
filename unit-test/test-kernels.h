@@ -98,6 +98,7 @@ SlangResult testLeakyReluComposite(InferencingContext* ctx);
 SlangResult testMultiConcat(InferencingContext* ctx);
 SlangResult testIdentityPermute(InferencingContext* ctx);
 SlangResult testNonTrivialPermute(InferencingContext* ctx);
+SlangResult testUpsample(InferencingContext* ctx);
 
 // Defined in test-gemm.cpp
 SlangResult testBatchGemm(InferencingContext* ctx);

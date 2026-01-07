@@ -266,6 +266,33 @@ struct Concat<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
     }
 }
 
+// ============================================================================
+// Upsampling (nearest-neighbor)
+// ============================================================================
+
+// Upsample spatial dimensions using nearest-neighbor interpolation
+// Assumes NHWC layout by default (dims 1 and 2 are H and W)
+// factor: upsampling factor (e.g., 2 for 2x upsampling)
+struct Upsample<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
+{
+    Inner inner;
+    uint factor;        // Upsampling factor
+    uint heightDim;     // Which dimension is height (default: 1)
+    uint widthDim;      // Which dimension is width (default: 2)
+
+    T.UnpackedType eval(Coord coord, Input<T> input)
+    {
+        // Nearest-neighbor: divide output coord by factor (floor division)
+        Coord innerCoord = coord;
+        innerCoord[heightDim] = coord[heightDim] / factor;
+        innerCoord[widthDim] = coord[widthDim] / factor;
+        
+        return inner.eval(innerCoord, input);
+    }
+}
+
+// ============================================================================
+
 struct Gather<T : ITensorElement, Table : IExpr<T>, Indices : IExpr<T>> : IExpr<T>
 {
     Table table;     // The lookup table (e.g., Weights [NumClasses, Dim])

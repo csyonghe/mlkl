@@ -72,6 +72,7 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testBroadcastAdd(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testIdentityPermute(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testNonTrivialPermute(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testUpsample(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testClassifierFreeGuidance(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2D(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTransposedConv2D(gInferencingCtx));
