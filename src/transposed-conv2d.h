@@ -3,6 +3,8 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+class SafeTensorsReader;
+
 // Transposed Conv2D Kernel
 // Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
 // Input/Output layout: [BatchSize, Height, Width, Channels]
@@ -60,6 +62,13 @@ public:
         String name = "transConv2d");
 
     SlangResult loadParams(TorchParamReader& reader);
+
+    // Load from SafeTensors - weights transposed from [InCh, OutCh, K, K] to [InCh, K, K, OutCh]
+    SlangResult loadParams(
+        SafeTensorsReader& reader,
+        UnownedStringSlice weightName,
+        UnownedStringSlice biasName);
+
     SlangResult loadParams(
         int kernelSize,
         int outputChannelCount,

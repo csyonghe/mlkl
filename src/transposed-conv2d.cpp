@@ -1,4 +1,5 @@
 #include "transposed-conv2d.h"
+#include "safetensors-reader.h"
 
 TransposedConv2DKernel::TransposedConv2DKernel(
     InferencingContext* context,
@@ -118,6 +119,53 @@ SlangResult TransposedConv2DKernel::loadParams(TorchParamReader& reader)
         outChannels,
         convParams.weights.getBuffer(),
         convParams.biases.getBuffer());
+}
+
+// Permutation for TransposedConv2D weight layout
+// PyTorch ConvTranspose2d: [InCh, OutCh, Ky, Kx] -> Engine: [InCh, Ky, Kx, OutCh]
+static const int kTransposedConv2DWeightPermutation[] = {0, 2, 3, 1};
+
+SlangResult TransposedConv2DKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice weightName,
+    UnownedStringSlice biasName)
+{
+    logInfo(
+        "Loading TransposedConv2D from SafeTensors: inChannels=%d, outChannels=%d, kernelSize=%d\n",
+        inChannels,
+        outChannels,
+        kernelSize);
+
+    // Read and permute weights from [InCh, OutCh, K, K] to [InCh, K, K, OutCh]
+    List<uint8_t> weightsData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(
+        weightName,
+        elementType,
+        weightsData,
+        makeConstArrayView(kTransposedConv2DWeightPermutation)));
+
+    weightsBuffer = context->createPersistentBuffer(weightsData.getBuffer(), weightsData.getCount());
+    if (!weightsBuffer)
+        return SLANG_FAIL;
+
+    // Read bias
+    List<uint8_t> biasData;
+    if (biasName.getLength() > 0 && reader.hasTensor(biasName))
+    {
+        SLANG_RETURN_ON_FAIL(reader.readTensor(biasName, elementType, biasData));
+    }
+    else
+    {
+        size_t biasSize = outChannels * getElementTypeSize(elementType);
+        biasData.setCount(biasSize);
+        memset(biasData.getBuffer(), 0, biasSize);
+    }
+
+    biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
+    if (!biasesBuffer)
+        return SLANG_FAIL;
+
+    return SLANG_OK;
 }
 
 SlangResult TransposedConv2DKernel::loadParams(

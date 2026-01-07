@@ -1,4 +1,5 @@
 #include "gather.h"
+#include "safetensors-reader.h"
 
 ElementType kGatherKernelWeightsElementType = ElementType::Float32;
 
@@ -32,6 +33,31 @@ SlangResult GatherKernel::loadParams(TorchParamReader& reader)
     weightsBuffer = context->createPersistentBuffer(
         weightsRaw.getBuffer(),
         weightsRaw.getCount() * sizeof(float),
+        "GatherWeights");
+
+    return SLANG_OK;
+}
+
+SlangResult GatherKernel::loadParams(SafeTensorsReader& reader, UnownedStringSlice weightName)
+{
+    // Verify shape
+    const SafeTensorInfo* info = reader.getTensorInfo(weightName);
+    if (!info ||
+        info->shape.getRank() != 2 ||
+        info->shape[0] != numClasses ||
+        info->shape[1] != embeddingDim)
+    {
+        return SLANG_E_INVALID_ARG;
+    }
+
+    // Read weights directly to target element type (F32 for GatherKernel)
+    List<uint8_t> weightsData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(weightName, kGatherKernelWeightsElementType, weightsData));
+
+    // Upload to GPU
+    weightsBuffer = context->createPersistentBuffer(
+        weightsData.getBuffer(),
+        weightsData.getCount(),
         "GatherWeights");
 
     return SLANG_OK;

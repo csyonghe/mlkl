@@ -9,6 +9,48 @@
 
 namespace Slang
 {
+/// RAII wrapper for memory-mapped files
+class MappedFile
+{
+public:
+    MappedFile() = default;
+    ~MappedFile() { unmap(); }
+
+    // Non-copyable
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+
+    // Movable
+    MappedFile(MappedFile&& other) noexcept;
+    MappedFile& operator=(MappedFile&& other) noexcept;
+
+    /// Get pointer to mapped data
+    const void* getData() const { return m_data; }
+    void* getData() { return m_data; }
+
+    /// Get size of mapped file in bytes
+    size_t getSize() const { return m_size; }
+
+    /// Check if file is mapped
+    bool isMapped() const { return m_data != nullptr; }
+
+    /// Unmap the file (called automatically by destructor)
+    void unmap();
+
+private:
+    friend class File;
+
+    void* m_data = nullptr;
+    size_t m_size = 0;
+
+#if SLANG_WINDOWS_FAMILY
+    void* m_fileHandle = nullptr;
+    void* m_mappingHandle = nullptr;
+#else
+    int m_fd = -1;
+#endif
+};
+
 class File
 {
 public:
@@ -18,6 +60,12 @@ public:
 
     static SlangResult readAllBytes(const String& fileName, List<unsigned char>& out);
     static SlangResult readAllBytes(const String& fileName, ScopedAllocation& out);
+
+    /// Memory-map a file for reading
+    /// @param fileName Path to the file
+    /// @param outMappedFile Output mapped file object (RAII - unmaps on destruction)
+    /// @return SLANG_OK on success
+    static SlangResult map(const String& fileName, MappedFile& outMappedFile);
 
     static SlangResult writeAllText(const String& fileName, const String& text);
 

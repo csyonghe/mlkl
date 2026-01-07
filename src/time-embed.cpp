@@ -1,5 +1,5 @@
-
 #include "time-embed.h"
+#include "safetensors-reader.h"
 
 TimeEmbedingKernel::TimeEmbedingKernel(InferencingContext* context, int outputChannels)
     : context(context), outputChannels(outputChannels)
@@ -20,6 +20,35 @@ SlangResult TimeEmbedingKernel::loadParams(TorchParamReader& reader)
     weightsBuffer = context->createPersistentBuffer(linearParams.weights);
     if (!weightsBuffer)
         return SLANG_FAIL;
+    return SLANG_OK;
+}
+
+SlangResult TimeEmbedingKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice linear1WeightName,
+    UnownedStringSlice linear1BiasName,
+    UnownedStringSlice linear2WeightName,
+    UnownedStringSlice linear2BiasName)
+{
+    logInfo("Loading TimeEmbed from SafeTensors: outputChannel %d\n", outputChannels);
+
+    // For now, this kernel only uses one linear layer internally
+    // (the sinusoidal embedding is computed on the fly)
+    // Load the first linear layer weights (TimeEmbed uses Float32)
+    List<uint8_t> weightsData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(linear1WeightName, ElementType::Float32, weightsData));
+
+    List<uint8_t> biasData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(linear1BiasName, ElementType::Float32, biasData));
+
+    weightsBuffer = context->createPersistentBuffer(weightsData.getBuffer(), weightsData.getCount());
+    if (!weightsBuffer)
+        return SLANG_FAIL;
+
+    biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
+    if (!biasesBuffer)
+        return SLANG_FAIL;
+
     return SLANG_OK;
 }
 

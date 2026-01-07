@@ -4,6 +4,8 @@
 #include "kernel-base.h"
 #include "linear.h"
 
+class SafeTensorsReader;
+
 // Apply linear projection from input latent vector `x` and context embeddings to Q, K, V,
 // then apply Flash Attention and output projection, and return `x` + attention output.
 //
@@ -39,6 +41,15 @@ public:
     CrossAttentionKernel(InferencingContext* ctx, int channelDim, int contextDim, int headDim);
 
     SlangResult loadParams(TorchParamReader& reader);
+
+    // Load from SafeTensors - projection weights for Q, K, V, and output
+    SlangResult loadParams(
+        SafeTensorsReader& reader,
+        UnownedStringSlice qWeightName,
+        UnownedStringSlice kWeightName,
+        UnownedStringSlice vWeightName,
+        UnownedStringSlice outWeightName,
+        UnownedStringSlice outBiasName = UnownedStringSlice());
 
     TensorView allocateResultBuffer(ElementType elementType, int batchSize, int seqQ, int dim);
 

@@ -31,6 +31,7 @@
 #include <ftw.h> // for nftw
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/mman.h>  // for mmap
 #endif
 
 #if SLANG_APPLE_FAMILY
@@ -191,6 +192,184 @@ bool File::exists(const String& fileName)
 #else
     struct stat statVar;
     return ::stat(fileName.getBuffer(), &statVar) == 0;
+#endif
+}
+
+// ============================================================================
+// MappedFile implementation
+// ============================================================================
+
+MappedFile::MappedFile(MappedFile&& other) noexcept
+    : m_data(other.m_data)
+    , m_size(other.m_size)
+#if SLANG_WINDOWS_FAMILY
+    , m_fileHandle(other.m_fileHandle)
+    , m_mappingHandle(other.m_mappingHandle)
+#else
+    , m_fd(other.m_fd)
+#endif
+{
+    other.m_data = nullptr;
+    other.m_size = 0;
+#if SLANG_WINDOWS_FAMILY
+    other.m_fileHandle = nullptr;
+    other.m_mappingHandle = nullptr;
+#else
+    other.m_fd = -1;
+#endif
+}
+
+MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
+{
+    if (this != &other)
+    {
+        unmap();
+        m_data = other.m_data;
+        m_size = other.m_size;
+#if SLANG_WINDOWS_FAMILY
+        m_fileHandle = other.m_fileHandle;
+        m_mappingHandle = other.m_mappingHandle;
+        other.m_fileHandle = nullptr;
+        other.m_mappingHandle = nullptr;
+#else
+        m_fd = other.m_fd;
+        other.m_fd = -1;
+#endif
+        other.m_data = nullptr;
+        other.m_size = 0;
+    }
+    return *this;
+}
+
+void MappedFile::unmap()
+{
+    if (!m_data)
+        return;
+
+#if SLANG_WINDOWS_FAMILY
+    ::UnmapViewOfFile(m_data);
+    if (m_mappingHandle)
+        ::CloseHandle(m_mappingHandle);
+    if (m_fileHandle)
+        ::CloseHandle(m_fileHandle);
+    m_mappingHandle = nullptr;
+    m_fileHandle = nullptr;
+#else
+    ::munmap(m_data, m_size);
+    if (m_fd >= 0)
+        ::close(m_fd);
+    m_fd = -1;
+#endif
+    m_data = nullptr;
+    m_size = 0;
+}
+
+/* static */ SlangResult File::map(const String& fileName, MappedFile& outMappedFile)
+{
+    // Ensure any previous mapping is released
+    outMappedFile.unmap();
+
+#if SLANG_WINDOWS_FAMILY
+    // Open file
+    HANDLE fileHandle = ::CreateFileW(
+        fileName.toWString(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+
+    if (fileHandle == INVALID_HANDLE_VALUE)
+        return SLANG_E_NOT_FOUND;
+
+    // Get file size
+    LARGE_INTEGER fileSize;
+    if (!::GetFileSizeEx(fileHandle, &fileSize))
+    {
+        ::CloseHandle(fileHandle);
+        return SLANG_FAIL;
+    }
+
+    if (fileSize.QuadPart == 0)
+    {
+        // Can't map empty files, but that's okay
+        ::CloseHandle(fileHandle);
+        return SLANG_OK;
+    }
+
+    // Create file mapping
+    HANDLE mappingHandle = ::CreateFileMappingW(
+        fileHandle,
+        NULL,
+        PAGE_READONLY,
+        0,
+        0,
+        NULL);
+
+    if (!mappingHandle)
+    {
+        ::CloseHandle(fileHandle);
+        return SLANG_FAIL;
+    }
+
+    // Map view
+    void* data = ::MapViewOfFile(
+        mappingHandle,
+        FILE_MAP_READ,
+        0,
+        0,
+        0);
+
+    if (!data)
+    {
+        ::CloseHandle(mappingHandle);
+        ::CloseHandle(fileHandle);
+        return SLANG_FAIL;
+    }
+
+    outMappedFile.m_data = data;
+    outMappedFile.m_size = static_cast<size_t>(fileSize.QuadPart);
+    outMappedFile.m_fileHandle = fileHandle;
+    outMappedFile.m_mappingHandle = mappingHandle;
+
+    return SLANG_OK;
+
+#else
+    // POSIX (Linux, macOS)
+    int fd = ::open(fileName.getBuffer(), O_RDONLY);
+    if (fd < 0)
+        return SLANG_E_NOT_FOUND;
+
+    // Get file size
+    struct stat st;
+    if (::fstat(fd, &st) != 0)
+    {
+        ::close(fd);
+        return SLANG_FAIL;
+    }
+
+    size_t fileSize = static_cast<size_t>(st.st_size);
+    if (fileSize == 0)
+    {
+        // Can't map empty files
+        ::close(fd);
+        return SLANG_OK;
+    }
+
+    // Memory map
+    void* data = ::mmap(nullptr, fileSize, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED)
+    {
+        ::close(fd);
+        return SLANG_FAIL;
+    }
+
+    outMappedFile.m_data = data;
+    outMappedFile.m_size = fileSize;
+    outMappedFile.m_fd = fd;
+
+    return SLANG_OK;
 #endif
 }
 

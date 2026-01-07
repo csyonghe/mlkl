@@ -1,4 +1,5 @@
 #include "layer-norm.h"
+#include "safetensors-reader.h"
 
 LayerNormKernel::LayerNormKernel(
     InferencingContext* ctx,
@@ -57,6 +58,26 @@ SlangResult LayerNormKernel::loadParams(TorchParamReader& reader)
     gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
 
     auto betaData = convertFloatData(beta, elementType);
+    betaBuffer = context->createPersistentBuffer(betaData.getBuffer(), betaData.getCount());
+
+    return SLANG_OK;
+}
+
+SlangResult LayerNormKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice gammaName,
+    UnownedStringSlice betaName)
+{
+    logInfo("Loading LayerNorm from SafeTensors: features=%d\n", numFeatures);
+
+    // Read gamma (scale/weight) directly to target element type
+    List<uint8_t> gammaData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(gammaName, elementType, gammaData));
+    gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
+
+    // Read beta (bias) directly to target element type
+    List<uint8_t> betaData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(betaName, elementType, betaData));
     betaBuffer = context->createPersistentBuffer(betaData.getBuffer(), betaData.getCount());
 
     return SLANG_OK;

@@ -3,6 +3,7 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+class SafeTensorsReader;
 
 // 2D Convolution Kernel
 // - Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
@@ -89,6 +90,12 @@ public:
     ElementType getElementType() const { return elementType; }
 
     SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
+
+    // Load from SafeTensors - weights are transposed from [OutCh, InCh, K, K] to [InCh, K, K, OutCh]
+    SlangResult loadParams(
+        SafeTensorsReader& reader,
+        UnownedStringSlice weightName,
+        UnownedStringSlice biasName);
 
     SlangResult loadParams(
         int kernelSize,

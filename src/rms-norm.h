@@ -3,6 +3,8 @@
 #include "kernel-base.h"
 #include "reduce.h"
 
+class SafeTensorsReader;
+
 // RMSNorm Kernel (Root Mean Square Layer Normalization)
 // - Input/Output layout: [NumRows, NumFeatures] (2D tensor)
 // - Gamma layout: [NumFeatures]
@@ -59,6 +61,9 @@ public:
 
     // Load gamma (scale) parameter from a reader
     SlangResult loadParams(TorchParamReader& reader);
+
+    // Load from SafeTensors (RMSNorm only has gamma/weight, no bias)
+    SlangResult loadParams(SafeTensorsReader& reader, UnownedStringSlice gammaName);
 
     // Execute with full EvalContext
     void queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx);

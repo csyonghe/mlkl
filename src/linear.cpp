@@ -1,6 +1,7 @@
 #include "linear.h"
 
 #include "kernels.h"
+#include "safetensors-reader.h"
 
 using namespace Slang;
 
@@ -70,6 +71,42 @@ SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
         auto biasData = convertFloatData(params.biases, elementType);
         biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
     }
+    return SLANG_OK;
+}
+
+SlangResult LinearKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice weightName,
+    UnownedStringSlice biasName)
+{
+    logInfo(
+        "Loading Linear Layer from SafeTensors: inputSize=%d, outputSize=%d\n",
+        inputVectorLength,
+        outputVectorLength);
+
+    // Verify shape
+    const SafeTensorInfo* weightInfo = reader.getTensorInfo(weightName);
+    if (!weightInfo ||
+        weightInfo->shape.getRank() != 2 ||
+        weightInfo->shape[0] != outputVectorLength ||
+        weightInfo->shape[1] != inputVectorLength)
+    {
+        return SLANG_E_INVALID_ARG;
+    }
+
+    // Read weights directly to target element type
+    List<uint8_t> weightsData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(weightName, elementType, weightsData));
+    weightsBuffer = context->createPersistentBuffer(weightsData.getBuffer(), weightsData.getCount());
+
+    // Read bias if provided
+    if (biasName.getLength() > 0 && reader.hasTensor(biasName))
+    {
+        List<uint8_t> biasData;
+        SLANG_RETURN_ON_FAIL(reader.readTensor(biasName, elementType, biasData));
+        biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
+    }
+
     return SLANG_OK;
 }
 

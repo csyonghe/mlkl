@@ -21,6 +21,23 @@ struct UnitTestProgram : public TestBase
     SlangResult execute(int argc, char* argv[])
     {
         parseOption(argc, argv);
+
+        // SafeTensors tests (no GPU needed)
+        printf("=== SafeTensors Reader Tests ===\n");
+        SLANG_RETURN_ON_FAIL(testSafeTensorsLoad());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsLoadMissing());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsTensorInfo());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsReadBasic());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsTypeConversion());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsLinear());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsConv2DPermutation());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsTransposedConv2DPermutation());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsPermutation());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsMixedPrecision());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsEmbedding());
+        SLANG_RETURN_ON_FAIL(testSafeTensorsNorm());
+        printf("=== GPU Kernel Tests ===\n");
+
         rhi::DeviceDesc deviceDesc;
         deviceDesc.slang.targetProfile = "spirv_1_6";
         List<slang::CompilerOptionEntry> compilerOptionsEntries;

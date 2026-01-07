@@ -159,3 +159,17 @@ SlangResult testRMSNorm(InferencingContext* ctx);
 SlangResult testRMSNormIdentity(InferencingContext* ctx);
 SlangResult testRMSNormLarge(InferencingContext* ctx);
 SlangResult testRMSNormHalf(InferencingContext* ctx);
+
+// Defined in test-safetensors.cpp (no InferencingContext needed)
+SlangResult testSafeTensorsLoad();
+SlangResult testSafeTensorsLoadMissing();
+SlangResult testSafeTensorsTensorInfo();
+SlangResult testSafeTensorsReadBasic();
+SlangResult testSafeTensorsTypeConversion();
+SlangResult testSafeTensorsLinear();
+SlangResult testSafeTensorsConv2DPermutation();
+SlangResult testSafeTensorsTransposedConv2DPermutation();
+SlangResult testSafeTensorsPermutation();
+SlangResult testSafeTensorsMixedPrecision();
+SlangResult testSafeTensorsEmbedding();
+SlangResult testSafeTensorsNorm();

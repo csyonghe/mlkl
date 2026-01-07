@@ -2,6 +2,8 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+class SafeTensorsReader;
+
 // Linear Kernel: Out = In @ W^T + Bias (Weights expected in [In, Out] layout)
 // W is of shape [outputVectorLength, inputVectorLength]
 // In is of shape [batchSize, inputVectorLength]
@@ -88,7 +90,13 @@ public:
 
     ElementType getElementType() const { return elementType; }
 
-    SlangResult loadParams(TorchParamReader& reader, bool loadBiass = true);
+    SlangResult loadParams(TorchParamReader& reader, bool loadBias = true);
+
+    // Load from SafeTensors - weights expected in [Out, In] layout (same as PyTorch Linear)
+    SlangResult loadParams(
+        SafeTensorsReader& reader,
+        UnownedStringSlice weightName,
+        UnownedStringSlice biasName = UnownedStringSlice());
 
     TensorView allocateResultBuffer(ElementType elementType, int batchSize);
 

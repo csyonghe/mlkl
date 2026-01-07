@@ -1,4 +1,5 @@
 #include "conv2d.h"
+#include "safetensors-reader.h"
 
 static const int kTinyKernelMaxOutputPixels = 4;
 
@@ -114,6 +115,70 @@ SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseB
         outChannels,
         convParams.weights.getBuffer(),
         convParams.biases.getBuffer()));
+    return SLANG_OK;
+}
+
+// Permutation constants for Conv2D weight layouts
+// PyTorch Conv2D: [OutCh, InCh, Ky, Kx] -> Engine: [InCh, Ky, Kx, OutCh]
+static const int kConv2DWeightPermutation[] = {1, 2, 3, 0};
+// Transposed layout for wave-reduced kernel: [OutCh, Ky, Kx, InCh]
+static const int kConv2DWeightTransposedPermutation[] = {0, 2, 3, 1};
+
+SlangResult Conv2DKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice weightName,
+    UnownedStringSlice biasName)
+{
+    logInfo(
+        "Loading Conv2D Layer from SafeTensors: inChannels=%d, outChannels=%d, kernelSize=%d\n",
+        inChannels,
+        outChannels,
+        kernelSize);
+
+    // Read and permute weights from [OutCh, InCh, K, K] to [InCh, K, K, OutCh]
+    List<uint8_t> weightsData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(
+        weightName,
+        elementType,
+        weightsData,
+        makeConstArrayView(kConv2DWeightPermutation)));
+
+    weightsBuffer = context->createPersistentBuffer(weightsData.getBuffer(), weightsData.getCount());
+    if (!weightsBuffer)
+        return SLANG_FAIL;
+
+    // Read bias
+    List<uint8_t> biasData;
+    if (biasName.getLength() > 0 && reader.hasTensor(biasName))
+    {
+        SLANG_RETURN_ON_FAIL(reader.readTensor(biasName, elementType, biasData));
+    }
+    else
+    {
+        // No bias - initialize to zeros
+        size_t biasSize = outChannels * getElementTypeSize(elementType);
+        biasData.setCount(biasSize);
+        memset(biasData.getBuffer(), 0, biasSize);
+    }
+
+    biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
+    if (!biasesBuffer)
+        return SLANG_FAIL;
+
+    // Create transposed weights buffer for wave-reduced kernel
+    // [OutCh, InCh, K, K] -> [OutCh, K, K, InCh]
+    List<uint8_t> transposedData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(
+        weightName,
+        elementType,
+        transposedData,
+        makeConstArrayView(kConv2DWeightTransposedPermutation)));
+
+    weightsTransposedBuffer = context->createPersistentBuffer(
+        transposedData.getBuffer(), transposedData.getCount());
+    if (!weightsTransposedBuffer)
+        return SLANG_FAIL;
+
     return SLANG_OK;
 }
 

@@ -1,4 +1,5 @@
 #include "cross-attention.h"
+#include "safetensors-reader.h"
 
 #include <cmath>
 
@@ -68,6 +69,37 @@ SlangResult CrossAttentionKernel::loadParams(TorchParamReader& reader)
     SLANG_RETURN_ON_FAIL(projQ->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projKV->loadParams(reader, false));
     SLANG_RETURN_ON_FAIL(projOut->loadParams(reader, true));
+    return SLANG_OK;
+}
+
+SlangResult CrossAttentionKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice qWeightName,
+    UnownedStringSlice kWeightName,
+    UnownedStringSlice vWeightName,
+    UnownedStringSlice outWeightName,
+    UnownedStringSlice outBiasName)
+{
+    // Load Q projection (no bias in SD attention)
+    SLANG_RETURN_ON_FAIL(projQ->loadParams(reader, qWeightName, UnownedStringSlice()));
+
+    // Load K and V as combined projection
+    // Read K and V directly to target type
+    ElementType elemType = projKV->getElementType();
+    List<uint8_t> kData, vData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(kWeightName, elemType, kData));
+    SLANG_RETURN_ON_FAIL(reader.readTensor(vWeightName, elemType, vData));
+
+    // Concatenate K and V weights
+    List<uint8_t> kvData;
+    kvData.addRange(kData);
+    kvData.addRange(vData);
+
+    projKV->weightsBuffer = context->createPersistentBuffer(kvData.getBuffer(), kvData.getCount());
+
+    // Load output projection
+    SLANG_RETURN_ON_FAIL(projOut->loadParams(reader, outWeightName, outBiasName));
+
     return SLANG_OK;
 }
 

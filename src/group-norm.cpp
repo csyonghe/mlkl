@@ -1,4 +1,5 @@
 #include "group-norm.h"
+#include "safetensors-reader.h"
 
 GroupNormKernel::GroupNormKernel(
     InferencingContext* ctx,
@@ -59,6 +60,26 @@ SlangResult GroupNormKernel::loadParams(TorchParamReader& reader)
     gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
 
     auto betaData = convertFloatData(beta, elementType);
+    betaBuffer = context->createPersistentBuffer(betaData.getBuffer(), betaData.getCount());
+
+    return SLANG_OK;
+}
+
+SlangResult GroupNormKernel::loadParams(
+    SafeTensorsReader& reader,
+    UnownedStringSlice gammaName,
+    UnownedStringSlice betaName)
+{
+    logInfo("Loading GroupNorm from SafeTensors: channels=%d, groups=%d\n", numChannels, numGroups);
+
+    // Read gamma (scale/weight) directly to target element type
+    List<uint8_t> gammaData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(gammaName, elementType, gammaData));
+    gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
+
+    // Read beta (bias) directly to target element type
+    List<uint8_t> betaData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(betaName, elementType, betaData));
     betaBuffer = context->createPersistentBuffer(betaData.getBuffer(), betaData.getCount());
 
     return SLANG_OK;

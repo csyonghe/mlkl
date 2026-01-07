@@ -2,6 +2,8 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
+class SafeTensorsReader;
+
 class GatherKernel : public RefObject
 {
 private:
@@ -22,6 +24,9 @@ public:
 
     // Loads weights from the reader and uploads them to the GPU
     SlangResult loadParams(TorchParamReader& reader);
+
+    // Load from SafeTensors - embeddings expected in [NumClasses, EmbeddingDim] layout
+    SlangResult loadParams(SafeTensorsReader& reader, UnownedStringSlice weightName);
 
     // Helper to allocate [Batch, EmbeddingDim]
     TensorView allocateResultBuffer(ElementType elementType, int batchSize);

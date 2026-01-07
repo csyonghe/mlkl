@@ -3,6 +3,8 @@
 #include "kernel-base.h"
 #include "reduce.h"
 
+class SafeTensorsReader;
+
 // LayerNorm Kernel
 // - Input/Output layout: [NumRows, NumFeatures] (2D tensor)
 // - Gamma/Beta layout: [NumFeatures]
@@ -59,6 +61,12 @@ public:
 
     // Load gamma (scale) and beta (bias) parameters from a reader
     SlangResult loadParams(TorchParamReader& reader);
+
+    // Load from SafeTensors
+    SlangResult loadParams(
+        SafeTensorsReader& reader,
+        UnownedStringSlice gammaName,
+        UnownedStringSlice betaName);
 
     // Execute with full EvalContext
     void queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx);

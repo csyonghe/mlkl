@@ -1,4 +1,5 @@
 #include "rms-norm.h"
+#include "safetensors-reader.h"
 
 RMSNormKernel::RMSNormKernel(
     InferencingContext* ctx,
@@ -50,6 +51,18 @@ SlangResult RMSNormKernel::loadParams(TorchParamReader& reader)
 
     // Convert to kernel's element type and create buffer
     auto gammaData = convertFloatData(gamma, elementType);
+    gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
+
+    return SLANG_OK;
+}
+
+SlangResult RMSNormKernel::loadParams(SafeTensorsReader& reader, UnownedStringSlice gammaName)
+{
+    logInfo("Loading RMSNorm from SafeTensors: features=%d\n", numFeatures);
+
+    // Read gamma (scale/weight) directly to target element type
+    List<uint8_t> gammaData;
+    SLANG_RETURN_ON_FAIL(reader.readTensor(gammaName, elementType, gammaData));
     gammaBuffer = context->createPersistentBuffer(gammaData.getBuffer(), gammaData.getCount());
 
     return SLANG_OK;

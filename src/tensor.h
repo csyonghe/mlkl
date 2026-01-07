@@ -88,14 +88,18 @@ enum class ElementType
 {
     Float16,
     Float32,
+    BFloat16,
     Float8E4M3,
     Float8E5M2,
     Int8,
     Int16,
     Int32,
+    Int64,
     UInt8,
     UInt16,
     UInt32,
+    UInt64,
+    Bool,
 };
 
 size_t getElementTypeSize(ElementType elementType);

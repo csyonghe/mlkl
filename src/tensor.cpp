@@ -10,6 +10,8 @@ size_t getElementTypeSize(ElementType elementType)
         return 2;
     case ElementType::Float32:
         return 4;
+    case ElementType::BFloat16:
+        return 2;
     case ElementType::Float8E4M3:
         return 1;
     case ElementType::Float8E5M2:
@@ -20,12 +22,18 @@ size_t getElementTypeSize(ElementType elementType)
         return 2;
     case ElementType::Int32:
         return 4;
+    case ElementType::Int64:
+        return 8;
     case ElementType::UInt8:
         return 1;
     case ElementType::UInt16:
         return 2;
     case ElementType::UInt32:
         return 4;
+    case ElementType::UInt64:
+        return 8;
+    case ElementType::Bool:
+        return 1;
     default:
         throw std::runtime_error("Unknown ElementType");
     }
