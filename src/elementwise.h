@@ -342,9 +342,9 @@ class UpsampleNode : public ExprNode
 {
 public:
     Expr inner;
-    uint32_t factor;         // Upsampling factor (e.g., 2 for 2x)
-    uint32_t heightDim;      // Which dimension is height (default: 1 for NHWC)
-    uint32_t widthDim;       // Which dimension is width (default: 2 for NHWC)
+    uint32_t factor;    // Upsampling factor (e.g., 2 for 2x)
+    uint32_t heightDim; // Which dimension is height (default: 1 for NHWC)
+    uint32_t widthDim;  // Which dimension is width (default: 2 for NHWC)
 
     RefPtr<ProgramNode> innerProgram;
 
@@ -527,6 +527,10 @@ Expr tanh(Expr i);
 Expr silu(Expr i);
 // Represent the GELU activation function, f(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
 Expr gelu(Expr i);
+
+// QuickGELU activation (used by CLIP): f(x) = x * sigmoid(1.702 * x)
+// This is a faster approximation of GELU used in OpenAI's CLIP model.
+Expr quickGelu(Expr x);
 
 // Operator Overload for Negation
 inline Expr operator-(Expr i)

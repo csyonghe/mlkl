@@ -1,6 +1,7 @@
 // Stable Diffusion Example
-// Currently runs VAE decoder tests
+// Runs VAE decoder and CLIP encoder tests
 
+#include "clip-encoder-test.h"
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
 #include "inference-context.h"
@@ -52,6 +53,10 @@ struct StableDiffusionProgram : public TestBase
         }
 
         ctx = new InferencingContext(device);
+
+        // Run CLIP encoder tests
+        printf("\n--- CLIP Encoder Tests ---\n");
+        SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
 
         // Run VAE decoder tests
         printf("--- VAE Decoder Tests ---\n");

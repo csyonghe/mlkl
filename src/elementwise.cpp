@@ -512,7 +512,7 @@ String UpsampleNode::getSlangTypeName(ElementType elemType) const
 Shape UpsampleNode::resolveShape(const EvalContext& ctx) const
 {
     Shape innerShape = inner.node->resolveShape(ctx);
-    
+
     // Upsample the spatial dimensions
     Shape result;
     for (int i = 0; i < innerShape.getRank(); i++)
@@ -533,7 +533,7 @@ void UpsampleNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
     // 1. Pack inner program
     innerProgram->pack(writer, ctx);
-    
+
     // 2. Pack upsample parameters
     writer.write(factor);
     writer.write(heightDim);
@@ -946,6 +946,10 @@ Expr silu(Expr i)
 Expr gelu(Expr i)
 {
     return Expr(new UnaryNode(i, UnaryOp::Gelu));
+}
+Expr quickGelu(Expr x)
+{
+    return x * sigmoid(constant(1.702f) * x);
 }
 Expr pow(Expr base, Expr exponent)
 {

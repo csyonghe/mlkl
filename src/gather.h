@@ -4,6 +4,15 @@
 
 class SafeTensorsReader;
 
+// Gather/Embedding lookup kernel: Output[b, d] = Weights[Input[b], d]
+//
+// FUSION OPPORTUNITY: Consider fusing into the consuming kernel!
+// - For token + positional embeddings: gather both and add in single kernel
+// - For embedding -> Linear: fuse gather into Linear input expression
+//
+// Only use standalone GatherKernel when:
+// - The embedding result is used by multiple downstream kernels
+// - No adjacent kernel supports input expression fusion
 class GatherKernel : public RefObject
 {
 private:
@@ -32,7 +41,6 @@ public:
     TensorView allocateResultBuffer(ElementType elementType, int batchSize);
 
     // Executes the gather: Output[b, d] = Weights[Input[b], d]
-    // NOTE: inputLabels must be a buffer of FLOATs (e.g. 3.0f for class 3)
-    // because the generic IExpr system currently operates on floats.
+    // inputLabels contains token/class indices (values are converted to int internally)
     void queueExecute(InferencingTask& task, TensorView output, TensorView inputLabels);
 };
