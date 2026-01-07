@@ -1,17 +1,17 @@
 implementing mlkl;
 
-struct SoftmaxParams
+struct SoftmaxParams<T : ITensorElement, TInput : IExpr<T>, TSink : ISink<T>>
 {
-    float* input;
-    float* output;
+    TInput input;
+    TSink output;
     uint stride;   // The size of the dimension we are normalizing (N)
     uint rowCount; // Total number of rows to process
 };
 
 // Dispatch: x=RowIndex (from 0 to Batch*Heads*SeqQ - 1)
 [numthreads(256, 1, 1)]
-void softmax(
-    ConstantBuffer<SoftmaxParams> params,
+void softmax<T : ITensorElement, TInput : IExpr<T>, TSink : ISink<T>>(
+    ConstantBuffer<SoftmaxParams<T, TInput, TSink>, CDataLayout> params,
     uint3 id : SV_DispatchThreadID)
 {
     uint rowIdx = id.x;
@@ -19,30 +19,36 @@ void softmax(
     // Bounds Check: Prevent extra threads from accessing memory
     if (rowIdx >= params.rowCount) return;
 
-    // Base pointer for this row
-    float* rowInput = params.input + rowIdx * params.stride;
-    float* rowOutput = params.output + rowIdx * params.stride;
+    Input<T> emptyInput = {};
+    emptyInput.value = T.UnpackedType(0);
 
-    // 1. Find Max
+    // 1. Find Max (using float for numerical stability)
     float maxVal = -1e38f; 
     for (uint i = 0; i < params.stride; i++)
     {
-        maxVal = max(maxVal, rowInput[i]);
+        Coord coord = Coord(rowIdx, i);
+        float val = params.input.eval(coord, emptyInput).toFloat();
+        maxVal = max(maxVal, val);
     }
 
-    // 2. Compute Exp and Sum
+    // 2. Compute Exp and Sum (in float for stability)
     float sum = 0.0f;
     for (uint i = 0; i < params.stride; i++)
     {
-        float val = exp(rowInput[i] - maxVal);
-        rowOutput[i] = val; // Store temporarily
-        sum += val;
+        Coord coord = Coord(rowIdx, i);
+        float val = params.input.eval(coord, emptyInput).toFloat();
+        float expVal = exp(val - maxVal);
+        sum += expVal;
     }
 
-    // 3. Normalize
+    // 3. Normalize and output
     float invSum = 1.0f / sum;
     for (uint i = 0; i < params.stride; i++)
     {
-        rowOutput[i] *= invSum;
+        Coord coord = Coord(rowIdx, i);
+        float val = params.input.eval(coord, emptyInput).toFloat();
+        float expVal = exp(val - maxVal);
+        T.UnpackedType result = T.UnpackedType.fromFloat(expVal * invSum);
+        params.output.store(coord, result);
     }
 }

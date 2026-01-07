@@ -60,13 +60,16 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testTransposedConv2D(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testBatchGemm(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testFusedBatchGemm(gInferencingCtx));
-        
+        SLANG_RETURN_ON_FAIL(testSoftmax(gInferencingCtx));
+
         // Half precision tests
         SLANG_RETURN_ON_FAIL(testLinearHalf(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2DHalf(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTransposedConv2DHalf(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testBatchGemmHalf(gInferencingCtx));
-        
+        SLANG_RETURN_ON_FAIL(testSoftmaxHalf(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testFlashAttentionHalf(gInferencingCtx));
+
         // Integer tests
         SLANG_RETURN_ON_FAIL(testLinearInt(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2DInt(gInferencingCtx));

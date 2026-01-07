@@ -106,9 +106,11 @@ SlangResult testBatchGemmHalf(InferencingContext* ctx);
 
 // Defined in test-cross-attention.cpp
 SlangResult testFlashAttention(InferencingContext* ctx);
+SlangResult testFlashAttentionHalf(InferencingContext* ctx);
 SlangResult testFlashAttentionInputPermutationOnly(InferencingContext* ctx);
 SlangResult testFlashAttentionFusedPermutation(InferencingContext* ctx);
 SlangResult testSoftmax(InferencingContext* ctx);
+SlangResult testSoftmaxHalf(InferencingContext* ctx);
 SlangResult testCrossAttentionFull(InferencingContext* ctx);
 
 // Defined in test-conv2d.cpp

@@ -157,6 +157,54 @@ SlangResult testSoftmax(InferencingContext* ctx)
     MLKL_TEST_OK();
 }
 
+SlangResult testSoftmaxHalf(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    int rows = 16, cols = 64;
+    List<float> inputData;
+    initRandom(inputData, rows * cols);
+
+    // CPU reference: apply +1 to input, then softmax
+    List<float> inputPlusOne;
+    inputPlusOne.setCount(inputData.getCount());
+    for (Index i = 0; i < inputData.getCount(); i++)
+    {
+        inputPlusOne[i] = inputData[i] + 1.0f;
+    }
+
+    List<float> expectedOutput;
+    expectedOutput.setCount(inputData.getCount());
+    cpuSoftmax(inputPlusOne.getBuffer(), expectedOutput.getBuffer(), cols, rows);
+
+    // Convert input to half precision
+    List<uint16_t> inputHalf;
+    floatToHalf(inputData, inputHalf);
+
+    auto inputBuf = ctx->createTensor(
+        ElementType::Float16,
+        Shape(rows, cols),
+        inputHalf.getCount() * sizeof(uint16_t),
+        inputHalf.getBuffer(),
+        "SoftmaxInput_Half");
+
+    // Create softmax kernel with non-trivial input expression: buffer() + 1.0f
+    Expr inputExpr = buffer() + 1.0f;
+    SoftmaxKernel kernel(ctx, ElementType::Float16, inputExpr, bufferSink());
+
+    auto task = ctx->createTask();
+    auto outputBuf = kernel.allocateResultBuffer(ElementType::Float16, rows, cols);
+    kernel.queueExecute(task, outputBuf, inputBuf->getView());
+    task.execute();
+
+    if (!checkOutputHalf(ctx, outputBuf, expectedOutput))
+    {
+        printf("testSoftmaxHalf FAILED\n");
+        return SLANG_FAIL;
+    }
+    MLKL_TEST_OK();
+}
+
 SlangResult testCrossAttentionFull(InferencingContext* ctx)
 {
     MLKL_TEST_BEGIN();
@@ -377,6 +425,102 @@ SlangResult testFlashAttention(InferencingContext* ctx)
         printf("  - Shape Q: [%d, %d, %d, %d]\n", B, H, Sq, headDim);
         printf("  - Shape K/V: [%d, %d, %d, %d]\n", B, H, Skv, headDim);
         printf("  - Max Difference: %e\n", maxDiff);
+        return SLANG_FAIL;
+    }
+    MLKL_TEST_OK();
+}
+
+SlangResult testFlashAttentionHalf(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+    
+    // 1. Configuration (Cross-attention scenario with half precision)
+    int B = 1;
+    int H = 4;
+    int Sq = 64;  // Smaller for half precision test
+    int Skv = 32;
+    int Dim = 64;
+    int headDim = Dim / H;
+    float scale = 1.0f / sqrtf((float)headDim);
+
+    // 2. Generate Data
+    auto generate = [&](int size)
+    {
+        List<float> list;
+        list.setCount(size);
+        for (int i = 0; i < size; i++)
+            list[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+        return list;
+    };
+
+    List<float> hostQ = generate(B * H * Sq * headDim);
+    List<float> hostK = generate(B * H * Skv * headDim);
+    List<float> hostV = generate(B * H * Skv * headDim);
+
+    // 3. Run CPU Reference
+    List<float> cpuOut;
+    runCpuAttentionCore(cpuOut, hostQ, hostK, hostV, B, H, Sq, Skv, Dim);
+
+    // 4. Convert to half precision
+    List<uint16_t> hostQHalf, hostKHalf, hostVHalf;
+    floatToHalf(hostQ, hostQHalf);
+    floatToHalf(hostK, hostKHalf);
+    floatToHalf(hostV, hostVHalf);
+
+    // 5. Run GPU Kernel with half precision
+    Expr eQ = buffer();
+    Expr eK = buffer();
+    Expr eV = buffer();
+    Expr eOutFunc = kernelOutput();
+
+    // Create kernel with Float16 element type
+    RefPtr<FlashAttentionKernel> kernel = new FlashAttentionKernel(
+        ctx,
+        ElementType::Float16,
+        eQ,
+        eK,
+        eV,
+        eOutFunc,
+        32,       // blockSizeR
+        32,       // blockSizeC
+        headDim);
+
+    auto bufQ = ctx->createTensor(
+        ElementType::Float16,
+        Shape{B, H, Sq, headDim},
+        hostQHalf.getCount() * sizeof(uint16_t),
+        hostQHalf.getBuffer(),
+        "Q_Half");
+    auto bufK = ctx->createTensor(
+        ElementType::Float16,
+        Shape{B, H, Skv, headDim},
+        hostKHalf.getCount() * sizeof(uint16_t),
+        hostKHalf.getBuffer(),
+        "K_Half");
+    auto bufV = ctx->createTensor(
+        ElementType::Float16,
+        Shape{B, H, Skv, headDim},
+        hostVHalf.getCount() * sizeof(uint16_t),
+        hostVHalf.getBuffer(),
+        "V_Half");
+    auto bufOut = kernel->allocateResultBuffer(ElementType::Float16, Sq, H, B);
+
+    Dictionary<Expr, InputInfo> inputs;
+    inputs.add(eQ, bufQ->getView());
+    inputs.add(eK, bufK->getView());
+    inputs.add(eV, bufV->getView());
+
+    auto task = ctx->createTask();
+    kernel->queueExecute(task, bufOut, inputs, Sq, Skv, H, B, scale, false);
+    task.execute();
+
+    // 6. Comparison with larger tolerance for half precision
+    if (!checkOutputHalf(ctx, bufOut, cpuOut))
+    {
+        printf("[FAILED] %s: GPU and CPU results diverge.\n", __func__);
+        printf("Verification Results:\n");
+        printf("  - Shape Q: [%d, %d, %d, %d]\n", B, H, Sq, headDim);
+        printf("  - Shape K/V: [%d, %d, %d, %d]\n", B, H, Skv, headDim);
         return SLANG_FAIL;
     }
     MLKL_TEST_OK();
