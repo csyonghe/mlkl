@@ -82,7 +82,7 @@ struct Shape
     bool isCompatibleWith(const Shape& other) const;
 };
 
-Slang::List<int> computeDenseStrides(const Shape& shape);
+Slang::Array<uint32_t, 8> computeDenseStrides(const Shape& shape);
 
 enum class ElementType
 {

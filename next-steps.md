@@ -1,7 +1,6 @@
-[ ] Add `TensorView` C++ class that wraps both shape/stride and a BufferView.
-[ ] Refactor the library to create and accept TensorView everywhere for validation.
-[ ] Refactor BufferSink to take physical strides directly from TensorView typed parameters provided at kernel launch.
-[ ] Add `OffsetSink` to allow writing to slices of output buffers.
+[ X ] Add `TensorView` C++ class that wraps both shape/stride and a BufferView.
+[ X ] Refactor the library to create and accept TensorView everywhere for validation.
+[ X ] Add `TensorView.slice` to allow writing to slices of output buffers.
 [ ] Make `IExpr` work with `Coord` instead of linear index.
 [ ] Make `IExpr` generic on element type, and provide `evalVec` for vectorized loads.
 [ ] Test that batching works for the simple unet model.

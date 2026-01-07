@@ -56,9 +56,9 @@ bool Shape::isCompatibleWith(const Shape& other) const
     return *this == other;
 }
 
-List<int> computeDenseStrides(const Shape& shape)
+Array<uint32_t, 8> computeDenseStrides(const Shape& shape)
 {
-    List<int> strides;
+    Array<uint32_t, 8> strides;
     for (int i = 0; i < shape.getRank(); i++)
         strides.add(0);
 

@@ -306,7 +306,7 @@ void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     }
 
     // 2. Standard Tensor Case
-    List<int> innerStrides = computeDenseStrides(innerShape);
+    auto innerStrides = computeDenseStrides(innerShape);
     uint32_t rank = (uint32_t)outShape.getRank();
     writer.write(rank);
 
@@ -440,7 +440,7 @@ void TransposeNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
     Shape innerShape = inner.node->resolveShape(ctx);
     Shape outShape = resolveShape(ctx);
-    List<int> innerStrides = computeDenseStrides(innerShape);
+    auto innerStrides = computeDenseStrides(innerShape);
     int rank = innerShape.getRank();
 
     int d0 = dim0 < 0 ? rank + dim0 : dim0;
@@ -535,8 +535,8 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
         trueAxis += lShape.getRank();
 
     // 3. Compute Metadata
-    List<int> lStrides = computeDenseStrides(lShape);
-    List<int> rStrides = computeDenseStrides(rShape);
+    auto lStrides = computeDenseStrides(lShape);
+    auto rStrides = computeDenseStrides(rShape);
 
     // 4. Pack Scalars (Axis, Split, Rank)
     // Axis
@@ -586,9 +586,8 @@ void BufferSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& ev
     uint32_t rank = (uint32_t)evalCtx.logicalShape.getRank();
     writer.write(rank);
 
-    // Calculate and write physical strides based on the current logical shape
-    // Note: We compute strides assuming Row-Major storage in the physical buffer.
-    auto strides = computeDenseStrides(evalCtx.logicalShape);
+    // Calculate and write physical strides based on the buffer's physical shape.
+    auto strides = computeDenseStrides(evalCtx.outputBuffer.shape);
 
     uint32_t strideArr[8] = {0};
     for (int i = 0; i < (int)rank; ++i)
