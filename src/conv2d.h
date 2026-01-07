@@ -15,9 +15,12 @@ private:
     ComPtr<rhi::IComputePipeline> flatWaveReducePipeline;
 
     InferencingContext* context;
+    ElementType elementType;
     ProgramNode inputProgram;
     ProgramNode outputProgram;
     SinkExpr sinkExpr;
+
+    void validateTensorElementType(const TensorView& tv, const char* name) const;
 
 public:
     int tileSize;
@@ -35,6 +38,7 @@ public:
 
     Conv2DKernel(
         InferencingContext* context,
+        ElementType elementType,
         int tileSize,
         int kernelSize,
         int stride,
@@ -45,6 +49,33 @@ public:
         SinkExpr sinkExpr,
         String name = "conv2d");
 
+    // Convenience constructor defaulting to Float32.
+    Conv2DKernel(
+        InferencingContext* context,
+        int tileSize,
+        int kernelSize,
+        int stride,
+        int inChannels,
+        int outChannels,
+        Expr inputExpr,
+        Expr outputExpr,
+        SinkExpr sinkExpr,
+        String name = "conv2d")
+        : Conv2DKernel(
+              context,
+              ElementType::Float32,
+              tileSize,
+              kernelSize,
+              stride,
+              inChannels,
+              outChannels,
+              inputExpr,
+              outputExpr,
+              sinkExpr,
+              name)
+    {
+    }
+
     Conv2DKernel(
         InferencingContext* context,
         int tileSize,
@@ -54,6 +85,8 @@ public:
         int outChannels,
         Expr outputExpr = kernelOutput(),
         String name = "conv2d");
+
+    ElementType getElementType() const { return elementType; }
 
     SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
 

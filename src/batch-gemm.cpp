@@ -2,12 +2,13 @@
 
 BatchGemmKernel::BatchGemmKernel(
     InferencingContext* ctx,
+    ElementType elementType,
     Expr A,
     Expr B,
     Expr C,
     SinkExpr sinkExpr,
     Expr Out)
-    : context(ctx), sinkExpr(sinkExpr)
+    : context(ctx), elementType(elementType), sinkExpr(sinkExpr)
 {
     int globalRegCounter = 0;
 
@@ -17,13 +18,26 @@ BatchGemmKernel::BatchGemmKernel(
     programC = compileExprToProgram(C, &globalRegCounter);
     programOut = compileExprToProgram(Out, &globalRegCounter);
 
+    String elemTypeName = getSlangElementTypeName(elementType);
     String typeArgs[] = {
-        programA.getSlangTypeName(),
-        programB.getSlangTypeName(),
-        programC.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName(),
-        programOut.getSlangTypeName()};
+        elemTypeName,
+        programA.getSlangTypeName(elementType),
+        programB.getSlangTypeName(elementType),
+        programC.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType),
+        programOut.getSlangTypeName(elementType)};
     pipeline = ctx->createComputePipeline("batchGemm", makeArrayView(typeArgs));
+}
+
+void BatchGemmKernel::validateTensorElementType(const TensorView& tv, const char* name) const
+{
+    if (tv && tv.elementType != elementType)
+    {
+        throw InvalidOperationException(
+            String("BatchGemmKernel: ") + name + " element type mismatch. Expected " +
+            getSlangElementTypeName(elementType) + " but got " +
+            getSlangElementTypeName(tv.elementType));
+    }
 }
 
 // Allocate output buffer C [BatchSize, M, N]
@@ -43,6 +57,24 @@ void BatchGemmKernel::queueExecute(
     float beta,
     EvalContext& ctx)
 {
+    // Validate element types
+    validateTensorElementType(output, "output");
+    for (auto bufferNode : programA.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input A");
+    }
+    for (auto bufferNode : programB.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input B");
+    }
+    for (auto bufferNode : programC.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input C");
+    }
+
     auto shapeA = this->programA.resolveShape(ctx);
     auto shapeB = this->programB.resolveShape(ctx);
     auto shapeC = this->programC.resolveShape(ctx);

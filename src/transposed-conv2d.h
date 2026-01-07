@@ -16,6 +16,7 @@ private:
     ProgramNode inputProgram;
     ProgramNode outputProgram;
     SinkExpr sinkExpr;
+    ElementType elementType;
 
 public:
     int tileSize;
@@ -27,6 +28,7 @@ public:
 
     TransposedConv2DKernel(
         InferencingContext* context,
+        ElementType elementType,
         int tileSize,
         int kernelSize,
         int stride,
@@ -37,6 +39,16 @@ public:
         SinkExpr sinkExpr,
         String name = "transConv2d");
 
+    TransposedConv2DKernel(
+        InferencingContext* context,
+        ElementType elementType,
+        int tileSize,
+        int kernelSize,
+        int stride,
+        int inChannels,
+        int outChannels,
+        Expr outputExpr = kernelOutput(),
+        String name = "transConv2d");
     TransposedConv2DKernel(
         InferencingContext* context,
         int tileSize,

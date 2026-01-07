@@ -1,6 +1,6 @@
 implementing mlkl;
 
-struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>
+struct BatchGemmParams<T : ITensorElement, TA : IExpr<T>, TB : IExpr<T>, TC : IExpr<T>, TSink : ISink<T>, TOut : IExpr<T>>
 {
     TA A;
     TB B;
@@ -12,14 +12,14 @@ struct BatchGemmParams<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>
     uint N; 
     uint K; 
     
-    float alpha;
-    float beta;
+    float alpha;  // Keep as float for simplicity
+    float beta;   // Keep as float for simplicity
 };
 
 // Dispatch: x=N/16, y=M/16, z=BatchSize
 [numthreads(16, 16, 1)]
-void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>(
-    ConstantBuffer<BatchGemmParams<TA, TB, TC, TSink, TOut>, CDataLayout> params,
+void batchGemm<T : ITensorElement, TA : IExpr<T>, TB : IExpr<T>, TC : IExpr<T>, TSink : ISink<T>, TOut : IExpr<T>>(
+    ConstantBuffer<BatchGemmParams<T, TA, TB, TC, TSink, TOut>, CDataLayout> params,
     uint3 id : SV_DispatchThreadID)
 {
     uint col = id.x; // n
@@ -38,31 +38,33 @@ void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>(
     uint batchOffsetB = batchIdx * params.K * params.N;
     uint batchOffsetC = batchIdx * params.M * params.N;
 
-    float sum = 0.0f;
-    Input emptyInput = {}; 
-    emptyInput.value = 0.0f;
+    // Accumulate in T.UnpackedType precision
+    T.UnpackedType sum = T.UnpackedType(0);
+    Input<T> emptyInput = {}; 
+    emptyInput.value = T.UnpackedType(0);
 
     for (uint k = 0; k < params.K; k++)
     {
         // A[batch, row, k]
-        float valA = params.A.eval(Coord(batchIdx, row, k), emptyInput);
+        T.UnpackedType valA = params.A.eval(Coord(batchIdx, row, k), emptyInput);
 
         // B[batch, k, col]
-        float valB = params.B.eval(Coord(batchIdx, k, col), emptyInput);
+        T.UnpackedType valB = params.B.eval(Coord(batchIdx, k, col), emptyInput);
         
-        sum += valA * valB;
+        sum = sum + valA * valB;
     }
 
     // C[batch, row, col]
     Coord outCoord = Coord(batchIdx, row, col);
-    float valC = params.C.eval(outCoord, emptyInput);
+    T.UnpackedType valC = params.C.eval(outCoord, emptyInput);
 
-    float res = params.alpha * sum + params.beta * valC;
+    // alpha/beta are float, convert to T.UnpackedType for arithmetic
+    T.UnpackedType res = T.UnpackedType(params.alpha) * sum + T.UnpackedType(params.beta) * valC;
 
     // Apply Output Epilogue (Activation, etc.)
-    Input outInput = {};
+    Input<T> outInput = {};
     outInput.value = res;
-    float finalVal = params.FOut.eval(outCoord, outInput);
+    T.UnpackedType finalVal = params.FOut.eval(outCoord, outInput);
 
     params.Sink.store(outCoord, finalVal);
 }

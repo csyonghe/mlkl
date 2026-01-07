@@ -180,3 +180,56 @@ SlangResult testFusedBatchGemm(InferencingContext* ctx)
     }
     MLKL_TEST_OK();
 }
+
+SlangResult testBatchGemmHalf(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    int batch = 2, M = 16, N = 16, K = 64;
+    List<float> A, B, Expected;
+    initRandom(A, batch * M * K);
+    initRandom(B, batch * N * K);
+    Expected.setCount(batch * M * N);
+
+    // Standard case: A @ B^T
+    cpuBatchGemm(A.getBuffer(), B.getBuffer(), Expected.getBuffer(), batch, M, N, K, false, true);
+
+    // Convert to half precision
+    List<uint16_t> AHalf, BHalf;
+    floatToHalf(A, AHalf);
+    floatToHalf(B, BHalf);
+
+    auto bufA = ctx->createTensor(
+        ElementType::Float16,
+        Shape(batch, M, K),
+        AHalf.getCount() * sizeof(uint16_t),
+        AHalf.getBuffer(),
+        "GemmA_Half");
+    auto bufB = ctx->createTensor(
+        ElementType::Float16,
+        Shape(batch, N, K),
+        BHalf.getCount() * sizeof(uint16_t),
+        BHalf.getBuffer(),
+        "GemmB_Half");
+
+    // Construct Exprs
+    auto exprA = buffer();
+    auto inputB = buffer();
+    auto exprB = transpose(inputB, 1, 2);
+    auto exprC = constant(0.0f);
+    auto exprOut = kernelOutput();
+
+    BatchGemmKernel kernel(ctx, ElementType::Float16, exprA, exprB, exprC, bufferSink(), exprOut);
+    auto bufOut = ctx->allocScratchTensor(ElementType::Float16, Shape(batch, M, N), "GemmOut_Half");
+
+    auto task = ctx->createTask();
+    kernel.queueExecute(task, bufOut, 1.0f, 0.0f, {bufA->getView(), bufB->getView()});
+    task.execute();
+
+    if (!checkOutputHalf(ctx, bufOut, Expected))
+    {
+        printf("testBatchGemmHalf FAILED\n");
+        return SLANG_FAIL;
+    }
+    MLKL_TEST_OK();
+}

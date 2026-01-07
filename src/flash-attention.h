@@ -21,6 +21,7 @@ class FlashAttentionKernel : public RefObject
 {
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
+    ElementType elementType;
 
     // Expressions for generalized inputs/outputs
     Expr qExpr;
@@ -43,6 +44,7 @@ class FlashAttentionKernel : public RefObject
 public:
     FlashAttentionKernel(
         InferencingContext* ctx,
+        ElementType elementType,
         Expr q,
         Expr k,
         Expr v,
@@ -51,6 +53,23 @@ public:
         int bc = 32,
         int d = 64,
         SinkExpr sinkExpr = bufferSink());
+
+    // Convenience constructor defaulting to Float32.
+    FlashAttentionKernel(
+        InferencingContext* ctx,
+        Expr q,
+        Expr k,
+        Expr v,
+        Expr outFunc,
+        int br = 32,
+        int bc = 32,
+        int d = 64,
+        SinkExpr sinkExpr = bufferSink())
+        : FlashAttentionKernel(ctx, ElementType::Float32, q, k, v, outFunc, br, bc, d, sinkExpr)
+    {
+    }
+
+    ElementType getElementType() const { return elementType; }
 
     TensorView allocateResultBuffer(
         ElementType elementType,
@@ -68,4 +87,7 @@ public:
         uint32_t batchSize,
         float scale,
         bool isCausal);
+
+private:
+    void validateTensorElementType(const TensorView& tv, const char* name) const;
 };

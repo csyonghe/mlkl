@@ -1,8 +1,8 @@
 implementing mlkl;
 
-struct Input
+struct Input<T : ITensorElement>
 {
-    float value;
+    T.UnpackedType value;
 }
 
 struct Coord
@@ -67,76 +67,80 @@ struct Coord
     }
 }
 
-interface IExpr
+interface IExpr<T : ITensorElement>
 {
-    float eval(Coord coord, Input input);
+    T.UnpackedType eval(Coord coord, Input<T> input);
 }
 
-extension<T:IExpr> T
+#if 0
+extension<T : ITensorElement, E : IExpr<T>> E
 {
-    __subscript(int linearIndex)->float
+    __subscript(int linearIndex) -> T.UnpackedType
     {
         get
         {
-            return eval(Coord.fromLinearIndex(linearIndex), Input(0.0f));
+            Input<T> input;
+            input.value = T.UnpackedType(0);
+            return eval(Coord.fromLinearIndex(linearIndex), input);
         }
     }
 }
+#endif
 
-interface IStmt
+interface IStmt<T : ITensorElement>
 {
-    void execute(Coord coord, Input input);
+    void execute(Coord coord, Input<T> input);
 }
 
-interface ISink
+interface ISink<T : ITensorElement>
 {
-    void store(Coord coord, float value);
+    void store(Coord coord, T.UnpackedType value);
 };
 
 // Acts as both the Storage and the Expression
-struct Reg<let ID : int> : IExpr
+struct Reg<T : ITensorElement, let ID : int> : IExpr<T>
 {
-    // Thread-local static storage unique to this specialization <ID>
-    static float value;
+    // Thread-local static storage unique to this specialization <T, ID>
+    static T.UnpackedType value;
 
     // IExpr implementation: Read the value
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         return value;
     }
 }
 
 // Assignment: %ID = Expr
-struct Eval<let ID : int, E : IExpr> : IStmt
+struct Eval<T : ITensorElement, let ID : int, E : IExpr<T>> : IStmt<T>
 {
     E expr;
 
-    void execute(Coord coord, Input input)
+    void execute(Coord coord, Input<T> input)
     {
         // Write to the static storage for this ID
-        Reg<ID>.value = expr.eval(coord, input);
+        Reg<T, ID>.value = expr.eval(coord, input);
     }
 }
 
-struct Program<int resultReg, each S : IStmt> : IExpr
+struct Program<T : ITensorElement, int resultReg, each S : IStmt<T>> : IExpr<T>
 {
     Tuple<expand each S> stmts;
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         // Execute each statement in order
         expand (each stmts).execute(coord, input);
         // Return the value of the result register
-        return Reg<resultReg>.value;
+        return Reg<T, resultReg>.value;
     }
 }
 
-struct BufferView: IExpr
+struct BufferView<T : ITensorElement> : IExpr<T>
 {
-    float* data;
+    T* data;
     int rank;
     uint strides[8];
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         // baseOffset is used for direct linear indexing (subscript operator)
         // coords are used for N-D coordinate access
@@ -147,28 +151,31 @@ struct BufferView: IExpr
             if (i >= rank) break;
             linearIdx += coord[i] * strides[i];
         }
-        return data[linearIdx];
+        return data[linearIdx].unpack();
     }
 }
 
-struct ConstantView : IExpr
+struct ConstantView<T : ITensorElement> : IExpr<T>
 {
-    float value;
-    float eval(Coord coord, Input input) { return value; }
+    float value;  // Always store as float for simplicity
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return T.UnpackedType.fromFloat(value); 
+    }
 }
 
-struct KernelOutput : IExpr
+struct KernelOutput<T : ITensorElement> : IExpr<T>
 {
-    float eval(Coord coord, Input input) { return input.value; }
+    T.UnpackedType eval(Coord coord, Input<T> input) { return input.value; }
 }
 
-struct Broadcast<Inner : IExpr> : IExpr
+struct Broadcast<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
 {
     Inner inner;
     uint rank;
     uint innerStrides[8];  // 0 means broadcast, >0 means take from coord
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         // Transform output coord to inner coord by zeroing broadcast dimensions
         Coord innerCoord;
@@ -185,14 +192,15 @@ struct Broadcast<Inner : IExpr> : IExpr
         return inner.eval(innerCoord, input);
     }
 }
-struct Permute<Inner : IExpr> : IExpr
+
+struct Permute<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
 {
     Inner inner;
     uint rank;
     // permMap[i] = j means output coord[i] maps to inner coord[j]
     uint permMap[8];
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         // Transform output coord to inner coord via permutation
         // Initialize all coords to 0 first
@@ -215,13 +223,13 @@ struct Permute<Inner : IExpr> : IExpr
     }
 }
 
-struct Transpose<Inner : IExpr> : IExpr
+struct Transpose<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
 {
     Inner inner;
     uint dim0; // Dimension to swap
     uint dim1; // Dimension to swap
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         // Swap coordinates at dim0 and dim1
         Coord innerCoord = coord;
@@ -231,7 +239,7 @@ struct Transpose<Inner : IExpr> : IExpr
     }
 }
 
-struct Concat<L : IExpr, R : IExpr> : IExpr
+struct Concat<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
 {
     L left;
     R right;
@@ -239,7 +247,7 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
     uint axis;
     uint splitPoint; // Size of Left dimension along axis
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         uint axisCoord = coord[axis];
         
@@ -257,7 +265,8 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
         }
     }
 }
-struct Gather<Table : IExpr, Indices : IExpr> : IExpr
+
+struct Gather<T : ITensorElement, Table : IExpr<T>, Indices : IExpr<T>> : IExpr<T>
 {
     Table table;     // The lookup table (e.g., Weights [NumClasses, Dim])
     Indices indices; // The indices to gather (e.g., Labels [Batch])
@@ -267,15 +276,15 @@ struct Gather<Table : IExpr, Indices : IExpr> : IExpr
     // Output Shape: [Batch, Dim]
     // coord[0] = batch index, coord[1] = embedding dim
 
-    float eval(Coord coord, Input input)
+    T.UnpackedType eval(Coord coord, Input<T> input)
     {
         uint b = coord[0]; // Batch index
         uint d = coord[1]; // Embedding dimension
 
         // 1. Evaluate Index at position 'b'
         Coord idxCoord = Coord(b);
-        float idxVal = indices.eval(idxCoord, input);
-        int row = int(idxVal); // Cast float to int index
+        T.UnpackedType idxVal = indices.eval(idxCoord, input);
+        int row = idxVal.toInt(); // Convert to int index
 
         // 2. Evaluate Table at position (row, d)
         Coord tableCoord = Coord(row, d);
@@ -285,158 +294,225 @@ struct Gather<Table : IExpr, Indices : IExpr> : IExpr
 }
 
 // Binary Ops
-struct Add<L : IExpr, R : IExpr> : IExpr {
+struct Add<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
+{
     L l; R r;
-    float eval(Coord coord, Input input) { return l.eval(coord, input) + r.eval(coord, input); }
-}
-struct Sub<L : IExpr, R : IExpr> : IExpr {
-    L l; R r;
-    float eval(Coord coord, Input input) { return l.eval(coord, input) - r.eval(coord, input); }
-}
-struct Mul<L : IExpr, R : IExpr> : IExpr {
-    L l; R r;
-    float eval(Coord coord, Input input) { return l.eval(coord, input) * r.eval(coord, input); }
-}
-struct Div<L : IExpr, R : IExpr> : IExpr {
-    L l; R r;
-    float eval(Coord coord, Input input) { return l.eval(coord, input) / r.eval(coord, input); }
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return l.eval(coord, input) + r.eval(coord, input); 
+    }
 }
 
-struct Min<L : IExpr, R : IExpr> : IExpr
+struct Sub<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
 {
-    L left; R right;
-    float eval(Coord coord, Input input) { return min(left.eval(coord, input), right.eval(coord, input)); }
+    L l; R r;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return l.eval(coord, input) - r.eval(coord, input); 
+    }
 }
 
-struct Max<L : IExpr, R : IExpr> : IExpr
+struct Mul<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
+{
+    L l; R r;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return l.eval(coord, input) * r.eval(coord, input); 
+    }
+}
+
+struct Div<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
+{
+    L l; R r;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return l.eval(coord, input) / r.eval(coord, input); 
+    }
+}
+
+struct Min<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
 {
     L left; R right;
-    float eval(Coord coord, Input input) { return max(left.eval(coord, input), right.eval(coord, input)); }
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return T.UnpackedType.min(left.eval(coord, input), right.eval(coord, input)); 
+    }
+}
+
+struct Max<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
+{
+    L left; R right;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return T.UnpackedType.max(left.eval(coord, input), right.eval(coord, input)); 
+    }
+}
+
+struct Pow<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
+{
+    L base; R exp;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return base.eval(coord, input).pow(exp.eval(coord, input)); 
+    }
 }
 
 // --- Unary Operations ---
 
-struct Neg<I : IExpr> : IExpr
+struct Neg<T : ITensorElement, I : IExpr<T>> : IExpr<T>
 {
     I inner;
-    float eval(Coord coord, Input input) { return -inner.eval(coord, input); }
-}
-
-struct Exp<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return exp(inner.eval(coord, input)); }
-}
-
-struct Log<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return log(inner.eval(coord, input)); }
-}
-
-struct Sin<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return sin(inner.eval(coord, input)); }
-}
-
-struct Cos<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return cos(inner.eval(coord, input)); }
-}
-
-struct Abs<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return abs(inner.eval(coord, input)); }
-}
-
-struct Sqrt<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return sqrt(inner.eval(coord, input)); }
-}
-
-struct Pow<L : IExpr, R : IExpr> : IExpr
-{
-    L base; R exp;
-    // HLSL pow(x, y)
-    float eval(Coord coord, Input input) { return pow(base.eval(coord, input), exp.eval(coord, input)); }
-}
-struct Floor<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return floor(inner.eval(coord, input)); }
-}
-
-struct Ceil<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return ceil(inner.eval(coord, input)); }
-}
-
-struct Rsqrt<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return rsqrt(inner.eval(coord, input)); }
-}
-
-// --- Activations ---
-
-struct Relu<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) { return max(0.0, inner.eval(coord, input)); }
-}
-
-struct Sigmoid<I : IExpr> : IExpr
-{
-    I inner;
-    float eval(Coord coord, Input input) 
+    T.UnpackedType eval(Coord coord, Input<T> input) 
     { 
-        float v = inner.eval(coord, input);
-        return 1.0 / (1.0 + exp(-v)); 
+        return -inner.eval(coord, input); 
     }
 }
 
-struct Tanh<I : IExpr> : IExpr
+struct Exp<T : ITensorElement, I : IExpr<T>> : IExpr<T>
 {
     I inner;
-    float eval(Coord coord, Input input) { return tanh(inner.eval(coord, input)); }
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).exp(); 
+    }
 }
 
-struct Silu<I : IExpr> : IExpr
+struct Log<T : ITensorElement, I : IExpr<T>> : IExpr<T>
 {
     I inner;
-    float eval(Coord coord, Input input) 
+    T.UnpackedType eval(Coord coord, Input<T> input) 
     { 
-        float x = inner.eval(coord, input);
+        return inner.eval(coord, input).log(); 
+    }
+}
+
+struct Sin<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).sin(); 
+    }
+}
+
+struct Cos<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).cos(); 
+    }
+}
+
+struct Abs<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).abs(); 
+    }
+}
+
+struct Sqrt<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).sqrt(); 
+    }
+}
+
+struct Floor<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).floor(); 
+    }
+}
+
+struct Ceil<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).ceil(); 
+    }
+}
+
+struct Rsqrt<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).rsqrt(); 
+    }
+}
+
+struct Tanh<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return inner.eval(coord, input).tanh(); 
+    }
+}
+
+// --- Activations (composed from primitives) ---
+
+struct Relu<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        return T.UnpackedType.max(T.UnpackedType(0), inner.eval(coord, input)); 
+    }
+}
+
+struct Sigmoid<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        let v = inner.eval(coord, input);
+        return T.UnpackedType(1) / (T.UnpackedType(1) + (-v).exp()); 
+    }
+}
+
+struct Silu<T : ITensorElement, I : IExpr<T>> : IExpr<T>
+{
+    I inner;
+    T.UnpackedType eval(Coord coord, Input<T> input) 
+    { 
+        let x = inner.eval(coord, input);
         // x * sigmoid(x)
-        return x * (1.0 / (1.0 + exp(-x)));
+        return x * (T.UnpackedType(1) / (T.UnpackedType(1) + (-x).exp()));
     }
 }
 
-struct Gelu<I : IExpr> : IExpr
+struct Gelu<T : ITensorElement, I : IExpr<T>> : IExpr<T>
 {
     I inner;
-    float eval(Coord coord, Input input) 
+    T.UnpackedType eval(Coord coord, Input<T> input) 
     { 
-        float x = inner.eval(coord, input);
+        let x = inner.eval(coord, input);
         // Tanh approximation
-        return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+        let c1 = T.UnpackedType.fromFloat(0.7978845608f);
+        let c2 = T.UnpackedType.fromFloat(0.044715f);
+        let half = T.UnpackedType.fromFloat(0.5f);
+        return half * x * (T.UnpackedType(1) + (c1 * (x + c2 * x * x * x)).tanh());
     }
 }
 
 
 // BufferSink: The terminal node that actually writes to memory.
-struct BufferSink : ISink
+struct BufferSink<T : ITensorElement> : ISink<T>
 {
-    float* data;
+    T* data;
     int rank;
     int strides[8];
 
-    void store(Coord coord, float value)
+    void store(Coord coord, T.UnpackedType value)
     {
         uint offset = coord.baseOffset;
         [unroll]
@@ -446,17 +522,17 @@ struct BufferSink : ISink
                 break;
             offset += coord[i] * strides[i];
         }
-        data[offset] = value;
+        data[offset] = T.pack(value);
     }
 };
 
 // PermuteSink: permutes output dimension ordering.
-struct PermuteSink<Child : ISink> : ISink
+struct PermuteSink<T : ITensorElement, Child : ISink<T>> : ISink<T>
 {
     Child child;
     uint pMap[8]; // Permutation map
 
-    void store(Coord coords, float value)
+    void store(Coord coords, T.UnpackedType value)
     {
         Coord newCoords = {coords.baseOffset, makeArrayFromElement<uint, 8>(0)};
         [unroll]
@@ -485,14 +561,14 @@ struct PermuteSink<Child : ISink> : ISink
     * Part 0: [0, 1, 2, 6, 7, 8]
     * Part 1: [3, 4, 5, 9, 10, 11]
  */
-struct PartitionSink<Child : ISink> : ISink
+struct PartitionSink<T : ITensorElement, Child : ISink<T>> : ISink<T>
 {
     Child child;
     
     uint dimIndex;             // Which coordinate index to split (e.g., 1 for Column)
     uint partitionSize;        // The size of a single partition block (e.g., HeadDim)
 
-    void store(Coord logicalCoord, float value)
+    void store(Coord logicalCoord, T.UnpackedType value)
     {
         uint pIdx = logicalCoord[dimIndex] / partitionSize;
         uint localCoord = logicalCoord[dimIndex] % partitionSize;
@@ -518,9 +594,9 @@ struct PartitionSink<Child : ISink> : ISink
     }
 };
 
-struct MaterializeParams<P : IExpr>
+struct MaterializeParams<T : ITensorElement, P : IExpr<T>>
 {
-    float* outputBuffer;
+    T* outputBuffer;
     uint count;
     uint rank;
     uint shape[8];
@@ -528,8 +604,8 @@ struct MaterializeParams<P : IExpr>
 }
 
 [numthreads(256, 1, 1)]
-void materialize<P:IExpr>(
-    ConstantBuffer<MaterializeParams<P>, ScalarDataLayout> params,
+void materialize<T : ITensorElement, P : IExpr<T>>(
+    ConstantBuffer<MaterializeParams<T, P>, ScalarDataLayout> params,
     uint3 id : SV_DispatchThreadID)
 {
     uint tid = id.x;
@@ -555,12 +631,11 @@ void materialize<P:IExpr>(
         }
     }
 
-    Input input = {};
+    Input<T> input = {};
 
     // Execute Program with N-D coordinate
     let result = params.program.eval(coord, input);
 
     // Write Output
-    params.outputBuffer[tid] = result;
+    params.outputBuffer[tid] = T.pack(result);
 }
-

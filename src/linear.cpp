@@ -6,6 +6,7 @@ using namespace Slang;
 
 LinearKernel::LinearKernel(
     InferencingContext* context,
+    ElementType elementType,
     Expr inputExpr,
     Expr outputExpr,
     SinkExpr sinkExpr,
@@ -15,6 +16,7 @@ LinearKernel::LinearKernel(
     int tileN,
     int tileK)
     : context(context)
+    , elementType(elementType)
     , inputVectorLength(inputVectorLength)
     , outputVectorLength(outputVectorLength)
     , sinkExpr(sinkExpr)
@@ -26,14 +28,27 @@ LinearKernel::LinearKernel(
     inputProgram = compileExprToProgram(inputExpr, &globalRegCounter);
     outputProgram = compileExprToProgram(outputExpr, &globalRegCounter);
 
+    String elemTypeName = getSlangElementTypeName(elementType);
     String specArgs[] = {
         String(tileM),
         String(tileN),
         String(tileK),
-        inputProgram.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName(),
-        outputProgram.getSlangTypeName()};
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType)};
     pipeline = context->createComputePipeline("linearTiled", makeConstArrayView(specArgs));
+}
+
+void LinearKernel::validateTensorElementType(const TensorView& tv, const char* name) const
+{
+    if (tv && tv.elementType != elementType)
+    {
+        throw InvalidOperationException(
+            String("LinearKernel: ") + name + " element type mismatch. Expected " +
+            getSlangElementTypeName(elementType) + " but got " +
+            getSlangElementTypeName(tv.elementType));
+    }
 }
 
 SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
@@ -45,9 +60,16 @@ SlangResult LinearKernel::loadParams(TorchParamReader& reader, bool loadBias)
     LinearLayerParams params;
     SLANG_RETURN_ON_FAIL(
         reader.readLinearLayer(inputVectorLength, outputVectorLength, loadBias, params));
-    weightsBuffer = context->createPersistentBuffer(params.weights);
+    
+    // Convert weights/biases to kernel's element type
+    auto weightsData = convertFloatData(params.weights, elementType);
+    weightsBuffer = context->createPersistentBuffer(weightsData.getBuffer(), weightsData.getCount());
+    
     if (loadBias)
-        biasesBuffer = context->createPersistentBuffer(params.biases);
+    {
+        auto biasData = convertFloatData(params.biases, elementType);
+        biasesBuffer = context->createPersistentBuffer(biasData.getBuffer(), biasData.getCount());
+    }
     return SLANG_OK;
 }
 
@@ -63,6 +85,14 @@ TensorView LinearKernel::allocateResultBuffer(ElementType elementType, int batch
 
 void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx)
 {
+    // Validate element types
+    validateTensorElementType(output, "output");
+    for (auto bufferNode : inputProgram.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input");
+    }
+
     // Validate Input/Output Shapes.
     auto inputShape = inputProgram.resolveShape(ctx);
     int batchSize = inputShape[0];

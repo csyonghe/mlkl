@@ -12,6 +12,7 @@ class LinearKernel : public RefObject
 private:
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
+    ElementType elementType;
     int tileM, tileN, tileK;
     int outputVectorLength; // Rows of weight matrix.
     int inputVectorLength;  // Columns of weight matrix.
@@ -22,9 +23,24 @@ private:
     ProgramNode outputProgram;
     SinkExpr sinkExpr;
 
+    void validateTensorElementType(const TensorView& tv, const char* name) const;
+
 public:
     ComPtr<rhi::IBuffer> weightsBuffer, biasesBuffer;
 
+    LinearKernel(
+        InferencingContext* context,
+        ElementType elementType,
+        Expr inputExpr,
+        Expr outputExpr,
+        SinkExpr sinkExpr,
+        int inputVectorLength,
+        int outputVectorLength,
+        int tileM = 8,
+        int tileN = 32,
+        int tileK = 16);
+
+    // Convenience constructor defaulting to Float32.
     LinearKernel(
         InferencingContext* context,
         Expr inputExpr,
@@ -34,7 +50,20 @@ public:
         int outputVectorLength,
         int tileM = 8,
         int tileN = 32,
-        int tileK = 16);
+        int tileK = 16)
+        : LinearKernel(
+              context,
+              ElementType::Float32,
+              inputExpr,
+              outputExpr,
+              sinkExpr,
+              inputVectorLength,
+              outputVectorLength,
+              tileM,
+              tileN,
+              tileK)
+    {
+    }
 
     LinearKernel(
         InferencingContext* context,
@@ -45,6 +74,7 @@ public:
         int tileK = 16)
         : LinearKernel(
               context,
+              ElementType::Float32,
               buffer(),
               kernelOutput(),
               bufferSink(),
@@ -55,6 +85,8 @@ public:
               tileK)
     {
     }
+
+    ElementType getElementType() const { return elementType; }
 
     SlangResult loadParams(TorchParamReader& reader, bool loadBiass = true);
 

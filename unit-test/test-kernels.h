@@ -12,9 +12,25 @@ using namespace Slang;
 // Fills a list with random float values (Normal distribution)
 void initRandom(List<float>& data, int count);
 
+// Convert float data to half precision (stored as uint16_t)
+void floatToHalf(const List<float>& src, List<uint16_t>& dst);
+
+// Convert half precision data (stored as uint16_t) to float
+void halfToFloat(const List<uint16_t>& src, List<float>& dst);
+
 // Compares GPU buffer content with expected CPU results
 bool checkOutput(InferencingContext* ctx, BufferView outputBuffer, const List<float>& expected);
 bool checkOutput(InferencingContext* ctx, TensorView outputBuffer, const List<float>& expected);
+
+// Compares GPU buffer content (half precision) with expected CPU results (float)
+// Uses larger tolerance appropriate for half precision
+bool checkOutputHalf(InferencingContext* ctx, TensorView outputBuffer, const List<float>& expected);
+
+// Compares GPU buffer content (int32) with expected CPU results (float, truncated to int)
+bool checkOutputInt(InferencingContext* ctx, TensorView outputBuffer, const List<float>& expected);
+
+// Convert float data to int32 (for creating test input tensors)
+void floatToInt(const List<float>& src, List<int32_t>& dst);
 
 // Writes weights/biases to file stream (compatible with TorchParamReader)
 void writeLinearWeights(Stream* fs, const List<float>& weights, const List<float>& biases);
@@ -86,6 +102,7 @@ SlangResult testNonTrivialPermute(InferencingContext* ctx);
 // Defined in test-gemm.cpp
 SlangResult testBatchGemm(InferencingContext* ctx);
 SlangResult testFusedBatchGemm(InferencingContext* ctx);
+SlangResult testBatchGemmHalf(InferencingContext* ctx);
 
 // Defined in test-cross-attention.cpp
 SlangResult testFlashAttention(InferencingContext* ctx);
@@ -96,9 +113,12 @@ SlangResult testCrossAttentionFull(InferencingContext* ctx);
 
 // Defined in test-conv2d.cpp
 SlangResult testConv2D(InferencingContext* ctx);
+SlangResult testConv2DHalf(InferencingContext* ctx);
+SlangResult testConv2DInt(InferencingContext* ctx);
 
 // Defined in test-transposed-conv2d.cpp
 SlangResult testTransposedConv2D(InferencingContext* ctx);
+SlangResult testTransposedConv2DHalf(InferencingContext* ctx);
 
 // Defined in test-broadcast-add.cpp
 SlangResult testBroadcastAdd(InferencingContext* ctx);
@@ -109,3 +129,5 @@ SlangResult testClassifierFreeGuidance(InferencingContext* ctx);
 // Defined in test-linear.cpp
 SlangResult testLinear(InferencingContext* ctx);
 SlangResult testLinearPartitioned(InferencingContext* ctx);
+SlangResult testLinearHalf(InferencingContext* ctx);
+SlangResult testLinearInt(InferencingContext* ctx);

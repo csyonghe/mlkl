@@ -100,6 +100,41 @@ enum class ElementType
 
 size_t getElementTypeSize(ElementType elementType);
 
+// Returns the Slang type name for the given element type.
+// Used when generating shader type specializations.
+inline const char* getSlangElementTypeName(ElementType elementType)
+{
+    switch (elementType)
+    {
+    case ElementType::Float32:
+        return "float";
+    case ElementType::Float16:
+        return "half";
+    case ElementType::Int32:
+        return "int";
+    // Future element types:
+    // case ElementType::Float8E4M3:
+    //     return "float8_e4m3";
+    // case ElementType::Float8E5M2:
+    //     return "float8_e5m2";
+    default:
+        throw std::runtime_error("Unsupported element type for Slang shader");
+    }
+}
+
+// Convert float data to the specified element type.
+// Returns a buffer containing the converted data.
+// For Float32, the data is copied as-is.
+// For Float16, the data is converted to half precision.
+// For Int32, the data is converted by bitcast (reinterpret).
+Slang::List<uint8_t> convertFloatData(const float* data, size_t count, ElementType targetType);
+
+// Convert float List to the specified element type.
+inline Slang::List<uint8_t> convertFloatData(const Slang::List<float>& data, ElementType targetType)
+{
+    return convertFloatData(data.getBuffer(), data.getCount(), targetType);
+}
+
 class Tensor;
 
 class TensorView

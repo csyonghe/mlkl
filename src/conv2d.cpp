@@ -4,6 +4,7 @@ static const int kTinyKernelMaxOutputPixels = 4;
 
 Conv2DKernel::Conv2DKernel(
     InferencingContext* context,
+    ElementType elementType,
     int tileSize,
     int kernelSize,
     int stride,
@@ -14,6 +15,7 @@ Conv2DKernel::Conv2DKernel(
     SinkExpr sinkExpr,
     String name)
     : context(context)
+    , elementType(elementType)
     , tileSize(tileSize)
     , kernelSize(kernelSize)
     , stride(stride)
@@ -25,15 +27,18 @@ Conv2DKernel::Conv2DKernel(
     int globalRegCounter = 0;
     inputProgram = compileExprToProgram(inputExpr, &globalRegCounter);
     outputProgram = compileExprToProgram(outputExpr, &globalRegCounter);
+
+    String elemTypeName = getSlangElementTypeName(elementType);
     String specArgs[] = {
         String(tileSize),
         String(kernelSize),
         String(stride),
         String(inChannels),
         String(outChannels),
-        inputProgram.getSlangTypeName(),
-        outputProgram.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName()};
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
 
     tilePipeline = context->createComputePipeline("tiledConvolution", makeArrayView(specArgs));
 
@@ -42,13 +47,25 @@ Conv2DKernel::Conv2DKernel(
         String(stride),
         String(inChannels),
         String(outChannels),
-        inputProgram.getSlangTypeName(),
-        outputProgram.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName()};
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
     // Note: tileSize is NOT needed for flat kernel generic
     flatPipeline = context->createComputePipeline("flatConvolution", makeArrayView(flatArgs));
     flatWaveReducePipeline =
         context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
+}
+
+void Conv2DKernel::validateTensorElementType(const TensorView& tv, const char* name) const
+{
+    if (tv && tv.elementType != elementType)
+    {
+        throw InvalidOperationException(
+            String("Conv2DKernel: ") + name + " element type mismatch. Expected " +
+            getSlangElementTypeName(elementType) + " but got " +
+            getSlangElementTypeName(tv.elementType));
+    }
 }
 
 Conv2DKernel::Conv2DKernel(
@@ -62,6 +79,7 @@ Conv2DKernel::Conv2DKernel(
     String name)
     : Conv2DKernel(
           context,
+          ElementType::Float32,
           tileSize,
           kernelSize,
           stride,
@@ -106,10 +124,15 @@ SlangResult Conv2DKernel::loadParams(
     float* biasesData)
 {
     int weightsCount = kernelSize * kernelSize * inChannels * outputChannelCount;
-    weightsBuffer = context->createPersistentBuffer(weightsData, weightsCount * sizeof(float));
+    
+    // Convert weights and biases to the kernel's element type
+    auto weightsConverted = convertFloatData(weightsData, weightsCount, elementType);
+    weightsBuffer = context->createPersistentBuffer(weightsConverted.getBuffer(), weightsConverted.getCount());
     if (!weightsBuffer)
         return SLANG_FAIL;
-    biasesBuffer = context->createPersistentBuffer(biasesData, outputChannelCount * sizeof(float));
+    
+    auto biasConverted = convertFloatData(biasesData, outputChannelCount, elementType);
+    biasesBuffer = context->createPersistentBuffer(biasConverted.getBuffer(), biasConverted.getCount());
     if (!biasesBuffer)
         return SLANG_FAIL;
 
@@ -153,8 +176,10 @@ SlangResult Conv2DKernel::loadParams(
             }
         }
 
-        // 4. Create the Transposed Buffer
-        weightsTransposedBuffer = context->createPersistentBuffer(transposedWeights);
+        // Convert transposed weights to element type
+        auto transposedConverted = convertFloatData(transposedWeights, elementType);
+        weightsTransposedBuffer = context->createPersistentBuffer(
+            transposedConverted.getBuffer(), transposedConverted.getCount());
         if (!weightsTransposedBuffer)
             return SLANG_FAIL;
     }
@@ -203,6 +228,14 @@ void Conv2DKernel::queueExecute(
     TensorView output,
     int padding)
 {
+    // Validate element types
+    validateTensorElementType(output, "output");
+    for (auto bufferNode : inputProgram.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input");
+    }
+
     auto inputShape = inputProgram.resolveShape(ctx);
     if (inputShape.dims.getLast() != inChannels)
         throw std::runtime_error("Conv2DKernel: Input channel count mismatch.");

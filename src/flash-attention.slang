@@ -1,7 +1,8 @@
 implementing mlkl;
 
 // Generalized Parameter Structure for Cross-Attention
-struct FlashAttentionParams<TQ: IExpr, TK: IExpr, TV: IExpr, TSink:ISink,FOut: IExpr> {
+struct FlashAttentionParams<T : ITensorElement, TQ : IExpr<T>, TK : IExpr<T>, TV : IExpr<T>, TSink : ISink<T>, FOut : IExpr<T>> 
+{
     TQ Q;
     TK K;
     TV V;
@@ -10,13 +11,14 @@ struct FlashAttentionParams<TQ: IExpr, TK: IExpr, TV: IExpr, TSink:ISink,FOut: I
     uint seq_len_q;
     uint seq_len_kv;
     uint num_heads;
-    float scale;
+    float scale;  // Keep as float
     uint is_causal;
 }
 
 [numthreads(blockSizeR, 1, 1)]
-void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimension : int, TQ: IExpr, TK: IExpr, TV: IExpr, TSink:ISink, FOut: IExpr>(
-    ConstantBuffer<FlashAttentionParams<TQ, TK, TV, TSink, FOut>, CDataLayout> params,
+void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimension : int, 
+                     T : ITensorElement, TQ : IExpr<T>, TK : IExpr<T>, TV : IExpr<T>, TSink : ISink<T>, FOut : IExpr<T>>(
+    ConstantBuffer<FlashAttentionParams<T, TQ, TK, TV, TSink, FOut>, CDataLayout> params,
     uint3 groupThreadID : SV_GroupThreadID,
     uint3 groupID : SV_GroupID)
 {
@@ -25,7 +27,7 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
     uint head_idx = groupID.y;
     uint batch_idx = groupID.z;
 
-    // SRAM for tiling
+    // Use float for shared memory and accumulation (hardcoded fp32)
     static groupshared float s_K[blockSizeC][headDimension];
     static groupshared float s_V[blockSizeC][headDimension];
 
@@ -37,10 +39,13 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
 
     // 2. Load Q (Static for the duration of this row block)
     float q_local[headDimension];
+    Input<T> emptyInput = {};
+    emptyInput.value = T.UnpackedType(0);
+    
     if (row_idx < params.seq_len_q) {
         for (uint d = 0; d < headDimension; d++) {
             // Q shape: [Batch, NumHeads, SeqQ, HeadDim]
-            q_local[d] = params.Q.eval(Coord(batch_idx, head_idx, row_idx, d), Input(0.0f));
+            q_local[d] = params.Q.eval(Coord(batch_idx, head_idx, row_idx, d), emptyInput).toFloat();
         }
     }
 
@@ -56,8 +61,8 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
             for (uint d = 0; d < headDimension; d++) {
                 // K, V shape: [Batch, NumHeads, SeqKV, HeadDim]
                 Coord kvCoord = Coord(batch_idx, head_idx, kv_row_global, d);
-                s_K[kv_row_in_tile][d] = params.K.eval(kvCoord, Input(0.0f));
-                s_V[kv_row_in_tile][d] = params.V.eval(kvCoord, Input(0.0f));
+                s_K[kv_row_in_tile][d] = params.K.eval(kvCoord, emptyInput).toFloat();
+                s_V[kv_row_in_tile][d] = params.V.eval(kvCoord, emptyInput).toFloat();
             }
         } else {
             // Out of bounds padding for incomplete tiles
@@ -123,7 +128,11 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
         for (uint d = 0; d < headDimension; d++) {
             Coord outCoord = Coord(batch_idx, head_idx, row_idx, d);
             float attentionVal = acc[d] / l_prev;
-            params.sink.store(outCoord, params.outFunc.eval(outCoord, Input(attentionVal)));
+            
+            Input<T> outInput = {};
+            outInput.value = T.UnpackedType.fromFloat(attentionVal);
+            
+            params.sink.store(outCoord, params.outFunc.eval(outCoord, outInput));
         }
     }
 }

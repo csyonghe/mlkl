@@ -121,12 +121,15 @@ class ExprNode : public RefObject
 public:
     virtual ~ExprNode() = default;
 
-    virtual String getSlangTypeName() const = 0;
+    // Returns the Slang type name for this expression node, parameterized by element type.
+    // @param elemType The element type (e.g., ElementType::Float32, ElementType::Float16)
+    virtual String getSlangTypeName(ElementType elemType) const = 0;
+
     virtual Shape resolveShape(const EvalContext& ctx) const = 0;
 
     // Packs the DATA required for this node's DEFINITION in the shader.
-    // - BufferNode: Packs float*
-    // - ConstantNode: Packs float
+    // - BufferNode: Packs T* (pointer to element type)
+    // - ConstantNode: Packs float (always float for simplicity)
     // - BroadcastNode: Packs Rank/Shape/Strides (Inner is Reg<ID>, so size 0)
     // - BinaryNode: Packs NOTHING (Operands are Reg<ID>, so size 0)
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
@@ -158,11 +161,13 @@ struct Expr
 
 
 // SinkExpr represent transformations on the output shape.
-// Maps to `ISinkExpr` in Slang.
+// Maps to `ISink` in Slang.
 class SinkExprNode : public RefObject
 {
 public:
-    virtual String getSlangTypeName() const = 0;
+    // Returns the Slang type name for this sink node, parameterized by element type.
+    // @param elemType The element type (e.g., ElementType::Float32, ElementType::Float16)
+    virtual String getSlangTypeName(ElementType elemType) const = 0;
 
     // Recursive Top-Down shape resolution:
     // Takes the logical shape entering THIS node and returns the
@@ -191,7 +196,7 @@ public:
     List<BufferNode*> bufferNodes;
     int resultRegID = -1;
     Dictionary<ExprNode*, int> nodeToRegID;
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     virtual size_t getAlignment() const override;
@@ -205,7 +210,10 @@ class BufferNode : public LeafNode
 {
 public:
     uint64_t sequenceNumber; // To identify the buffer at runtime
-    String getSlangTypeName() const override { return "BufferView"; }
+    String getSlangTypeName(ElementType elemType) const override
+    {
+        return String("BufferView<") + getSlangElementTypeName(elemType) + ">";
+    }
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     virtual size_t getAlignment() const { return sizeof(void*); }
@@ -221,7 +229,10 @@ public:
     {
     }
     Shape resolveShape(const EvalContext&) const override { return Shape(); }
-    String getSlangTypeName() const override { return "ConstantView"; }
+    String getSlangTypeName(ElementType elemType) const override
+    {
+        return String("ConstantView<") + getSlangElementTypeName(elemType) + ">";
+    }
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
@@ -234,7 +245,10 @@ public:
     Shape resolveShape(const EvalContext&) const override { return Shape(); }
 
     // Reuses the Slang-side "ConstantView" struct
-    String getSlangTypeName() const override { return "ConstantView"; }
+    String getSlangTypeName(ElementType elemType) const override
+    {
+        return String("ConstantView<") + getSlangElementTypeName(elemType) + ">";
+    }
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
@@ -250,7 +264,7 @@ public:
 
     BroadcastNode(Expr inner, Expr targetShape);
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
@@ -266,7 +280,7 @@ public:
     PermuteNode(Expr inner, ArrayView<int> dims);
     PermuteNode(Expr inner, const std::initializer_list<int>& dims);
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     void validateDims();
@@ -283,7 +297,7 @@ public:
 
     TransposeNode(Expr inner, int d0, int d1);
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
@@ -300,7 +314,7 @@ public:
 
     GatherNode(Expr table, Expr indices);
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
@@ -319,7 +333,7 @@ public:
     ConcatNode(Expr left, Expr right, Expr axis);
 
     int getAxis(const EvalContext& ctx) const;
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
@@ -334,7 +348,7 @@ public:
 
     BinaryNode(Expr l, Expr r, BinaryOp op);
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
@@ -351,7 +365,7 @@ public:
     {
     }
 
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
 
     // Normal pack does nothing (Register operands)
@@ -362,14 +376,20 @@ class KernelOutputNode : public LeafNode
 {
 public:
     Shape resolveShape(const EvalContext&) const override { return Shape(); }
-    String getSlangTypeName() const override { return "KernelOutput"; }
+    String getSlangTypeName(ElementType elemType) const override
+    {
+        return String("KernelOutput<") + getSlangElementTypeName(elemType) + ">";
+    }
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
 };
 
 class BufferSinkNode : public SinkExprNode
 {
 public:
-    String getSlangTypeName() const override { return "BufferSink"; }
+    String getSlangTypeName(ElementType elemType) const override
+    {
+        return String("BufferSink<") + getSlangElementTypeName(elemType) + ">";
+    }
     Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override
     {
         // The leaf represents the final memory. Its physical shape IS the logical
@@ -387,7 +407,7 @@ public:
     List<int> dims; // Permutation mapping
 public:
     PermuteSinkNode(SinkExpr child, const std::initializer_list<int>& dims);
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override;
     virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
     size_t getParameterAlignment() const override;
@@ -402,7 +422,7 @@ public:
 public:
     PartitionSinkNode(SinkExpr child, uint32_t dimIndex, uint32_t partitionCount);
     Shape getChildLogicalShape(const Shape& logicalShape) const;
-    String getSlangTypeName() const override;
+    String getSlangTypeName(ElementType elemType) const override;
     Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override;
     virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
     size_t getParameterAlignment() const override;
@@ -551,11 +571,22 @@ class ElementwiseKernel : public RefObject
     ComPtr<rhi::IComputePipeline> pipeline;
     Expr root;
     InferencingContext* context;
+    ElementType elementType;
 
     ProgramNode program;
 
 public:
-    ElementwiseKernel(InferencingContext* ctx, Expr rootNode);
+    // Create an elementwise kernel with the specified element type.
+    ElementwiseKernel(InferencingContext* ctx, ElementType elementType, Expr rootNode);
+
+    // Convenience constructor defaulting to Float32.
+    ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
+        : ElementwiseKernel(ctx, ElementType::Float32, rootNode)
+    {
+    }
+
+    ElementType getElementType() const { return elementType; }
+
     TensorView allocateResultBuffer(
         ElementType elementType,
         const Dictionary<Expr, InputInfo>& inputs);
@@ -606,6 +637,9 @@ public:
     {
         queueExecute(task, output, {input1, input2, input3, input4});
     }
+
+private:
+    void validateTensorElementType(const TensorView& tv, const char* name) const;
 };
 
 inline EvalContext makeEvalContext(const Dictionary<Expr, InputInfo>& inputs)

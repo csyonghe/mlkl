@@ -13,6 +13,7 @@ class BatchGemmKernel : public RefObject
 {
     ComPtr<rhi::IComputePipeline> pipeline;
     InferencingContext* context;
+    ElementType elementType;
 
     ProgramNode programA;
     ProgramNode programB;
@@ -23,19 +24,45 @@ class BatchGemmKernel : public RefObject
 public:
     BatchGemmKernel(
         InferencingContext* ctx,
+        ElementType elementType,
         Expr A,
         Expr B,
         Expr C,
         SinkExpr sinkExpr,
         Expr outExpr);
 
+    // Convenience constructor defaulting to Float32.
     BatchGemmKernel(InferencingContext* ctx, Expr outExpr = kernelOutput())
-        : BatchGemmKernel(ctx, buffer(), buffer(), buffer(), bufferSink(), outExpr)
+        : BatchGemmKernel(
+              ctx,
+              ElementType::Float32,
+              buffer(),
+              buffer(),
+              buffer(),
+              bufferSink(),
+              outExpr)
+    {
+    }
+    BatchGemmKernel(
+        InferencingContext* ctx,
+        Expr A,
+        Expr B,
+        Expr C,
+        SinkExpr sinkExpr,
+        Expr outExpr)
+        : BatchGemmKernel(ctx, ElementType::Float32, A, B, C, sinkExpr, outExpr)
     {
     }
 
+
+    ElementType getElementType() const { return elementType; }
+
     TensorView allocateResultBuffer(ElementType elementType, int batchSize, int m, int n);
 
+private:
+    void validateTensorElementType(const TensorView& tv, const char* name) const;
+
+public:
     // Eval takes shape params explicitly, plus inputs for all expressions
     void queueExecute(
         InferencingTask& task,

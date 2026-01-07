@@ -2,6 +2,7 @@
 
 TransposedConv2DKernel::TransposedConv2DKernel(
     InferencingContext* context,
+    ElementType elementType,
     int tileSize,
     int kernelSize,
     int stride,
@@ -12,6 +13,7 @@ TransposedConv2DKernel::TransposedConv2DKernel(
     SinkExpr sinkExpr,
     String name)
     : context(context)
+    , elementType(elementType)
     , tileSize(tileSize)
     , stride(stride)
     , kernelSize(kernelSize)
@@ -30,9 +32,10 @@ TransposedConv2DKernel::TransposedConv2DKernel(
         String(stride),
         String(inChannels),
         String(outChannels),
-        inputProgram.getSlangTypeName(),
-        outputProgram.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName()};
+        getSlangElementTypeName(elementType),
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
     pipeline =
         context->createComputePipeline("tiledTransposedConvolution", makeArrayView(specArgs));
 
@@ -42,12 +45,38 @@ TransposedConv2DKernel::TransposedConv2DKernel(
         String(stride),
         String(inChannels),
         String(outChannels),
-        inputProgram.getSlangTypeName(),
-        outputProgram.getSlangTypeName(),
-        sinkExpr.node->getSlangTypeName()};
+        getSlangElementTypeName(elementType),
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
     // Note: tileSize is NOT needed for flat kernel generic
     flatPipeline =
         context->createComputePipeline("flatTransposedConvolution", makeArrayView(flatArgs));
+}
+
+TransposedConv2DKernel::TransposedConv2DKernel(
+    InferencingContext* context,
+    ElementType elementType,
+    int tileSize,
+    int kernelSize,
+    int stride,
+    int inChannels,
+    int outChannels,
+    Expr outputExpr,
+    String name)
+    : TransposedConv2DKernel(
+          context,
+          elementType,
+          tileSize,
+          kernelSize,
+          stride,
+          inChannels,
+          outChannels,
+          buffer(),
+          outputExpr,
+          bufferSink(),
+          name)
+{
 }
 
 TransposedConv2DKernel::TransposedConv2DKernel(
@@ -61,6 +90,7 @@ TransposedConv2DKernel::TransposedConv2DKernel(
     String name)
     : TransposedConv2DKernel(
           context,
+          ElementType::Float32,
           tileSize,
           kernelSize,
           stride,
@@ -96,14 +126,19 @@ SlangResult TransposedConv2DKernel::loadParams(
     float* weightsData,
     float* biasesData)
 {
-    weightsBuffer = context->createPersistentBuffer(
-        weightsData,
-        kernelSize * kernelSize * inChannels * outputChannelCount * sizeof(float));
+    int weightsCount = kernelSize * kernelSize * inChannels * outputChannelCount;
+    
+    // Convert weights and biases to the kernel's element type
+    auto weightsConverted = convertFloatData(weightsData, weightsCount, elementType);
+    weightsBuffer = context->createPersistentBuffer(weightsConverted.getBuffer(), weightsConverted.getCount());
     if (!weightsBuffer)
         return SLANG_FAIL;
-    biasesBuffer = context->createPersistentBuffer(biasesData, outputChannelCount * sizeof(float));
+    
+    auto biasConverted = convertFloatData(biasesData, outputChannelCount, elementType);
+    biasesBuffer = context->createPersistentBuffer(biasConverted.getBuffer(), biasConverted.getCount());
     if (!biasesBuffer)
         return SLANG_FAIL;
+    
     return SLANG_OK;
 }
 

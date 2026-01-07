@@ -84,8 +84,14 @@ String getSlangUnaryOpName(UnaryOp op)
     }
 }
 
-String genExprType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
-String genDefType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId);
+String genExprType(
+    ExprNode* node,
+    const Dictionary<ExprNode*, int>& mapNodeToId,
+    ElementType elemType);
+String genDefType(
+    ExprNode* node,
+    const Dictionary<ExprNode*, int>& mapNodeToId,
+    ElementType elemType);
 ProgramNode compileExprToProgram(Expr root, int* globalRegCounter);
 
 // =========================================================================
@@ -152,9 +158,10 @@ BroadcastNode::BroadcastNode(Expr inner, Expr targetShape)
 {
 }
 
-String BroadcastNode::getSlangTypeName() const
+String BroadcastNode::getSlangTypeName(ElementType elemType) const
 {
-    return "Broadcast<" + innerProgram->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "Broadcast<" + elemTypeName + ", " + innerProgram->getSlangTypeName(elemType) + ">";
 }
 
 Shape BroadcastNode::resolveShape(const EvalContext& ctx) const
@@ -250,9 +257,10 @@ PermuteNode::PermuteNode(Expr inner, const std::initializer_list<int>& dims)
 }
 
 
-String PermuteNode::getSlangTypeName() const
+String PermuteNode::getSlangTypeName(ElementType elemType) const
 {
-    return "Permute<" + innerProgram->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "Permute<" + elemTypeName + ", " + innerProgram->getSlangTypeName(elemType) + ">";
 }
 
 Shape PermuteNode::resolveShape(const EvalContext& ctx) const
@@ -320,11 +328,12 @@ GatherNode::GatherNode(Expr table, Expr indices)
 {
 }
 
-String GatherNode::getSlangTypeName() const
+String GatherNode::getSlangTypeName(ElementType elemType) const
 {
-    // Gather<TableProgram, IndicesProgram>
-    return "Gather<" + tableProgram->getSlangTypeName() + "," + indicesProgram->getSlangTypeName() +
-           ">";
+    // Gather<T, TableProgram, IndicesProgram>
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "Gather<" + elemTypeName + ", " + tableProgram->getSlangTypeName(elemType) + ", " +
+           indicesProgram->getSlangTypeName(elemType) + ">";
 }
 
 Shape GatherNode::resolveShape(const EvalContext& ctx) const
@@ -359,9 +368,10 @@ TransposeNode::TransposeNode(Expr inner, int d0, int d1)
 {
 }
 
-String TransposeNode::getSlangTypeName() const
+String TransposeNode::getSlangTypeName(ElementType elemType) const
 {
-    return "Transpose<" + innerProgram->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "Transpose<" + elemTypeName + ", " + innerProgram->getSlangTypeName(elemType) + ">";
 }
 
 Shape TransposeNode::resolveShape(const EvalContext& ctx) const
@@ -418,10 +428,12 @@ int ConcatNode::getAxis(const EvalContext& ctx) const
     return (int)axisInput->scalarValue;
 }
 
-String ConcatNode::getSlangTypeName() const
+String ConcatNode::getSlangTypeName(ElementType elemType) const
 {
-    return StringBuilder() << "Concat<" << leftProgram->getSlangTypeName() << ","
-                           << rightProgram->getSlangTypeName() << ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return StringBuilder() << "Concat<" << elemTypeName << ", "
+                           << leftProgram->getSlangTypeName(elemType) << ", "
+                           << rightProgram->getSlangTypeName(elemType) << ">";
 }
 
 Shape ConcatNode::resolveShape(const EvalContext& ctx) const
@@ -520,9 +532,10 @@ PermuteSinkNode::PermuteSinkNode(SinkExpr child, const std::initializer_list<int
         this->dims.add(d);
 }
 
-String PermuteSinkNode::getSlangTypeName() const
+String PermuteSinkNode::getSlangTypeName(ElementType elemType) const
 {
-    return "PermuteSink<" + child.node->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "PermuteSink<" + elemTypeName + ", " + child.node->getSlangTypeName(elemType) + ">";
 }
 
 Shape PermuteSinkNode::resolvePhysicalShape(const Shape& logicalShape) const
@@ -586,9 +599,10 @@ PartitionSinkNode::PartitionSinkNode(SinkExpr child, uint32_t dimIndex, uint32_t
 {
 }
 
-String PartitionSinkNode::getSlangTypeName() const
+String PartitionSinkNode::getSlangTypeName(ElementType elemType) const
 {
-    return "PartitionSink<" + child.node->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return "PartitionSink<" + elemTypeName + ", " + child.node->getSlangTypeName(elemType) + ">";
 }
 
 Shape PartitionSinkNode::getChildLogicalShape(const Shape& logicalShape) const
@@ -661,10 +675,12 @@ BinaryNode::BinaryNode(Expr l, Expr r, BinaryOp op)
 {
 }
 
-String BinaryNode::getSlangTypeName() const
+String BinaryNode::getSlangTypeName(ElementType elemType) const
 {
-    return getSlangBinaryOpName(op) + "<" + left.node->getSlangTypeName() + "," +
-           right.node->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return getSlangBinaryOpName(op) + "<" + elemTypeName + ", " +
+           left.node->getSlangTypeName(elemType) + ", " + right.node->getSlangTypeName(elemType) +
+           ">";
 }
 
 Shape BinaryNode::resolveShape(const EvalContext& ctx) const
@@ -687,9 +703,11 @@ void BinaryNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
 // --- UnaryNode ---
 
-String UnaryNode::getSlangTypeName() const
+String UnaryNode::getSlangTypeName(ElementType elemType) const
 {
-    return getSlangUnaryOpName(op) + "<" + inner.node->getSlangTypeName() + ">";
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return getSlangUnaryOpName(op) + "<" + elemTypeName + ", " +
+           inner.node->getSlangTypeName(elemType) + ">";
 }
 
 Shape UnaryNode::resolveShape(const EvalContext& ctx) const
@@ -700,10 +718,11 @@ Shape UnaryNode::resolveShape(const EvalContext& ctx) const
 
 // --- ProgramNode ---
 
-String ProgramNode::getSlangTypeName() const
+String ProgramNode::getSlangTypeName(ElementType elemType) const
 {
+    String elemTypeName = getSlangElementTypeName(elemType);
     StringBuilder typeBuilder;
-    typeBuilder << "Program<" << resultRegID;
+    typeBuilder << "Program<" << elemTypeName << ", " << resultRegID;
 
     // Append Statements
     for (ExprNode* node : linearNodes)
@@ -711,8 +730,8 @@ String ProgramNode::getSlangTypeName() const
         auto id = nodeToRegID.tryGetValue(node);
         if (!id)
             throw std::runtime_error("ProgramNode: Node missing in nodeToRegID map");
-        String defType = genDefType(node, nodeToRegID);
-        typeBuilder << ", Eval<" << *id << ", " << defType << ">";
+        String defType = genDefType(node, nodeToRegID, elemType);
+        typeBuilder << ", Eval<" << elemTypeName << ", " << *id << ", " << defType << ">";
     }
 
     typeBuilder << ">";
@@ -1055,47 +1074,72 @@ ProgramNode compileExprToProgram(Expr root, int* globalRegCounter)
     return _Move(program);
 }
 
-String genDefType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId)
+String genDefType(
+    ExprNode* node,
+    const Dictionary<ExprNode*, int>& mapNodeToId,
+    ElementType elemType)
 {
+    String elemTypeName = getSlangElementTypeName(elemType);
     if (auto b = dynamic_cast<BinaryNode*>(node))
     {
-        return getSlangBinaryOpName(b->op) + "<" + genExprType(b->left.node, mapNodeToId) + "," +
-               genExprType(b->right.node, mapNodeToId) + ">";
+        return getSlangBinaryOpName(b->op) + "<" + elemTypeName + ", " +
+               genExprType(b->left.node, mapNodeToId, elemType) + ", " +
+               genExprType(b->right.node, mapNodeToId, elemType) + ">";
     }
     else if (auto u = dynamic_cast<UnaryNode*>(node))
     {
-        return getSlangUnaryOpName(u->op) + "<" + genExprType(u->inner.node, mapNodeToId) + ">";
+        return getSlangUnaryOpName(u->op) + "<" + elemTypeName + ", " +
+               genExprType(u->inner.node, mapNodeToId, elemType) + ">";
     }
-    return node->getSlangTypeName();
+    return node->getSlangTypeName(elemType);
 }
 
-String genExprType(ExprNode* node, const Dictionary<ExprNode*, int>& mapNodeToId)
+String genExprType(
+    ExprNode* node,
+    const Dictionary<ExprNode*, int>& mapNodeToId,
+    ElementType elemType)
 {
+    String elemTypeName = getSlangElementTypeName(elemType);
     if (auto it = mapNodeToId.tryGetValue(node))
     {
         // Visited node -> Use Register
         StringBuilder sb;
-        sb << "Reg<" << *it << ">";
+        sb << "Reg<" << elemTypeName << ", " << *it << ">";
         return sb.produceString();
     }
     // CHANGE: Not visited (child of Broadcast) -> Generate full definition (Inline)
-    return genDefType(node, mapNodeToId);
+    return genDefType(node, mapNodeToId, elemType);
 }
 
 // =========================================================================
 // Pipeline Implementation
 // =========================================================================
 
-ElementwiseKernel::ElementwiseKernel(InferencingContext* ctx, Expr rootNode)
-    : context(ctx), root(rootNode)
+ElementwiseKernel::ElementwiseKernel(
+    InferencingContext* ctx,
+    ElementType elementType,
+    Expr rootNode)
+    : context(ctx), elementType(elementType), root(rootNode)
 {
     int globalRegCounter = 0;
     program = compileExprToProgram(root, &globalRegCounter);
 
-    String finalProgramType = program.getSlangTypeName();
+    String elemTypeName = getSlangElementTypeName(elementType);
+    String finalProgramType = program.getSlangTypeName(elementType);
 
-    String typeArgs[] = {finalProgramType};
+    String typeArgs[] = {elemTypeName, finalProgramType};
     pipeline = ctx->createComputePipeline("materialize", makeArrayView(typeArgs));
+}
+
+void ElementwiseKernel::validateTensorElementType(const TensorView& tv, const char* name) const
+{
+    if (tv && tv.elementType != elementType)
+    {
+        throw InvalidOperationException(
+            String("ElementwiseKernel: ") + name + " element type mismatch. Expected " +
+            getSlangElementTypeName(elementType) + " but got " +
+            getSlangElementTypeName(tv.elementType));
+    }
 }
 
 TensorView ElementwiseKernel::allocateResultBuffer(
@@ -1114,6 +1158,14 @@ TensorView ElementwiseKernel::allocateResultBuffer(
 
 void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, TensorView output)
 {
+    // Validate element types
+    validateTensorElementType(output, "output");
+    for (auto bufferNode : program.bufferNodes)
+    {
+        if (auto info = ctx.inputs.tryGetValue(bufferNode))
+            validateTensorElementType(info->tensorView, "input");
+    }
+
     Shape resultShape = root.node->resolveShape(ctx);
     size_t count = resultShape.getElementCount();
 

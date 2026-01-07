@@ -4,6 +4,7 @@ using namespace Slang;
 
 FlashAttentionKernel::FlashAttentionKernel(
     InferencingContext* ctx,
+    ElementType elementType,
     Expr q,
     Expr k,
     Expr v,
@@ -13,6 +14,7 @@ FlashAttentionKernel::FlashAttentionKernel(
     int d,
     SinkExpr sinkExpr)
     : context(ctx)
+    , elementType(elementType)
     , qExpr(q)
     , kExpr(k)
     , vExpr(v)
@@ -30,19 +32,32 @@ FlashAttentionKernel::FlashAttentionKernel(
     outFuncProgram = compileExprToProgram(outFuncExpr, &globalRegCounter);
 
     // 2. Prepare specialization arguments
-    // Order: blockSizeR, blockSizeC, headDimension, TQ, TK, TV, FOut
+    // Order: blockSizeR, blockSizeC, headDimension, T, TQ, TK, TV, TSink, FOut
+    String elemTypeName = getSlangElementTypeName(elementType);
     List<String> typeArgs;
     typeArgs.add(String(blockSizeR));
     typeArgs.add(String(blockSizeC));
     typeArgs.add(String(headDim));
-    typeArgs.add(qProgram.getSlangTypeName());
-    typeArgs.add(kProgram.getSlangTypeName());
-    typeArgs.add(vProgram.getSlangTypeName());
-    typeArgs.add(sinkExpr.node->getSlangTypeName());
-    typeArgs.add(outFuncProgram.getSlangTypeName());
+    typeArgs.add(elemTypeName);
+    typeArgs.add(qProgram.getSlangTypeName(elementType));
+    typeArgs.add(kProgram.getSlangTypeName(elementType));
+    typeArgs.add(vProgram.getSlangTypeName(elementType));
+    typeArgs.add(sinkExpr.node->getSlangTypeName(elementType));
+    typeArgs.add(outFuncProgram.getSlangTypeName(elementType));
 
     // 3. Create pipeline
     pipeline = ctx->createComputePipeline("flashAttention2", typeArgs.getArrayView());
+}
+
+void FlashAttentionKernel::validateTensorElementType(const TensorView& tv, const char* name) const
+{
+    if (tv && tv.elementType != elementType)
+    {
+        throw InvalidOperationException(
+            String("FlashAttentionKernel: ") + name + " element type mismatch. Expected " +
+            getSlangElementTypeName(elementType) + " but got " +
+            getSlangElementTypeName(tv.elementType));
+    }
 }
 
 TensorView FlashAttentionKernel::allocateResultBuffer(
@@ -72,6 +87,13 @@ void FlashAttentionKernel::queueExecute(
     float scale,
     bool isCausal)
 {
+    // Validate element types
+    validateTensorElementType(output, "output");
+    for (auto it : inputs)
+    {
+        validateTensorElementType(it.second.tensorView, "input");
+    }
+
     EvalContext evalCtx;
     for (auto it : inputs)
         evalCtx.inputs.add(it.first.node, it.second);
