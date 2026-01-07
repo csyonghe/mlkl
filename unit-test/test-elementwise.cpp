@@ -369,3 +369,162 @@ SlangResult testIdentityPermute(InferencingContext* ctx)
     }
     MLKL_TEST_OK();
 }
+
+SlangResult testNonTrivialPermute(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    // Test 1: 2D Transpose [1, 0]
+    // Input shape [2, 3] -> Output shape [3, 2]
+    // Input:  [[0, 1, 2],      Output: [[0, 3],
+    //          [3, 4, 5]]               [1, 4],
+    //                                   [2, 5]]
+    {
+        Expr eBuf = buffer();
+        Expr ePerm = permute(eBuf, {1, 0}); // Swap dimensions
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, ePerm);
+
+        // Input data in row-major order: [2, 3]
+        List<float> inputData = {0, 1, 2, 3, 4, 5};
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{2, 3}, inputData, "In2D");
+        auto bufOut = ctx->allocScratchTensor(ElementType::Float32, Shape{3, 2}, "Out2D");
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        // Expected output in row-major [3, 2]: [[0, 3], [1, 4], [2, 5]]
+        List<float> expected = {0, 3, 1, 4, 2, 5};
+        for (int i = 0; i < 6; i++)
+        {
+            if (result[i] != expected[i])
+            {
+                return SLANG_FAIL;
+            }
+        }
+    }
+
+    // Test 2: 3D Permute [2, 0, 1]
+    // Input shape [2, 3, 4] -> Output shape [4, 2, 3]
+    // This is a cyclic permutation: dim0 -> dim1, dim1 -> dim2, dim2 -> dim0
+    {
+        Expr eBuf = buffer();
+        Expr ePerm = permute(eBuf, {2, 0, 1}); // Cyclic permutation
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, ePerm);
+
+        // Input data: shape [2, 3, 4] = 24 elements
+        List<float> inputData;
+        for (int i = 0; i < 24; i++)
+            inputData.add((float)i);
+
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{2, 3, 4}, inputData, "In3D");
+        auto bufOut = ctx->allocScratchTensor(ElementType::Float32, Shape{4, 2, 3}, "Out3D");
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        // Verify: output[d, b, c] = input[b, c, d]
+        // where dims = [2, 0, 1] means:
+        //   output dim 0 <- input dim 2
+        //   output dim 1 <- input dim 0
+        //   output dim 2 <- input dim 1
+        // So at output coord (d, b, c), we read input at (b, c, d)
+        bool allMatch = true;
+        for (int d = 0; d < 4; d++)
+        {
+            for (int b = 0; b < 2; b++)
+            {
+                for (int c = 0; c < 3; c++)
+                {
+                    // Output index in row-major [4, 2, 3]
+                    int outIdx = d * (2 * 3) + b * 3 + c;
+                    // Input index in row-major [2, 3, 4]: input[b, c, d]
+                    int inIdx = b * (3 * 4) + c * 4 + d;
+                    float expected = inputData[inIdx];
+                    if (result[outIdx] != expected)
+                    {
+                        allMatch = false;
+                    }
+                }
+            }
+        }
+        if (!allMatch)
+            return SLANG_FAIL;
+    }
+
+    // Test 3: 4D Permute [0, 2, 1, 3] (swap middle dimensions - like cross-attention)
+    // Input shape [2, 3, 4, 5] -> Output shape [2, 4, 3, 5]
+    {
+        Expr eBuf = buffer();
+        Expr ePerm = permute(eBuf, {0, 2, 1, 3}); // Swap dims 1 and 2
+
+        RefPtr<ElementwiseKernel> kernel = new ElementwiseKernel(ctx, ePerm);
+
+        // Input data: shape [2, 3, 4, 5] = 120 elements
+        List<float> inputData;
+        for (int i = 0; i < 120; i++)
+            inputData.add((float)i);
+
+        auto bufIn = ctx->createTensor(ElementType::Float32, Shape{2, 3, 4, 5}, inputData, "In4D");
+        auto bufOut = ctx->allocScratchTensor(ElementType::Float32, Shape{2, 4, 3, 5}, "Out4D");
+
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(eBuf, bufIn->getView());
+
+        auto task = ctx->createTask();
+        kernel->queueExecute(task, bufOut, inputs);
+        task.execute();
+
+        auto result = ctx->readBuffer<float>(bufOut);
+
+        // Verify: output[a, c, b, d] = input[a, b, c, d]
+        // dims = [0, 2, 1, 3] means:
+        //   output dim 0 <- input dim 0
+        //   output dim 1 <- input dim 2
+        //   output dim 2 <- input dim 1
+        //   output dim 3 <- input dim 3
+        bool allMatch = true;
+        int errorCount = 0;
+        for (int a = 0; a < 2; a++)
+        {
+            for (int c = 0; c < 4; c++)
+            { // output dim 1
+                for (int b = 0; b < 3; b++)
+                { // output dim 2
+                    for (int d = 0; d < 5; d++)
+                    {
+                        // Output index in row-major [2, 4, 3, 5]
+                        int outIdx = a * (4 * 3 * 5) + c * (3 * 5) + b * 5 + d;
+                        // Input index in row-major [2, 3, 4, 5]: input[a, b, c, d]
+                        int inIdx = a * (3 * 4 * 5) + b * (4 * 5) + c * 5 + d;
+                        float expected = inputData[inIdx];
+                        if (result[outIdx] != expected)
+                        {
+                            allMatch = false;
+                            errorCount++;
+                        }
+                    }
+                }
+            }
+        }
+        if (!allMatch)
+        {
+            return SLANG_FAIL;
+        }
+    }
+
+    MLKL_TEST_OK();
+}

@@ -44,28 +44,25 @@ void batchGemm<TA:IExpr, TB:IExpr, TC:IExpr, TSink:ISink, TOut:IExpr>(
 
     for (uint k = 0; k < params.K; k++)
     {
-        // Resolve Linear Index for A [row, k]
-        uint idxA = batchOffsetA + row * params.K + k;
-        float valA = params.A.eval(idxA, emptyInput);
+        // A[batch, row, k]
+        float valA = params.A.eval(Coord(batchIdx, row, k), emptyInput);
 
-        // Resolve Linear Index for B [k, col]
-        uint idxB = batchOffsetB + k * params.N + col;
-        float valB = params.B.eval(idxB, emptyInput);
+        // B[batch, k, col]
+        float valB = params.B.eval(Coord(batchIdx, k, col), emptyInput);
         
         sum += valA * valB;
     }
 
-    uint idxC = batchOffsetC + row * params.N + col;
-    
-    // Evaluate C (Bias/Accumulator)
-    float valC = params.C.eval(idxC, emptyInput);
+    // C[batch, row, col]
+    Coord outCoord = Coord(batchIdx, row, col);
+    float valC = params.C.eval(outCoord, emptyInput);
 
     float res = params.alpha * sum + params.beta * valC;
 
     // Apply Output Epilogue (Activation, etc.)
     Input outInput = {};
     outInput.value = res;
-    float finalVal = params.FOut.eval(idxC, outInput);
+    float finalVal = params.FOut.eval(outCoord, outInput);
 
-    params.Sink.store(Coord(batchIdx, row, col), finalVal);
+    params.Sink.store(outCoord, finalVal);
 }

@@ -104,17 +104,25 @@ Shape BufferNode::resolveShape(const EvalContext& ctx) const
 
 void BufferNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
-    InputInfo info;
+    InputInfo info = {};
     writer.align(8);
+    bool hasAddr = false;
     if (ctx.inputs.tryGetValue((ExprNode*)this, info))
     {
         if (info.tensorView)
         {
             writer.write(info.tensorView.getDeviceAddress());
-            return;
+            hasAddr = true;
         }
     }
-    writer.write<uint64_t>(0);
+    if (!hasAddr)
+    {
+        // If a buffer isn't provided, write nullptr for buffer address.
+        writer.write<uint64_t>(0);
+    }
+    writer.write<int>(info.tensorView.shape.getRank());
+    auto strides = computeDenseStrides(info.tensorView.shape);
+    writer.writeBytes(strides.getBuffer(), strides.getCapacity() * sizeof(uint32_t));
 }
 
 // --- ConstantNode ---
@@ -159,9 +167,9 @@ Shape BroadcastNode::resolveShape(const EvalContext& ctx) const
         return outputShape;
 
     // 2. Allow Inner Rank <= Target Rank
-    if (inputShape.getRank() > outputShape.getRank())
+    if (inputShape.getRank() != outputShape.getRank())
     {
-        throw std::runtime_error("BroadcastNode: Inner rank cannot exceed target rank");
+        throw std::runtime_error("BroadcastNode: rank mismatch!");
     }
 
     // 3. Right-Aligned Compatibility Check
@@ -196,33 +204,25 @@ void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
     int rankDiff = targetShape.getRank() - innerShape.getRank();
 
-    // Compute Strides
-    List<int> strides;
-    for (Index i = 0; i < targetShape.getRank(); i++)
-        strides.add(0);
+    // Compute innerStrides: 0 means broadcast (zero out coord), 1 means pass through
+    // When a dimension is broadcast (inner dim = 1, target dim > 1), we set stride to 0
+    // When dimensions match, we set stride to 1 (pass through the coord)
+    uint32_t innerStrides[8] = {0};
 
-    // Inner contiguous strides
-    List<int> trueInnerStrides;
-    for (Index i = 0; i < innerShape.getRank(); i++)
-        trueInnerStrides.add(0);
-    int s = 1;
-    for (int i = innerShape.getRank() - 1; i >= 0; i--)
-    {
-        trueInnerStrides[i] = s;
-        s *= innerShape[i];
-    }
-
-    for (int i = targetShape.getRank() - 1; i >= 0; i--)
+    for (int i = 0; i < targetShape.getRank(); i++)
     {
         int innerIdx = i - rankDiff;
-        if (innerIdx >= 0)
+        if (innerIdx >= 0 && innerIdx < innerShape.getRank())
         {
             int iDim = innerShape[innerIdx];
             int tDim = targetShape[i];
-            if (iDim == tDim)
-                strides[i] = trueInnerStrides[innerIdx];
-            else
-                strides[i] = 0; // Broadcast (dim=1 or mismatch assumed broadcast)
+            // If dimensions match, pass through; if inner is 1 (broadcast), zero out
+            innerStrides[i] = (iDim == tDim) ? 1 : 0;
+        }
+        else
+        {
+            // Dimension doesn't exist in inner (leading dims from rank difference)
+            innerStrides[i] = 0;
         }
     }
 
@@ -230,15 +230,7 @@ void BroadcastNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     uint32_t rank = (uint32_t)targetShape.getRank();
     writer.write(rank);
 
-    uint32_t outShapeArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    for (Index i = 0; i < targetShape.getRank(); ++i)
-        outShapeArr[i] = (uint32_t)targetShape[i];
-    writer.writeBytes(outShapeArr, sizeof(outShapeArr));
-
-    uint32_t strideArr[8] = {0};
-    for (Index i = 0; i < strides.getCount(); ++i)
-        strideArr[i] = (uint32_t)strides[i];
-    writer.writeBytes(strideArr, sizeof(strideArr));
+    writer.writeBytes(innerStrides, sizeof(innerStrides));
 }
 
 // --- PermuteNode ---
@@ -287,52 +279,18 @@ void PermuteNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     Shape innerShape = inner.node->resolveShape(ctx);
     Shape outShape = resolveShape(ctx);
 
-    // 1. Handle Scalar Case
-    if (innerShape.isScalar())
-    {
-        uint32_t rank = 1;
-        writer.write(rank);
-
-        uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-        uint32_t mapStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-        // Logical dimension 0 has size 1 and stride 0 (or 1, doesn't matter for index 0)
-        outDimsArr[0] = 1;
-        mapStrideArr[0] = 0;
-
-        writer.writeBytes(outDimsArr, sizeof(outDimsArr));
-        writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
-        return;
-    }
-
-    // 2. Standard Tensor Case
-    auto innerStrides = computeDenseStrides(innerShape);
     uint32_t rank = (uint32_t)outShape.getRank();
     writer.write(rank);
 
-    uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    uint32_t mapStrideArr[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-    // Pack in reverse order to match Slang's temp % d logic
-    for (int i = 0; i < (int)rank; ++i)
+    // Build permutation map: permMap[i] = j means output coord[i] maps to inner coord[j]
+    // This is exactly the dims array we already have.
+    uint32_t permMap[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    for (int i = 0; i < (int)dims.getCount(); ++i)
     {
-        int logicalDimIdx = (int)rank - 1 - i;
-
-        outDimsArr[i] = (uint32_t)outShape[logicalDimIdx];
-
-        // Ensure we don't index out of bounds of the permutation dims
-        if (logicalDimIdx < (int)dims.getCount())
-        {
-            int physicalDimIdx = dims[logicalDimIdx];
-            if (physicalDimIdx < innerStrides.getCount())
-            {
-                mapStrideArr[i] = (uint32_t)innerStrides[physicalDimIdx];
-            }
-        }
+        permMap[i] = (uint32_t)dims[i];
     }
 
-    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
-    writer.writeBytes(mapStrideArr, sizeof(mapStrideArr));
+    writer.writeBytes(permMap, sizeof(permMap));
 }
 
 void PermuteNode::validateDims()
@@ -389,15 +347,9 @@ Shape GatherNode::resolveShape(const EvalContext& ctx) const
 
 void GatherNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
-    // 1. Pack dependencies
+    // Pack dependencies - no additional fields needed since coords are passed directly
     tableProgram->pack(writer, ctx);
     indicesProgram->pack(writer, ctx);
-
-    // 2. Pack struct fields (embeddingDim)
-    Shape tableShape = table.node->resolveShape(ctx);
-    uint32_t dim = (uint32_t)tableShape[1];
-
-    writer.write(dim);
 }
 
 // --- TransposeNode ---
@@ -439,27 +391,14 @@ void TransposeNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     innerProgram->pack(writer, ctx);
 
     Shape innerShape = inner.node->resolveShape(ctx);
-    Shape outShape = resolveShape(ctx);
-    auto innerStrides = computeDenseStrides(innerShape);
     int rank = innerShape.getRank();
 
     int d0 = dim0 < 0 ? rank + dim0 : dim0;
     int d1 = dim1 < 0 ? rank + dim1 : dim1;
 
+    // Only need to pack the two dimension indices to swap
     writer.write((uint32_t)d0);
     writer.write((uint32_t)d1);
-
-    // Write Shape (8 uints)
-    uint32_t shapeArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    for (int i = 0; i < rank; ++i)
-        shapeArr[i] = (uint32_t)outShape[i];
-    writer.writeBytes(shapeArr, sizeof(shapeArr));
-
-    // Write Strides (8 uints)
-    uint32_t strideArr[8] = {0};
-    for (int i = 0; i < rank; ++i)
-        strideArr[i] = (uint32_t)innerStrides[i];
-    writer.writeBytes(strideArr, sizeof(strideArr));
 }
 
 // --- ConcatNode ---
@@ -526,45 +465,17 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 
     // 2. Resolve Shapes
     Shape lShape = left.node->resolveShape(ctx);
-    Shape rShape = right.node->resolveShape(ctx);
-    Shape outShape = resolveShape(ctx); // Output shape
 
     int trueAxis = getAxis(ctx);
 
     if (trueAxis < 0)
         trueAxis += lShape.getRank();
 
-    // 3. Compute Metadata
-    auto lStrides = computeDenseStrides(lShape);
-    auto rStrides = computeDenseStrides(rShape);
-
-    // 4. Pack Scalars (Axis, Split, Rank)
+    // 3. Pack Scalars (Axis, Split Point)
     // Axis
     writer.write((uint32_t)trueAxis);
     // Split Point (Size of Left at Axis)
     writer.write((uint32_t)lShape[trueAxis]);
-    // Rank
-    writer.write((uint32_t)outShape.getRank());
-
-    // 5. Pack Arrays (OutputDims, LeftStrides, RightStrides)
-
-    // Output Dims
-    uint32_t outDimsArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    for (int i = 0; i < outShape.getRank(); ++i)
-        outDimsArr[i] = (uint32_t)outShape[i];
-    writer.writeBytes(outDimsArr, sizeof(outDimsArr));
-
-    // Left Strides
-    uint32_t lStridesArr[8] = {0};
-    for (int i = 0; i < lStrides.getCount(); ++i)
-        lStridesArr[i] = (uint32_t)lStrides[i];
-    writer.writeBytes(lStridesArr, sizeof(lStridesArr));
-
-    // Right Strides
-    uint32_t rStridesArr[8] = {0};
-    for (int i = 0; i < rStrides.getCount(); ++i)
-        rStridesArr[i] = (uint32_t)rStrides[i];
-    writer.writeBytes(rStridesArr, sizeof(rStridesArr));
 }
 
 // =========================================================================
@@ -1216,6 +1127,15 @@ void ElementwiseKernel::queueExecute(InferencingTask& task, EvalContext& ctx, Te
 
     writer.write(output.getDeviceAddress());
     writer.write((uint32_t)count);
+
+    // Write rank and shape for coordinate decomposition in the materialize kernel
+    uint32_t rank = (uint32_t)resultShape.getRank();
+    writer.write(rank);
+
+    uint32_t shapeArr[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    for (int i = 0; i < (int)rank; ++i)
+        shapeArr[i] = (uint32_t)resultShape[i];
+    writer.writeBytes(shapeArr, sizeof(shapeArr));
 
     program.pack(writer, ctx);
     writer.finish();

@@ -205,7 +205,6 @@ class BufferNode : public LeafNode
 {
 public:
     uint64_t sequenceNumber; // To identify the buffer at runtime
-
     String getSlangTypeName() const override { return "BufferView"; }
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;

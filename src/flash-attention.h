@@ -3,8 +3,6 @@
 #include "elementwise.h"
 #include "kernel-base.h"
 
-namespace Slang
-{
 
 // Flash Attention Kernel
 // Implements Flash Attention 2 algorithm that computes:
@@ -71,5 +69,3 @@ public:
         float scale,
         bool isCausal);
 };
-
-} // namespace Slang

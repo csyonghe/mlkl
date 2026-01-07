@@ -46,7 +46,7 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
             uint globalK = t * TILE_K + localK;
 
             if (globalRow < params.M && globalK < params.K)
-                s_A[localRow][localK] = params.input.eval(globalRow * params.K + globalK, Input(0.0f));
+                s_A[localRow][localK] = params.input.eval(Coord(globalRow, globalK), Input(0.0f));
             else
                 s_A[localRow][localK] = 0.0f;
         }
@@ -83,9 +83,9 @@ void linearTiled<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IExpr, 
         if (params.has_bias != 0)
             acc += params.bias[col];
         
-        uint linearIdx = row * params.N + col;
-        float finalVal = params.outFunc.eval(linearIdx, Input(acc));
-        params.outputSink.store(Coord(row, col), finalVal);
+        Coord outCoord = Coord(row, col);
+        float finalVal = params.outFunc.eval(outCoord, Input(acc));
+        params.outputSink.store(outCoord, finalVal);
     }
 }
 
@@ -111,7 +111,7 @@ void linearBruteforce<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IE
         for (uint k = 0; k < params.K; k++)
         {
             // Pull input value: input[row, k]
-            float inVal = params.input.eval(row * params.K + k, Input(0.0f));
+            float inVal = params.input.eval(Coord(row, k), Input(0.0f));
             
             // Read weight: weight[col, k]
             float weightVal = params.weights[col * params.K + k];
@@ -126,10 +126,10 @@ void linearBruteforce<let TILE_M: int, let TILE_N: int, let TILE_K: int, TIn: IE
         }
 
         // 5. Apply Value Fusion (e.g., ReLU or Identity)
-        uint linearIdx = row * params.N + col;
-        float finalVal = params.outFunc.eval(linearIdx, Input(acc));
+        Coord outCoord = Coord(row, col);
+        float finalVal = params.outFunc.eval(outCoord, Input(acc));
 
         // 6. Apply Storage Fusion (Push to Sink)
-        params.outputSink.store(Coord(row, col), finalVal);
+        params.outputSink.store(outCoord, finalVal);
     }
 }

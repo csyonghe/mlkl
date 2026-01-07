@@ -29,16 +29,6 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
     static groupshared float s_K[blockSizeC][headDimension];
     static groupshared float s_V[blockSizeC][headDimension];
 
-    // --- DECOUPLED STRIDE LOGIC ---
-    uint q_head_stride = params.seq_len_q * headDimension;
-    uint kv_head_stride = params.seq_len_kv * headDimension;
-    
-    uint q_batch_stride = params.num_heads * q_head_stride;
-    uint kv_batch_stride = params.num_heads * kv_head_stride;
-
-    uint q_global_offset = (batch_idx * q_batch_stride) + (head_idx * q_head_stride);
-    uint kv_global_offset = (batch_idx * kv_batch_stride) + (head_idx * kv_head_stride);
-
     // 1. Online Softmax Accumulators
     float m_prev = -1e30f;
     float l_prev = 0.0f;
@@ -49,8 +39,8 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
     float q_local[headDimension];
     if (row_idx < params.seq_len_q) {
         for (uint d = 0; d < headDimension; d++) {
-            uint linearIdx = q_global_offset + (row_idx * headDimension) + d;
-            q_local[d] = params.Q.eval(linearIdx, Input(0.0f));
+            // Q shape: [Batch, NumHeads, SeqQ, HeadDim]
+            q_local[d] = params.Q.eval(Coord(batch_idx, head_idx, row_idx, d), Input(0.0f));
         }
     }
 
@@ -64,9 +54,10 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
         
         if (kv_row_global < params.seq_len_kv) {
             for (uint d = 0; d < headDimension; d++) {
-                uint linearIdx = kv_global_offset + (kv_row_global * headDimension) + d;
-                s_K[kv_row_in_tile][d] = params.K.eval(linearIdx, Input(0.0f));
-                s_V[kv_row_in_tile][d] = params.V.eval(linearIdx, Input(0.0f));
+                // K, V shape: [Batch, NumHeads, SeqKV, HeadDim]
+                Coord kvCoord = Coord(batch_idx, head_idx, kv_row_global, d);
+                s_K[kv_row_in_tile][d] = params.K.eval(kvCoord, Input(0.0f));
+                s_V[kv_row_in_tile][d] = params.V.eval(kvCoord, Input(0.0f));
             }
         } else {
             // Out of bounds padding for incomplete tiles
@@ -130,9 +121,9 @@ void flashAttention2<let blockSizeR : int, let blockSizeC : int, let headDimensi
     // 6. Final Normalization and Output Fusion
     if (row_idx < params.seq_len_q) {
         for (uint d = 0; d < headDimension; d++) {
-            uint destIdx = q_global_offset + (row_idx * headDimension) + d;
+            Coord outCoord = Coord(batch_idx, head_idx, row_idx, d);
             float attentionVal = acc[d] / l_prev;
-            params.sink.store(Coord(batch_idx, head_idx, row_idx, d), params.outFunc.eval(destIdx, Input(attentionVal)));
+            params.sink.store(outCoord, params.outFunc.eval(outCoord, Input(attentionVal)));
         }
     }
 }

@@ -27,7 +27,7 @@ SlangResult testBroadcastAdd(InferencingContext* ctx)
         sizeof(dataA),
         dataA);
     auto bufB =
-        ctx->createTensor(ElementType::Float32, Shape(batchSize, width), sizeof(dataB), dataB);
+        ctx->createTensor(ElementType::Float32, Shape(batchSize, 1, width), sizeof(dataB), dataB);
 
     // 2. Prepare Kernel
     BroadcastAddKernel kernel(ctx);

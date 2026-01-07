@@ -1,7 +1,6 @@
 #include "flash-attention.h"
 
-namespace Slang
-{
+using namespace Slang;
 
 FlashAttentionKernel::FlashAttentionKernel(
     InferencingContext* ctx,
@@ -77,6 +76,43 @@ void FlashAttentionKernel::queueExecute(
     for (auto it : inputs)
         evalCtx.inputs.add(it.first.node, it.second);
 
+    // Validate that Q, K, V expressions resolve to expected shapes [B, H, S, D]
+    // after any permutations are applied. This catches shape format mismatches.
+    Shape expectedQ{(int)batchSize, (int)numHeads, (int)seqLenQ, headDim};
+    Shape expectedKV{(int)batchSize, (int)numHeads, (int)seqLenKV, headDim};
+
+    Shape actualQ = qExpr.node->resolveShape(evalCtx);
+    Shape actualK = kExpr.node->resolveShape(evalCtx);
+    Shape actualV = vExpr.node->resolveShape(evalCtx);
+
+    if (actualQ != expectedQ)
+    {
+        StringBuilder sb;
+        sb << "FlashAttention: Q shape mismatch. Expected [B=" << batchSize << ", H=" << numHeads
+           << ", S=" << seqLenQ << ", D=" << headDim << "] but got [" << actualQ[0] << ", "
+           << actualQ[1] << ", " << actualQ[2] << ", " << actualQ[3]
+           << "]. Check that input is in the correct format.";
+        throw InvalidOperationException(sb.toString());
+    }
+    if (actualK != expectedKV)
+    {
+        StringBuilder sb;
+        sb << "FlashAttention: K shape mismatch. Expected [B=" << batchSize << ", H=" << numHeads
+           << ", S=" << seqLenKV << ", D=" << headDim << "] but got [" << actualK[0] << ", "
+           << actualK[1] << ", " << actualK[2] << ", " << actualK[3]
+           << "]. Check that input is in the correct format.";
+        throw InvalidOperationException(sb.toString());
+    }
+    if (actualV != expectedKV)
+    {
+        StringBuilder sb;
+        sb << "FlashAttention: V shape mismatch. Expected [B=" << batchSize << ", H=" << numHeads
+           << ", S=" << seqLenKV << ", D=" << headDim << "] but got [" << actualV[0] << ", "
+           << actualV[1] << ", " << actualV[2] << ", " << actualV[3]
+           << "]. Check that input is in the correct format.";
+        throw InvalidOperationException(sb.toString());
+    }
+
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
 
@@ -121,5 +157,3 @@ void FlashAttentionKernel::queueExecute(
         paramData.getBuffer(),
         (uint32_t)paramData.getCount());
 }
-
-} // namespace Slang

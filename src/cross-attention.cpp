@@ -121,7 +121,7 @@ void CrossAttentionKernel::queueExecute(
     Dictionary<Expr, InputInfo> attnInputs;
     attnInputs.add(exprQ_In, bufQ.reshape({batchSize, seqQ, numHeads, headDim}));
 
-    Shape shapeKV = {batchSize, numHeads, seqKV, channelDim / numHeads};
+    Shape shapeKV = {batchSize, seqKV, numHeads, channelDim / numHeads};
     attnInputs.add(exprK_In, bufKV.slice(0, 1).reshape(shapeKV));
     attnInputs.add(exprV_In, bufKV.slice(1, 1).reshape(shapeKV));
 

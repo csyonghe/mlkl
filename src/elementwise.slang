@@ -18,32 +18,58 @@ struct Coord
     {
         baseOffset = 0; coords = makeArrayFromElement<uint,8>(0);
     }
+    __init(uint x)
+    {
+        baseOffset = 0; coords = {x, 0, 0, 0, 0, 0, 0, 0};
+    }
+    __init(uint x, uint y)
+    {
+        baseOffset = 0; coords = {x, y, 0, 0, 0, 0, 0, 0};
+    }
+    __init(uint x, uint y, uint z)
+    {
+        baseOffset = 0; coords = {x, y, z, 0, 0, 0, 0, 0};
+    }
+    __init(uint x, uint y, uint z, uint w)
+    {
+        baseOffset = 0; coords = {x, y, z, w, 0, 0, 0, 0};
+    }
+    // Int overloads for convenience
     __init(int x)
     {
-        baseOffset = 0; coords = {x};
+        baseOffset = 0; coords = {uint(x), 0, 0, 0, 0, 0, 0, 0};
     }
     __init(int x, int y)
     {
-        baseOffset = 0; coords = {x, y};
+        baseOffset = 0; coords = {uint(x), uint(y), 0, 0, 0, 0, 0, 0};
     }
     __init(int x, int y, int z)
     {
-        baseOffset = 0; coords = {x, y, z};
+        baseOffset = 0; coords = {uint(x), uint(y), uint(z), 0, 0, 0, 0, 0};
     }
     __init(int x, int y, int z, int w)
     {
-        baseOffset = 0; coords = {x, y, z, w};
+        baseOffset = 0; coords = {uint(x), uint(y), uint(z), uint(w), 0, 0, 0, 0};
     }
     __init(uint offset, uint coords[8])
     {
         baseOffset = offset;
         this.coords = coords;
     }
+    
+    // Create a Coord from a linear index (for backward compatibility)
+    static Coord fromLinearIndex(uint linearIndex)
+    {
+        Coord c;
+        c.baseOffset = linearIndex;
+        c.coords = makeArrayFromElement<uint,8>(0);
+        return c;
+    }
 }
 
 interface IExpr
 {
-    float eval(uint tid, Input input);
+    float eval(Coord coord, Input input);
 }
 
 extension<T:IExpr> T
@@ -52,14 +78,14 @@ extension<T:IExpr> T
     {
         get
         {
-            return eval(linearIndex, Input(0.0f));
+            return eval(Coord.fromLinearIndex(linearIndex), Input(0.0f));
         }
     }
 }
 
 interface IStmt
 {
-    void execute(uint tid, Input input);
+    void execute(Coord coord, Input input);
 }
 
 interface ISink
@@ -74,7 +100,7 @@ struct Reg<let ID : int> : IExpr
     static float value;
 
     // IExpr implementation: Read the value
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
         return value;
     }
@@ -85,10 +111,10 @@ struct Eval<let ID : int, E : IExpr> : IStmt
 {
     E expr;
 
-    void execute(uint tid, Input input)
+    void execute(Coord coord, Input input)
     {
         // Write to the static storage for this ID
-        Reg<ID>.value = expr.eval(tid, input);
+        Reg<ID>.value = expr.eval(coord, input);
     }
 }
 
@@ -96,93 +122,96 @@ struct Program<int resultReg, each S : IStmt> : IExpr
 {
     Tuple<expand each S> stmts;
 
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
         // Execute each statement in order
-        expand (each stmts).execute(tid, input);
+        expand (each stmts).execute(coord, input);
         // Return the value of the result register
         return Reg<resultReg>.value;
     }
 }
 
-struct BufferView : IExpr
+struct BufferView: IExpr
 {
     float* data;
-    float eval(uint tid, Input input) { return data[tid]; }
+    int rank;
+    uint strides[8];
+    float eval(Coord coord, Input input)
+    {
+        // baseOffset is used for direct linear indexing (subscript operator)
+        // coords are used for N-D coordinate access
+        uint linearIdx = coord.baseOffset;
+        [unroll]
+        for (int i = 0; i < 8; i++)
+        {
+            if (i >= rank) break;
+            linearIdx += coord[i] * strides[i];
+        }
+        return data[linearIdx];
+    }
 }
 
 struct ConstantView : IExpr
 {
     float value;
-    float eval(uint tid, Input input) { return value; }
+    float eval(Coord coord, Input input) { return value; }
 }
 
 struct KernelOutput : IExpr
 {
-    float eval(uint tid, Input input) { return input.value; }
+    float eval(Coord coord, Input input) { return input.value; }
 }
 
 struct Broadcast<Inner : IExpr> : IExpr
 {
     Inner inner;
     uint rank;
-    uint outputShape[8];
-    uint innerStrides[8];
+    uint innerStrides[8];  // 0 means broadcast, >0 means take from coord
 
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
-        uint innerLinear = 0;
-        uint temp = tid;
+        // Transform output coord to inner coord by zeroing broadcast dimensions
+        Coord innerCoord;
+        innerCoord.baseOffset = coord.baseOffset;
+        innerCoord.coords = makeArrayFromElement<uint, 8>(0);
         
-        [unroll]
-        for (int i = 7; i >= 0; i--) 
+        [ForceUnroll]
+        for (int i = 0; i < 8; i++)
         {
-            if (i < int(rank))
-            {
-                uint dimSize = outputShape[i];
-                uint coord = temp % dimSize;
-                temp /= dimSize;
-                innerLinear += coord * innerStrides[i];
-            }
+            // If stride is 0, the dimension is broadcast (set coord to 0)
+            // Otherwise, pass through the coordinate
+            innerCoord[i] = (innerStrides[i] == 0) ? 0 : coord[i];
         }
-        return inner.eval(innerLinear, input);
+        return inner.eval(innerCoord, input);
     }
 }
 struct Permute<Inner : IExpr> : IExpr
 {
     Inner inner;
     uint rank;
-    // Dimensions packed in REVERSE order (index 0 is the innermost/last dimension)
-    uint outputDims[8];
-    // Strides in the physical buffer mapped to the reversed logical dimensions
-    uint mappedStrides[8]; 
+    // permMap[i] = j means output coord[i] maps to inner coord[j]
+    uint permMap[8];
 
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
-        // For scalars (rank 0), the loop is skipped and it returns inner.eval(0)
-        uint innerIdx = 0;
-        uint temp = tid;
+        // Transform output coord to inner coord via permutation
+        // Initialize all coords to 0 first
+        Coord innerCoord;
+        innerCoord.baseOffset = coord.baseOffset;
+        innerCoord.coords = makeArrayFromElement<uint, 8>(0);
         
-        // We iterate through the packed metadata. 
-        // Because we packed in reverse in C++, index 0 is the fastest changing dim.
-        [unroll]
-        for (uint i = 0; i < 8; i++)
-        {
-            if (i < rank)
-            {
-                uint d = outputDims[i];
-                
-                // Extract the coordinate for this logical dimension
-                // If d is 1 (e.g. for a scalar or padding), c is always 0.
-                uint c = temp % d;
-                temp /= d;
-                
-                // Add the contribution to the physical buffer offset
-                innerIdx += c * mappedStrides[i];
-            }
-        }
+        // Apply permutation: output dimension i maps to inner dimension permMap[i]
+        // Manually unrolled to avoid double-indirection issues
+        if (0 < rank) innerCoord[permMap[0]] = coord[0];
+        if (1 < rank) innerCoord[permMap[1]] = coord[1];
+        if (2 < rank) innerCoord[permMap[2]] = coord[2];
+        if (3 < rank) innerCoord[permMap[3]] = coord[3];
+        if (4 < rank) innerCoord[permMap[4]] = coord[4];
+        if (5 < rank) innerCoord[permMap[5]] = coord[5];
+        if (6 < rank) innerCoord[permMap[6]] = coord[6];
+        if (7 < rank) innerCoord[permMap[7]] = coord[7];
         
-        return inner.eval(innerIdx, input);
+        return inner.eval(innerCoord, input);
     }
 }
 
@@ -191,52 +220,14 @@ struct Transpose<Inner : IExpr> : IExpr
     Inner inner;
     uint dim0; // Dimension to swap
     uint dim1; // Dimension to swap
-    
-    uint shape[8];   // Output shape
-    uint strides[8]; // Inner tensor strides
 
-    // To evaluate Transpose(A) at index 'i':
-    // 1. Convert 'i' to coords (in output shape)
-    // 2. Swap coord[dim0] and coord[dim1]
-    // 3. Re-linearize using inner strides
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
-        // 1. Decompose
-        uint coord[8];
-        uint temp = tid;
-        
-        // Unroll assuming max rank 8
-        [unroll]
-        for (int i = 7; i >= 0; i--)
-        {
-             // Note: We use the output shape for decomposition
-             uint d = shape[i]; 
-             // Avoid div/mod by 0 if shape is uninitialized/padding
-             if (d > 1) 
-             {
-                 coord[i] = temp % d;
-                 temp /= d;
-             }
-             else
-             {
-                 coord[i] = 0;
-             }
-        }
-
-        // 2. Swap coordinates
-        uint t = coord[dim0];
-        coord[dim0] = coord[dim1];
-        coord[dim1] = t;
-
-        // 3. Re-linearize
-        uint innerIdx = 0;
-        [unroll]
-        for (int i = 0; i < 8; i++)
-        {
-            innerIdx += coord[i] * strides[i];
-        }
-        
-        return inner.eval(innerIdx, input);
+        // Swap coordinates at dim0 and dim1
+        Coord innerCoord = coord;
+        innerCoord[dim0] = coord[dim1];
+        innerCoord[dim1] = coord[dim0];
+        return inner.eval(innerCoord, input);
     }
 }
 
@@ -247,62 +238,22 @@ struct Concat<L : IExpr, R : IExpr> : IExpr
     
     uint axis;
     uint splitPoint; // Size of Left dimension along axis
-    uint rank;
-    
-    // Metadata for coordinate transformation
-    uint outputDims[8];    // To decompose tid -> coords
-    uint leftStrides[8];   // To compose coords -> tid_L
-    uint rightStrides[8];  // To compose coords -> tid_R
 
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
-        // 1. Decompose Linear Output ID -> N-D Coordinates
-        uint coord[8];
-        uint temp = tid;
-        
-        // Standard row-major decomposition (last dim is contiguous)
-        [unroll]
-        for (int i = 7; i >= 0; i--)
-        {
-            if (i < int(rank))
-            {
-                uint dimSize = outputDims[i];
-                coord[i] = temp % dimSize;
-                temp /= dimSize;
-            }
-            else 
-            {
-                coord[i] = 0;
-            }
-        }
-
-        // 2. Branch based on Axis
         uint axisCoord = coord[axis];
         
         if (axisCoord < splitPoint)
         {
-            // Case: Left Tensor
-            // Re-linearize using Left Strides
-            uint idx = 0;
-            [unroll]
-            for (int i = 0; i < 8; ++i) {
-                if (i < int(rank)) idx += coord[i] * leftStrides[i];
-            }
-            return left.eval(idx, input);
+            // Left tensor - pass coord through unchanged
+            return left.eval(coord, input);
         }
         else
         {
-            // Case: Right Tensor
-            // Shift coordinate relative to Right's start
-            coord[axis] = axisCoord - splitPoint;
-            
-            // Re-linearize using Right Strides
-            uint idx = 0;
-            [unroll]
-            for (int i = 0; i < 8; ++i) {
-                 if (i < int(rank)) idx += coord[i] * rightStrides[i];
-            }
-            return right.eval(idx, input);
+            // Right tensor - shift coordinate along axis
+            Coord rightCoord = coord;
+            rightCoord[axis] = axisCoord - splitPoint;
+            return right.eval(rightCoord, input);
         }
     }
 }
@@ -311,59 +262,56 @@ struct Gather<Table : IExpr, Indices : IExpr> : IExpr
     Table table;     // The lookup table (e.g., Weights [NumClasses, Dim])
     Indices indices; // The indices to gather (e.g., Labels [Batch])
     
-    uint embeddingDim; // Size of the inner dimension (Dim)
     // For simplicity, this implementation assumes gathering along Axis 0 
     // and that 'Table' is 2D and 'Indices' is 1D.
+    // Output Shape: [Batch, Dim]
+    // coord[0] = batch index, coord[1] = embedding dim
 
-    float eval(uint tid, Input input)
+    float eval(Coord coord, Input input)
     {
-        // Output Shape: [Batch, Dim]
-        // Map linear TID -> (batch, dim)
-        uint d = tid % embeddingDim;
-        uint b = tid / embeddingDim;
+        uint b = coord[0]; // Batch index
+        uint d = coord[1]; // Embedding dimension
 
         // 1. Evaluate Index at position 'b'
-        // We pass 'b' as the TID to the indices expression
-        float idxVal = indices.eval(b, input);
+        Coord idxCoord = Coord(b);
+        float idxVal = indices.eval(idxCoord, input);
         int row = int(idxVal); // Cast float to int index
 
         // 2. Evaluate Table at position (row, d)
-        // Table is [NumClasses, Dim], Row-Major.
-        // Linear Index = row * embeddingDim + d
-        uint tableTid = row * embeddingDim + d;
+        Coord tableCoord = Coord(row, d);
         
-        return table.eval(tableTid, input);
+        return table.eval(tableCoord, input);
     }
 }
 
 // Binary Ops
 struct Add<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid, Input input) { return l.eval(tid, input) + r.eval(tid, input); }
+    float eval(Coord coord, Input input) { return l.eval(coord, input) + r.eval(coord, input); }
 }
 struct Sub<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid, Input input) { return l.eval(tid, input) - r.eval(tid, input); }
+    float eval(Coord coord, Input input) { return l.eval(coord, input) - r.eval(coord, input); }
 }
 struct Mul<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid, Input input) { return l.eval(tid, input) * r.eval(tid, input); }
+    float eval(Coord coord, Input input) { return l.eval(coord, input) * r.eval(coord, input); }
 }
 struct Div<L : IExpr, R : IExpr> : IExpr {
     L l; R r;
-    float eval(uint tid, Input input) { return l.eval(tid, input) / r.eval(tid, input); }
+    float eval(Coord coord, Input input) { return l.eval(coord, input) / r.eval(coord, input); }
 }
 
 struct Min<L : IExpr, R : IExpr> : IExpr
 {
     L left; R right;
-    float eval(uint tid, Input input) { return min(left.eval(tid, input), right.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return min(left.eval(coord, input), right.eval(coord, input)); }
 }
 
 struct Max<L : IExpr, R : IExpr> : IExpr
 {
     L left; R right;
-    float eval(uint tid, Input input) { return max(left.eval(tid, input), right.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return max(left.eval(coord, input), right.eval(coord, input)); }
 }
 
 // --- Unary Operations ---
@@ -371,67 +319,67 @@ struct Max<L : IExpr, R : IExpr> : IExpr
 struct Neg<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return -inner.eval(tid, input); }
+    float eval(Coord coord, Input input) { return -inner.eval(coord, input); }
 }
 
 struct Exp<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return exp(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return exp(inner.eval(coord, input)); }
 }
 
 struct Log<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return log(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return log(inner.eval(coord, input)); }
 }
 
 struct Sin<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return sin(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return sin(inner.eval(coord, input)); }
 }
 
 struct Cos<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return cos(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return cos(inner.eval(coord, input)); }
 }
 
 struct Abs<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return abs(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return abs(inner.eval(coord, input)); }
 }
 
 struct Sqrt<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return sqrt(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return sqrt(inner.eval(coord, input)); }
 }
 
 struct Pow<L : IExpr, R : IExpr> : IExpr
 {
     L base; R exp;
     // HLSL pow(x, y)
-    float eval(uint tid, Input input) { return pow(base.eval(tid, input), exp.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return pow(base.eval(coord, input), exp.eval(coord, input)); }
 }
 struct Floor<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return floor(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return floor(inner.eval(coord, input)); }
 }
 
 struct Ceil<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return ceil(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return ceil(inner.eval(coord, input)); }
 }
 
 struct Rsqrt<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return rsqrt(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return rsqrt(inner.eval(coord, input)); }
 }
 
 // --- Activations ---
@@ -439,15 +387,15 @@ struct Rsqrt<I : IExpr> : IExpr
 struct Relu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return max(0.0, inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return max(0.0, inner.eval(coord, input)); }
 }
 
 struct Sigmoid<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) 
+    float eval(Coord coord, Input input) 
     { 
-        float v = inner.eval(tid, input);
+        float v = inner.eval(coord, input);
         return 1.0 / (1.0 + exp(-v)); 
     }
 }
@@ -455,15 +403,15 @@ struct Sigmoid<I : IExpr> : IExpr
 struct Tanh<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) { return tanh(inner.eval(tid, input)); }
+    float eval(Coord coord, Input input) { return tanh(inner.eval(coord, input)); }
 }
 
 struct Silu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) 
+    float eval(Coord coord, Input input) 
     { 
-        float x = inner.eval(tid, input);
+        float x = inner.eval(coord, input);
         // x * sigmoid(x)
         return x * (1.0 / (1.0 + exp(-x)));
     }
@@ -472,9 +420,9 @@ struct Silu<I : IExpr> : IExpr
 struct Gelu<I : IExpr> : IExpr
 {
     I inner;
-    float eval(uint tid, Input input) 
+    float eval(Coord coord, Input input) 
     { 
-        float x = inner.eval(tid, input);
+        float x = inner.eval(coord, input);
         // Tanh approximation
         return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
     }
@@ -574,6 +522,8 @@ struct MaterializeParams<P : IExpr>
 {
     float* outputBuffer;
     uint count;
+    uint rank;
+    uint shape[8];
     P program;
 }
 
@@ -585,12 +535,32 @@ void materialize<P:IExpr>(
     uint tid = id.x;
     if (tid >= params.count) return;
 
+    // Decompose linear index to N-D coordinate (row-major order)
+    Coord coord;
+    coord.baseOffset = 0;
+    uint temp = tid;
+    
+    [ForceUnroll]
+    for (int i = 7; i >= 0; i--)
+    {
+        if (i < int(params.rank))
+        {
+            uint dimSize = params.shape[i];
+            coord[i] = temp % dimSize;
+            temp /= dimSize;
+        }
+        else
+        {
+            coord[i] = 0;
+        }
+    }
+
     Input input = {};
 
-    // 1. Execute Program
-    let result = params.program.eval(tid, input);
+    // Execute Program with N-D coordinate
+    let result = params.program.eval(coord, input);
 
-    // 2. Write Output
+    // Write Output
     params.outputBuffer[tid] = result;
 }
 
