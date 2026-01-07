@@ -82,6 +82,41 @@ All kernels support multiple precision modes:
 - **Float16** - Half precision for memory efficiency
 - **Int32** - Integer operations where applicable
 
+## Model Weight Loading
+
+### SafeTensors Support
+
+The library includes a `SafeTensorsReader` class for loading model weights directly from the [SafeTensors](https://github.com/huggingface/safetensors) format, which is the standard format used by Hugging Face models including Stable Diffusion.
+
+```cpp
+SafeTensorsReader reader;
+SLANG_RETURN_ON_FAIL(reader.load("model.safetensors"));
+
+// Load weights directly into kernel buffers with automatic type conversion
+conv.loadParams(reader, toSlice("conv1.weight"), toSlice("conv1.bias"));
+linear.loadParams(reader, toSlice("fc.weight"), toSlice("fc.bias"));
+groupNorm.loadParams(reader, toSlice("norm.weight"), toSlice("norm.bias"));
+```
+
+**Features:**
+- **Zero-copy file access** via memory mapping (no large allocations)
+- **Automatic type conversion** from source dtype (F16/BF16/F32) to kernel's element type
+- **Dimension permutation** for weight layout transformations (e.g., PyTorch OIHW → engine IHWO)
+- **Cross-platform** support (Windows, Linux, macOS)
+
+**Supported dtypes:** F32, F16, BF16, I8, I16, I32, I64, U8, U16, U32, U64, BOOL
+
+**Kernels with SafeTensors `loadParams`:**
+- `Conv2DKernel` (with weight permutation)
+- `TransposedConv2DKernel` (with weight permutation)
+- `LinearKernel`
+- `GroupNormKernel`
+- `LayerNormKernel`
+- `RMSNormKernel`
+- `GatherKernel`
+- `TimeEmbedingKernel`
+- `CrossAttentionKernel`
+
 ## Kernel Fusion
 
 ### Philosophy
