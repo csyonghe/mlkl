@@ -310,6 +310,7 @@ add_library_target(mlkl src)
 add_executable_target(unit-test unit-test)
 add_executable_target(simple-unet examples/simple-unet)
 add_executable_target(conditioned-unet examples/conditioned-unet)
+add_executable_target(stable-diffusion examples/stable-diffusion)
 
 
 

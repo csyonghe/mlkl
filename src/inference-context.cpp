@@ -254,11 +254,11 @@ void InferencingTask::dispatchKernel(
 #if INTERMEDIATE_MODE
     if (SLANG_FAILED(queue->submit(encoder->finish())))
     {
-        InferencingContext::reportError("Failed to submit compute command buffer\n");
+        reportError("Failed to submit compute command buffer\n");
     }
     if (SLANG_FAILED(queue->waitOnHost()))
     {
-        InferencingContext::reportError("Failed to wait on compute queue\n");
+        reportError("Failed to wait on compute queue\n");
     }
     encoder = nullptr;
 #endif

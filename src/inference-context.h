@@ -12,7 +12,7 @@ using namespace Slang;
 
 // Define this to 1 to enable intermediate mode that runs kernels synchronously
 // on the CPU for easier debugging.
-#define INTERMEDIATE_MODE 0
+#define INTERMEDIATE_MODE 1
 
 class InferencingContext;
 

@@ -1,7 +1,7 @@
 #include "safetensors-reader.h"
-#include "json.h"
 
 #include "core/slang-io.h"
+#include "json.h"
 
 // Convert half-precision float (F16) to single-precision float (F32)
 static float halfToFloat(uint16_t h)
@@ -327,6 +327,10 @@ SlangResult SafeTensorsReader::readTensor(
     const SafeTensorInfo* info = getTensorInfo(name);
     if (!info)
     {
+        printf(
+            "warning: tensor '%.*s' not found in weights file\n",
+            (int)name.getLength(),
+            name.begin());
         return SLANG_E_NOT_FOUND;
     }
 

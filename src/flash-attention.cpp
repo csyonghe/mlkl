@@ -24,6 +24,17 @@ FlashAttentionKernel::FlashAttentionKernel(
     , headDim(d)
     , sinkExpr(sinkExpr)
 {
+    // Validate headDim to prevent shared memory overflow
+    // FlashAttention uses shared memory proportional to blockSize * headDim
+    constexpr int kMaxHeadDim = 256;
+    if (d > kMaxHeadDim)
+    {
+        throw InvalidOperationException(
+            String("FlashAttentionKernel: headDim (") + String(d) + 
+            ") exceeds maximum supported value (" + String(kMaxHeadDim) + 
+            "). Use standard attention (BatchGemm + Softmax) for larger head dimensions.");
+    }
+    
     // 1. Compile expressions into linear programs
     int globalRegCounter = 0;
     qProgram = compileExprToProgram(qExpr, &globalRegCounter);

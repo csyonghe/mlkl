@@ -46,3 +46,4 @@ log-*.txt
 /data/
 __pycache__/
 *.pth
+/examples/stable-diffusion/model/diffusion_pytorch_model.safetensors
