@@ -133,3 +133,29 @@ SlangResult testLinear(InferencingContext* ctx);
 SlangResult testLinearPartitioned(InferencingContext* ctx);
 SlangResult testLinearHalf(InferencingContext* ctx);
 SlangResult testLinearInt(InferencingContext* ctx);
+
+// Defined in test-reduce.cpp
+SlangResult testReduceLastDim(InferencingContext* ctx);
+SlangResult testReduceGroupNorm(InferencingContext* ctx);
+SlangResult testReduceAxis(InferencingContext* ctx);
+SlangResult testReduceAxis4D(InferencingContext* ctx);
+SlangResult testReduceLarge(InferencingContext* ctx);
+SlangResult testReduceHalf(InferencingContext* ctx);
+
+// Defined in test-group-norm.cpp
+SlangResult testGroupNorm(InferencingContext* ctx);
+SlangResult testGroupNormSingleGroup(InferencingContext* ctx);
+SlangResult testGroupNormPerChannel(InferencingContext* ctx);
+SlangResult testGroupNormLarge(InferencingContext* ctx);
+SlangResult testGroupNormHalf(InferencingContext* ctx);
+SlangResult testGroupNormStats(InferencingContext* ctx);
+
+// Defined in test-layer-norm.cpp
+SlangResult testLayerNorm(InferencingContext* ctx);
+SlangResult testLayerNormStats(InferencingContext* ctx);
+SlangResult testLayerNormLarge(InferencingContext* ctx);
+SlangResult testLayerNormHalf(InferencingContext* ctx);
+SlangResult testRMSNorm(InferencingContext* ctx);
+SlangResult testRMSNormIdentity(InferencingContext* ctx);
+SlangResult testRMSNormLarge(InferencingContext* ctx);
+SlangResult testRMSNormHalf(InferencingContext* ctx);

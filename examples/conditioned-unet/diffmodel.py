@@ -74,27 +74,28 @@ class CrossAttention(nn.Module):
 
 class Block(nn.Module):
     """
-    A standard ResNet-like block: Conv -> BN -> ReLU
+    A standard ResNet-like block: Conv -> GroupNorm -> ReLU
+    GroupNorm is more stable than BatchNorm for conditional generation.
     """
-    def __init__(self, in_ch, out_ch, time_emb_dim, up=False):
+    def __init__(self, in_ch, out_ch, time_emb_dim, up=False, num_groups=8):
         super().__init__()
         self.time_mlp = nn.Linear(time_emb_dim, out_ch)
         if up:
             self.conv1 = nn.Conv2d(2 * in_ch, out_ch, 3, padding=1)
-            self.bnorm1 = nn.BatchNorm2d(out_ch)
+            self.gnorm1 = nn.GroupNorm(num_groups, out_ch)
             self.transform = nn.ConvTranspose2d(out_ch, out_ch, 4, 2, 1)
         else:
             self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-            self.bnorm1 = nn.BatchNorm2d(out_ch)
+            self.gnorm1 = nn.GroupNorm(num_groups, out_ch)
             self.transform = nn.Conv2d(out_ch, out_ch, 4, 2, 1)
             
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bnorm2 = nn.BatchNorm2d(out_ch)
+        self.gnorm2 = nn.GroupNorm(num_groups, out_ch)
         self.relu = nn.ReLU()
 
     def forward(self, x, t):
         # First Conv
-        h = self.relu(self.bnorm1(self.conv1(x)))
+        h = self.relu(self.gnorm1(self.conv1(x)))
         # Time Embedding Injection
         time_emb = self.relu(self.time_mlp(t))
         # Extend time_emb to match spatial dims [B, C, 1, 1]
@@ -102,7 +103,7 @@ class Block(nn.Module):
         # Add time embedding
         h = h + time_emb
         # Second Conv
-        h = self.relu(self.bnorm2(self.conv2(h)))
+        h = self.relu(self.gnorm2(self.conv2(h)))
         # Downsample or Upsample
         return self.transform(h)
 
@@ -113,8 +114,8 @@ class ConditionalUNet(nn.Module):
     def __init__(self):
         super().__init__()
         image_channels = 1
-        down_channels = (64, 128, 256)
-        up_channels = (256, 128, 64)
+        down_channels = (64, 128, 256, 512)
+        up_channels = (512, 256, 128, 64)
         out_dim = 1
         time_emb_dim = 32
         
@@ -131,6 +132,9 @@ class ConditionalUNet(nn.Module):
         
         # Class Embedding (The "Context")
         self.class_emb = nn.Embedding(self.num_classes, self.context_dim)
+        
+        # Project class embedding to time embedding dimension for injection
+        self.class_to_time = nn.Linear(self.context_dim, time_emb_dim)
 
         # Initial Projection
         self.conv0 = nn.Conv2d(image_channels, down_channels[0], 3, padding=1)
@@ -164,8 +168,16 @@ class ConditionalUNet(nn.Module):
         t = self.time_mlp(t)
         
         # Embed Context (Classes)
-        # [B] -> [B, Context_Dim] -> [B, 1, Context_Dim] to act as sequence length 1
-        context = self.class_emb(class_labels).unsqueeze(1) 
+        # [B] -> [B, Context_Dim]
+        class_emb = self.class_emb(class_labels)
+        
+        # Inject class embedding into time embedding
+        # Project class embedding to time dimension and add
+        t = t + self.class_to_time(class_emb)
+        
+        # For cross-attention, we still need the full context embedding
+        # [B, Context_Dim] -> [B, 1, Context_Dim] to act as sequence length 1
+        context = class_emb.unsqueeze(1) 
 
         # Initial Conv
         x = self.conv0(x)

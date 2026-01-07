@@ -20,12 +20,16 @@ ConditionedUNet::ConditionedUNet(
     , baseChannels(baseCh)
     , classCount(nClasses)
 {
-    // Standard Config: Multipliers [1, 2, 4] -> Channels [64, 128, 256]
-    channelMultipliers = {1, 2, 4};
+    // Standard Config: Multipliers [1, 2, 4, 8] -> Channels [64, 128, 256, 512]
+    channelMultipliers = {1, 2, 4, 8};
 
     // 1. Time and class Embedding
     timeEmbed = new TimeEmbedingKernel(ctx, timeEmbedDim);
     classEmbed = new GatherKernel(ctx, classCount, contextDim);
+    
+    // Project class embedding to time embedding dimension for injection
+    classToTimeEmbed = new LinearKernel(ctx, buffer(), kernelOutput(), bufferSink(), contextDim, timeEmbedDim);
+    embedAdd = new BroadcastAddKernel(ctx);
 
     // 2. Initial Conv
     initialConv =
@@ -94,25 +98,28 @@ SlangResult ConditionedUNet::loadParams(TorchParamReader& reader)
     // 2. Class Embedding
     SLANG_RETURN_ON_FAIL(classEmbed->loadParams(reader));
 
-    // 3. Init Conv
-    SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader, false)); // No bias usually? Check model.
+    // 3. Class to Time projection
+    SLANG_RETURN_ON_FAIL(classToTimeEmbed->loadParams(reader, true));
 
-    // 4. Down Blocks
+    // 4. Init Conv (no BatchNorm fusion)
+    SLANG_RETURN_ON_FAIL(initialConv->loadParams(reader, false));
+
+    // 5. Down Blocks
     for (auto& block : downBlocks)
     {
         SLANG_RETURN_ON_FAIL(block->loadParams(reader));
     }
 
-    // 5. Mid Attention
+    // 6. Mid Attention
     SLANG_RETURN_ON_FAIL(midAttn->loadParams(reader));
 
-    // 6. Up Blocks
+    // 7. Up Blocks
     for (auto& block : upBlocks)
     {
         SLANG_RETURN_ON_FAIL(block->loadParams(reader));
     }
 
-    // 7. Final Conv
+    // 8. Final Conv
     SLANG_RETURN_ON_FAIL(finalConv->loadParams(reader, false));
 
     return SLANG_OK;
@@ -142,13 +149,25 @@ void ConditionedUNet::queueExecute(
     auto contextEmbedding = classEmbed->allocateResultBuffer(outputImage.elementType, batchSize);
     classEmbed->queueExecute(task, contextEmbedding, classLabels);
 
-    // 3. Init Conv
+    // 3. Project class embedding to time dimension and add to time embedding
+    auto classToTime = classToTimeEmbed->allocateResultBuffer(outputImage.elementType, batchSize);
+    classToTimeEmbed->queueExecute(task, classToTime, contextEmbedding);
+    
+    // Add class-to-time projection to time embedding (t = t + class_to_time(class_emb))
+    auto combinedEmb = embedAdd->allocateResultBuffer(
+        outputImage.elementType,
+        tEmb.shape,
+        classToTime.shape);
+    embedAdd->queueExecute(task, combinedEmb, tEmb, classToTime);
+    tEmb = combinedEmb;  // Use combined embedding going forward
+
+    // 4. Init Conv
     auto x =
         initialConv
             ->allocateResultBuffer(outputImage.elementType, inputWidth, inputHeight, 1, batchSize);
     initialConv->queueExecute(task, x, inputImage, 1);
 
-    // 4. Down Blocks
+    // 5. Down Blocks
     ShortList<TensorView> skipConnections;
     int w = inputWidth;
     int h = inputHeight;
@@ -167,12 +186,14 @@ void ConditionedUNet::queueExecute(
         h /= 2;
     }
 
-    // 5. Mid Attention (Bottleneck)
-    // x is now [Batch, H/4, W/4, 256] in NHWC
+    // 6. Mid Attention (Bottleneck)
+    // x is now [Batch, H/8, W/8, 512] in NHWC (with new 4-level architecture)
     int seqQ = w * h;
     int channels = baseChannels * channelMultipliers[channelMultipliers.getCount() - 1];
     int seqKV = 1; // Context is [Batch, 1, contextDim]
-    int heads = 4;
+    // numHeads must satisfy: channels = numHeads * headDim
+    // CrossAttention was created with headDim=64, so numHeads = channels / 64
+    int heads = channels / 64;
 
     // Alloc output
     auto attnOut =
@@ -189,7 +210,7 @@ void ConditionedUNet::queueExecute(
         heads);
     x = attnOut; // Shape is preserved.
 
-    // 6. Up Blocks
+    // 7. Up Blocks
     for (Index i = 0; i < upBlocks.getCount(); i++)
     {
         auto& block = upBlocks[i];
@@ -213,7 +234,7 @@ void ConditionedUNet::queueExecute(
         h *= 2;
     }
 
-    // 7. Final Conv
+    // 8. Final Conv
     finalConv->queueExecute(task, outputImage, x, 0);
 }
 
@@ -225,8 +246,12 @@ UNetBlock::UNetBlock(
     int timeEmbedDim)
     : inferencingCtx(inferencingCtx), inChannels(inChannels), outChannels(outChannels)
 {
+    // GroupNorm configuration: 8 groups (matching Python model)
+    const int numGroups = 8;
+
     if (kind == UNetBlockKind::Down)
     {
+        // conv1 without fused ReLU (GroupNorm + ReLU applied separately)
         conv1 = new Conv2DKernel(
             inferencingCtx,
             16,
@@ -234,7 +259,7 @@ UNetBlock::UNetBlock(
             1,
             inChannels,
             outChannels,
-            relu(kernelOutput()),
+            kernelOutput(),  // No fused activation
             "conv1");
         downTransform = new Conv2DKernel(
             inferencingCtx,
@@ -248,6 +273,7 @@ UNetBlock::UNetBlock(
     }
     else
     {
+        // conv1 without fused ReLU (GroupNorm + ReLU applied separately)
         conv1 = new Conv2DKernel(
             inferencingCtx,
             16,
@@ -255,7 +281,7 @@ UNetBlock::UNetBlock(
             1,
             2 * inChannels,
             outChannels,
-            relu(kernelOutput()),
+            kernelOutput(),  // No fused activation
             "conv1");
         upTransform = new TransposedConv2DKernel(
             inferencingCtx,
@@ -267,6 +293,8 @@ UNetBlock::UNetBlock(
             kernelOutput(),
             "transformUp");
     }
+    
+    // conv2 without fused ReLU (GroupNorm + ReLU applied separately)
     conv2 = new Conv2DKernel(
         inferencingCtx,
         16,
@@ -274,8 +302,16 @@ UNetBlock::UNetBlock(
         1,
         outChannels,
         outChannels,
-        relu(kernelOutput()),
+        kernelOutput(),  // No fused activation
         "conv2");
+    
+    // GroupNorm layers
+    gnorm1 = new GroupNormKernel(inferencingCtx, outChannels, numGroups);
+    gnorm2 = new GroupNormKernel(inferencingCtx, outChannels, numGroups);
+    
+    // ReLU activation kernel (applied after GroupNorm)
+    reluKernel = new ElementwiseKernel(inferencingCtx, relu(buffer()));
+    
     timeEmbedTransform = new LinearKernel(
         inferencingCtx,
         buffer(),
@@ -288,13 +324,28 @@ UNetBlock::UNetBlock(
 
 SlangResult UNetBlock::loadParams(TorchParamReader& reader)
 {
+    // Load order matches Python model's named_modules traversal order:
+    // 1. time_mlp (Linear)
     SLANG_RETURN_ON_FAIL(timeEmbedTransform->loadParams(reader));
-    SLANG_RETURN_ON_FAIL(conv1->loadParams(reader, true));
+    
+    // 2. conv1 (Conv2d with bias, no BatchNorm fusion - GroupNorm is separate)
+    SLANG_RETURN_ON_FAIL(conv1->loadParams(reader, false));
+    
+    // 3. gnorm1 (GroupNorm)
+    SLANG_RETURN_ON_FAIL(gnorm1->loadParams(reader));
+    
+    // 4. transform (down: Conv2d with bias, up: ConvTranspose2d with bias)
     if (downTransform)
         SLANG_RETURN_ON_FAIL(downTransform->loadParams(reader, false));
     if (upTransform)
         SLANG_RETURN_ON_FAIL(upTransform->loadParams(reader));
-    SLANG_RETURN_ON_FAIL(conv2->loadParams(reader, true));
+    
+    // 5. conv2 (Conv2d with bias, no BatchNorm fusion - GroupNorm is separate)
+    SLANG_RETURN_ON_FAIL(conv2->loadParams(reader, false));
+    
+    // 6. gnorm2 (GroupNorm)
+    SLANG_RETURN_ON_FAIL(gnorm2->loadParams(reader));
+    
     return SLANG_OK;
 }
 
@@ -338,15 +389,28 @@ void UNetBlock::queueExecute(
     int inputHeight = inputImage.shape[1];
     int inputWidth = inputImage.shape[2];
 
+    // 1. Time embedding projection (with ReLU)
     auto transformedTimeEmbedding =
         timeEmbedTransform->allocateResultBuffer(outputImage.elementType, batchSize);
-
     timeEmbedTransform->queueExecute(task, transformedTimeEmbedding, timeEmbedding);
 
-    auto convResult =
+    // 2. First convolution (no activation)
+    auto conv1Result =
         conv1->allocateResultBuffer(outputImage.elementType, inputWidth, inputHeight, 1, batchSize);
-    conv1->queueExecute(task, convResult, inputImage, 1);
+    conv1->queueExecute(task, conv1Result, inputImage, 1);
 
+    // 3. GroupNorm1
+    auto gnorm1Result = gnorm1->allocateResultBuffer(outputImage.elementType, batchSize, inputHeight, inputWidth);
+    gnorm1->queueExecute(task, gnorm1Result, conv1Result);
+
+    // 4. ReLU after GroupNorm1
+    auto relu1Result = task.context->allocScratchTensor(
+        outputImage.elementType,
+        Shape{batchSize, inputHeight, inputWidth, outChannels},
+        "relu1_out");
+    reluKernel->queueExecute(task, relu1Result, gnorm1Result);
+
+    // 5. Add time embedding
     int shapeA[] = {batchSize, inputHeight, inputWidth, outChannels};
     int shapeB[] = {batchSize, 1, 1, outChannels};
     auto added = broadcastAdd->allocateResultBuffer(
@@ -355,18 +419,33 @@ void UNetBlock::queueExecute(
         makeArrayView(shapeB));
 
     // Reshape time embedding from [B, C] to [B, 1, 1, C] for proper broadcasting
-    // across spatial dimensions (H, W).
     auto reshapedTimeEmbedding =
         transformedTimeEmbedding.reshape(Shape(batchSize, 1, 1, outChannels));
-    broadcastAdd->queueExecute(task, added, convResult, reshapedTimeEmbedding);
-    conv2->queueExecute(task, convResult, added, 1);
+    broadcastAdd->queueExecute(task, added, relu1Result, reshapedTimeEmbedding);
 
+    // 6. Second convolution (no activation)
+    auto conv2Result =
+        conv2->allocateResultBuffer(outputImage.elementType, inputWidth, inputHeight, 1, batchSize);
+    conv2->queueExecute(task, conv2Result, added, 1);
+
+    // 7. GroupNorm2
+    auto gnorm2Result = gnorm2->allocateResultBuffer(outputImage.elementType, batchSize, inputHeight, inputWidth);
+    gnorm2->queueExecute(task, gnorm2Result, conv2Result);
+
+    // 8. ReLU after GroupNorm2
+    auto relu2Result = task.context->allocScratchTensor(
+        outputImage.elementType,
+        Shape{batchSize, inputHeight, inputWidth, outChannels},
+        "relu2_out");
+    reluKernel->queueExecute(task, relu2Result, gnorm2Result);
+
+    // 9. Down/Up transform
     if (downTransform)
     {
-        downTransform->queueExecute(task, outputImage, convResult, 1);
+        downTransform->queueExecute(task, outputImage, relu2Result, 1);
     }
     else
     {
-        upTransform->queueExecute(task, outputImage, convResult, 1);
+        upTransform->queueExecute(task, outputImage, relu2Result, 1);
     }
 }

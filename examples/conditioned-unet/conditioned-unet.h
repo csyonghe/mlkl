@@ -22,6 +22,8 @@ public:
     RefPtr<TransposedConv2DKernel> upTransform;
     RefPtr<LinearKernel> timeEmbedTransform;
     RefPtr<BroadcastAddKernel> broadcastAdd;
+    RefPtr<GroupNormKernel> gnorm1, gnorm2;
+    RefPtr<ElementwiseKernel> reluKernel;
 
 public:
     int inChannels;
@@ -60,6 +62,7 @@ public:
     RefPtr<Conv2DKernel> initialConv;
     RefPtr<Conv2DKernel> finalConv;
     RefPtr<GatherKernel> classEmbed;
+    RefPtr<LinearKernel> classToTimeEmbed;  // Projects class embedding to time embedding dimension
 
     // Blocks
     List<RefPtr<UNetBlock>> downBlocks;
@@ -68,6 +71,7 @@ public:
 
     // Utilities
     RefPtr<ConcatKernel> concat;
+    RefPtr<BroadcastAddKernel> embedAdd;  // For combining time and class embeddings
 
     // Configuration
     int inputChannels;

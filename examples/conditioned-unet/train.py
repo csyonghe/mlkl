@@ -14,7 +14,7 @@ NOISE_STEPS = 500
 IMG_SIZE = 32
 BATCH_SIZE = 64
 LR = 3e-4
-EPOCHS = 5
+EPOCHS = 8
 
 # --- HELPER FUNCTIONS ---
 
@@ -73,6 +73,12 @@ def export_model_weights(model, filepath="model_weights_conditioned.bin"):
                 write_tensor(f, module.bias, "Bias (Beta)")
                 write_tensor(f, module.running_mean, "Running Mean")
                 write_tensor(f, module.running_var, "Running Var")
+
+            # 6. GroupNorm -> Gamma, Beta (no running stats)
+            elif isinstance(module, nn.GroupNorm):
+                print(f"[Layer] {name} (GroupNorm, {module.num_groups} groups)")
+                write_tensor(f, module.weight, "Weight (Gamma)")
+                write_tensor(f, module.bias, "Bias (Beta)")
 
             # 6. Skip containers
             elif isinstance(module, (nn.Sequential, nn.ModuleList, nn.ReLU, nn.SiLU, nn.Identity, 

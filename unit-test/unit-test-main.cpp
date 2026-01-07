@@ -77,6 +77,35 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testFlashAttentionInputPermutationOnly(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testFlashAttentionFusedPermutation(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testCrossAttentionFull(gInferencingCtx));
+
+        // Reduction kernel tests
+        SLANG_RETURN_ON_FAIL(testReduceLastDim(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testReduceGroupNorm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testReduceAxis(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testReduceAxis4D(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testReduceLarge(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testReduceHalf(gInferencingCtx));
+
+        // GroupNorm kernel tests
+        SLANG_RETURN_ON_FAIL(testGroupNorm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testGroupNormSingleGroup(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testGroupNormPerChannel(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testGroupNormLarge(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testGroupNormHalf(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testGroupNormStats(gInferencingCtx));
+
+        // LayerNorm kernel tests
+        SLANG_RETURN_ON_FAIL(testLayerNorm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLayerNormStats(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLayerNormLarge(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLayerNormHalf(gInferencingCtx));
+
+        // RMSNorm kernel tests
+        SLANG_RETURN_ON_FAIL(testRMSNorm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testRMSNormIdentity(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testRMSNormLarge(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testRMSNormHalf(gInferencingCtx));
+
         printf("all tests passed!\n");
         return SLANG_OK;
     }

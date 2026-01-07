@@ -10,3 +10,5 @@ __include elementwise;
 __include batch_gemm;
 __include softmax;
 __include flash_attention;
+__include reduction;
+__include group_norm;
