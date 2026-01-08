@@ -521,11 +521,20 @@ SDFeedForward::SDFeedForward(
     // GEGLU: proj1 outputs 2x innerDim, split and gate
     proj1 = new LinearKernel(ctx, dim, innerDim * 2);
     
-    // proj2 with fused GEGLU (inputExpr) and residual addition (outputExpr)
-    // inputExpr: hidden_states * gelu(gate) - takes two input buffers
-    // outputExpr: kernelOutput() + buffer() - adds residual (third input buffer)
+    // proj2 with fully fused GEGLU (inputExpr) and residual addition (outputExpr)
+    // inputExpr uses sliceLastDim to split proj1 output into hidden_states and gate:
+    //   hidden_states = proj1Out[:, 0:innerDim]
+    //   gate = proj1Out[:, innerDim:innerDim*2]
+    //   geglu = hidden_states * gelu(gate)
+    // This eliminates the permute ElementwiseKernel entirely!
+    auto proj1OutBuf = buffer();  // [totalTokens, innerDim * 2]
+    auto hiddenStates = sliceLastDim(proj1OutBuf, 0, innerDim);
+    auto gate = sliceLastDim(proj1OutBuf, innerDim, innerDim);
+    auto gegluExpr = hiddenStates * gelu(gate);
+    
+    // outputExpr: kernelOutput() + buffer() - adds residual (second input buffer)
     proj2 = new LinearKernel(ctx, ElementType::Float32,
-                             buffer() * gelu(buffer()), kernelOutput() + buffer(), bufferSink(),
+                             gegluExpr, kernelOutput() + buffer(), bufferSink(),
                              innerDim, dim);
 }
 
@@ -561,32 +570,17 @@ void SDFeedForward::queueExecute(
     auto proj1Out = ctx->allocScratchTensor(ElementType::Float32, Shape(totalTokens, innerDim * 2));
     proj1->queueExecute(task, proj1Out, inputFlat);
     
-    // GEGLU: split along last dim, apply gelu to gate, multiply with value
-    // Reshape to [totalTokens, 2, innerDim] then permute to [2, totalTokens, innerDim]
-    // This makes gate (idx 0) and value (idx 1) contiguous blocks that can be sliced
-    TensorView proj1Reshaped = proj1Out;
-    proj1Reshaped.shape = Shape(totalTokens, 2, innerDim);
-    
-    // Permute [totalTokens, 2, innerDim] -> [2, totalTokens, innerDim]
-    auto permuteExpr = permute(buffer(), {1, 0, 2});
-    auto permutedBuf = ctx->allocScratchTensor(ElementType::Float32, Shape(2, totalTokens, innerDim));
-    auto permuteKernel = new ElementwiseKernel(ctx, permuteExpr);
-    permuteKernel->queueExecute(task, permutedBuf, proj1Reshaped);
-    
-    // Use slice() to get hidden_states [0,:,:] and gate [1,:,:] as contiguous views
-    // Then squeezeFront(1) to remove the leading singleton dimension
-    // Diffusers GEGLU: hidden_states, gate = proj.chunk(2, dim=-1); return hidden_states * gelu(gate)
-    TensorView hiddenStatesView = permutedBuf.slice(0, 1).squeezeFront(1);  // first half
-    TensorView gateView = permutedBuf.slice(1, 1).squeezeFront(1);          // second half
-    
     // Flatten residual
     TensorView residualFlat = residual;
     residualFlat.shape = Shape(totalTokens, dim);
     
-    // proj2 with fused GEGLU + residual: (hidden_states * gelu(gate)) + residual
+    // proj2 with fully fused GEGLU + residual:
+    // The inputExpr uses sliceLastDim to extract hidden_states and gate from proj1Out
+    // The outputExpr adds residual
+    // Input order: {proj1Out (for GEGLU slicing), residual (for output addition)}
     TensorView outputFlat = output;
     outputFlat.shape = Shape(totalTokens, dim);
-    proj2->queueExecute(task, outputFlat, {hiddenStatesView, gateView, residualFlat});
+    proj2->queueExecute(task, outputFlat, {proj1Out, residualFlat});
 }
 
 // ============================================================================

@@ -267,6 +267,27 @@ struct Concat<T : ITensorElement, L : IExpr<T>, R : IExpr<T>> : IExpr<T>
 }
 
 // ============================================================================
+// Slice along an axis
+// ============================================================================
+
+// Slice extracts a contiguous range [start, start+size) along a specific axis
+// The output shape has the sliced dimension reduced to `size`
+struct Slice<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
+{
+    Inner inner;
+    uint axis;      // Which axis to slice
+    uint start;     // Start index along the axis
+
+    T.UnpackedType eval(Coord coord, Input<T> input)
+    {
+        // Offset the coordinate at the slice axis by start
+        Coord innerCoord = coord;
+        innerCoord[axis] = coord[axis] + start;
+        return inner.eval(innerCoord, input);
+    }
+}
+
+// ============================================================================
 // Upsampling (nearest-neighbor)
 // ============================================================================
 

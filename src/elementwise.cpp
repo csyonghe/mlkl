@@ -491,6 +491,74 @@ void ConcatNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 }
 
 // =========================================================================
+// SLICE NODE
+// =========================================================================
+
+SliceNode::SliceNode(Expr inner, int axis, int start, int size)
+    : inner(inner), axis(axis), start(start), size(size)
+{
+    int regCounter = 0;
+    innerProgram = new ProgramNode();
+    *innerProgram = compileExprToProgram(inner, &regCounter);
+}
+
+String SliceNode::getSlangTypeName(ElementType elemType) const
+{
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return StringBuilder() << "Slice<" << elemTypeName << ", "
+                           << innerProgram->getSlangTypeName(elemType) << ">";
+}
+
+Shape SliceNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape innerShape = inner.node->resolveShape(ctx);
+    
+    // Handle negative axis
+    int trueAxis = axis;
+    if (trueAxis < 0)
+        trueAxis += innerShape.getRank();
+    
+    if (trueAxis < 0 || trueAxis >= innerShape.getRank())
+        throw std::runtime_error("Slice: Invalid axis");
+    
+    // Validate bounds
+    int dimSize = innerShape[trueAxis];
+    if (start < 0 || start >= dimSize || start + size > dimSize)
+        throw std::runtime_error("Slice: Out of bounds");
+    
+    // Build output shape with sliced dimension
+    Shape result;
+    for (int i = 0; i < innerShape.getRank(); i++)
+    {
+        if (i == trueAxis)
+        {
+            result.dims.add(size);
+        }
+        else
+        {
+            result.dims.add(innerShape[i]);
+        }
+    }
+    return result;
+}
+
+void SliceNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // Pack inner program
+    innerProgram->pack(writer, ctx);
+    
+    // Resolve true axis
+    Shape innerShape = inner.node->resolveShape(ctx);
+    int trueAxis = axis;
+    if (trueAxis < 0)
+        trueAxis += innerShape.getRank();
+    
+    // Pack axis and start offset
+    writer.write((uint32_t)trueAxis);
+    writer.write((uint32_t)start);
+}
+
+// =========================================================================
 // UPSAMPLE NODE
 // =========================================================================
 
@@ -873,6 +941,16 @@ Expr concat(Expr left, Expr right, Expr axis)
     return Expr(new ConcatNode(left, right, axis));
 }
 
+Expr slice(Expr inner, int axis, int start, int size)
+{
+    return Expr(new SliceNode(inner, axis, start, size));
+}
+
+Expr sliceLastDim(Expr inner, int start, int size)
+{
+    return slice(inner, -1, start, size);
+}
+
 // Represent the output buffer that the kernel will write into.
 SinkExpr bufferSink()
 {
@@ -1030,6 +1108,10 @@ void visitAllExpr(HashSet<ExprNode*>& visited, ExprNode* node, Func f)
         visitAllExpr(visited, c->left.node, f);
         visitAllExpr(visited, c->right.node, f);
     }
+    else if (auto s = dynamic_cast<SliceNode*>(node))
+    {
+        visitAllExpr(visited, s->inner.node, f);
+    }
     else if (auto g = dynamic_cast<GatherNode*>(node))
     {
         visitAllExpr(visited, g->table.node, f);
@@ -1089,6 +1171,12 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
 
         c->rightProgram = new ProgramNode();
         *c->rightProgram = compileExprToProgram(c->right, ctx.globalRegCounter);
+    }
+    else if (auto s = dynamic_cast<SliceNode*>(node))
+    {
+        // Re-compile inner program for proper register numbering
+        s->innerProgram = new ProgramNode();
+        *s->innerProgram = compileExprToProgram(s->inner, ctx.globalRegCounter);
     }
     else if (auto g = dynamic_cast<GatherNode*>(node))
     {

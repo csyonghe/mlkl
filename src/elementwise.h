@@ -338,6 +338,24 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
+// Slice along a specific axis: extracts a contiguous range [start, start+size) along axis
+class SliceNode : public ExprNode
+{
+public:
+    Expr inner;
+    int axis;   // Which axis to slice (can be negative for from-end indexing)
+    int start;  // Start index along the axis
+    int size;   // Number of elements to take
+
+    RefPtr<ProgramNode> innerProgram;
+
+    SliceNode(Expr inner, int axis, int start, int size);
+
+    String getSlangTypeName(ElementType elemType) const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
 class UpsampleNode : public ExprNode
 {
 public:
@@ -474,6 +492,13 @@ Expr permute(Expr inner, ArrayView<int> dims);
 Expr permute(Expr inner, const std::initializer_list<int>& dims);
 Expr gather(Expr table, Expr indices);
 Expr transpose(Expr inner, int dim0, int dim1);
+
+// Slice along a specific axis: extracts [start, start+size) along axis
+// axis can be negative (-1 = last axis, -2 = second-to-last, etc.)
+Expr slice(Expr inner, int axis, int start, int size);
+
+// Convenience: slice along the last dimension
+Expr sliceLastDim(Expr inner, int start, int size);
 
 // Upsample spatial dimensions by the given factor (nearest-neighbor)
 // Assumes NHWC layout by default (heightDim=1, widthDim=2)
