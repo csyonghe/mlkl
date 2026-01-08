@@ -1,5 +1,6 @@
 #include "sd-image-generator.h"
 
+#include "concat.h"
 #include "safetensors-reader.h"
 
 #include <cmath>
@@ -48,6 +49,9 @@ void SDImageGenerator::initializeKernels()
     cfgCondExpr = buffer();
     cfgScaleExpr = uniformConstant();
     cfgKernel = new ElementwiseKernel(ctx, cfgUncondExpr + cfgScaleExpr * (cfgCondExpr - cfgUncondExpr));
+
+    // Duplicate kernel: [1, H, W, C] → [2, H, W, C] (duplicates batch dim for CFG)
+    latentDuplicateKernel = new ElementwiseKernel(ctx, duplicate(buffer(), 0, 2));
 }
 
 void SDImageGenerator::allocateBuffers()
@@ -64,20 +68,13 @@ void SDImageGenerator::allocateBuffers()
         nullptr,
         "LatentNext");
 
-    // Noise prediction buffers (for CFG we need conditional, unconditional, and combined)
-    noisePredCond = ctx->createTensor(
+    // Noise prediction buffers for batched CFG
+    noisePredBatched = ctx->createTensor(
         ElementType::Float32,
-        Shape{1, kLatentHeight, kLatentWidth, kLatentChannels},
-        latentSize * sizeof(float),
+        Shape{2, kLatentHeight, kLatentWidth, kLatentChannels},
+        2 * latentSize * sizeof(float),
         nullptr,
-        "NoisePredCond");
-
-    noisePredUncond = ctx->createTensor(
-        ElementType::Float32,
-        Shape{1, kLatentHeight, kLatentWidth, kLatentChannels},
-        latentSize * sizeof(float),
-        nullptr,
-        "NoisePredUncond");
+        "NoisePredBatched");
 
     noisePredCombined = ctx->createTensor(
         ElementType::Float32,
@@ -85,6 +82,14 @@ void SDImageGenerator::allocateBuffers()
         latentSize * sizeof(float),
         nullptr,
         "NoisePredCombined");
+
+    // Batched latent for CFG (holds [uncond_latent, cond_latent])
+    latentBatched = ctx->createTensor(
+        ElementType::Float32,
+        Shape{2, kLatentHeight, kLatentWidth, kLatentChannels},
+        2 * latentSize * sizeof(float),
+        nullptr,
+        "LatentBatched");
 
     // Scaled latent for VAE input
     scaledLatent = ctx->createTensor(
@@ -231,19 +236,50 @@ TensorView SDImageGenerator::generateImage(
     // ========================================================================
     // Step 2: CLIP text encoding
     // ========================================================================
-    TensorView condEmbeddings = clipEncoder->allocateResultBuffer(ElementType::Float32, kMaxTokenLength, 1);
-    {
-        auto task = ctx->createTask();
-        clipEncoder->queueExecute(task, condEmbeddings, tokenIds->getView(), kMaxTokenLength, 1);
-        task.execute();
-    }
+    // For CFG, we create batched embeddings [2, 77, 768] = [uncond, cond]
+    // For non-CFG, just [1, 77, 768]
+    TensorView textEmbeddings;
+    RefPtr<Tensor> textEmbeddingsTensor;  // Keep tensor alive for the function duration
 
-    TensorView uncondEmbeddings;
     if (useCFG)
     {
-        uncondEmbeddings = clipEncoder->allocateResultBuffer(ElementType::Float32, kMaxTokenLength, 1);
+        // Encode unconditional (empty prompt)
+        TensorView uncondEmbed = clipEncoder->allocateResultBuffer(ElementType::Float32, kMaxTokenLength, 1);
+        {
+            auto task = ctx->createTask();
+            clipEncoder->queueExecute(task, uncondEmbed, uncondTokenIds->getView(), kMaxTokenLength, 1);
+            task.execute();
+        }
+
+        // Encode conditional (user prompt)
+        TensorView condEmbed = clipEncoder->allocateResultBuffer(ElementType::Float32, kMaxTokenLength, 1);
+        {
+            auto task = ctx->createTask();
+            clipEncoder->queueExecute(task, condEmbed, tokenIds->getView(), kMaxTokenLength, 1);
+            task.execute();
+        }
+
+        // Concatenate along batch dimension: [uncond, cond] → [2, 77, 768]
+        textEmbeddingsTensor = ctx->createTensor(
+            ElementType::Float32,
+            Shape{2, kMaxTokenLength, 768},
+            2 * kMaxTokenLength * 768 * sizeof(float),
+            nullptr,
+            "BatchedTextEmbeddings");
+        {
+            auto task = ctx->createTask();
+            ConcatKernel concatKernel(ctx, 2); // 2 operands
+            TensorView inputs[] = {uncondEmbed, condEmbed};
+            concatKernel.queueExecute(task, textEmbeddingsTensor->getView(), makeArrayView(inputs), 0); // axis 0
+            task.execute();
+        }
+        textEmbeddings = textEmbeddingsTensor->getView();
+    }
+    else
+    {
+        textEmbeddings = clipEncoder->allocateResultBuffer(ElementType::Float32, kMaxTokenLength, 1);
         auto task = ctx->createTask();
-        clipEncoder->queueExecute(task, uncondEmbeddings, uncondTokenIds->getView(), kMaxTokenLength, 1);
+        clipEncoder->queueExecute(task, textEmbeddings, tokenIds->getView(), kMaxTokenLength, 1);
         task.execute();
     }
 
@@ -275,26 +311,36 @@ TensorView SDImageGenerator::generateImage(
 
         if (useCFG)
         {
-            // Run UNet twice: unconditional and conditional
+            // Duplicate latent to batch dimension: [1, H, W, C] → [2, H, W, C]
+            // Single kernel launch instead of two copies
+            {
+                auto task = ctx->createTask();
+                latentDuplicateKernel->queueExecute(task, latentBatched->getView(), currentLatent->getView());
+                task.execute();
+            }
+
+            // Run UNet once with batched inputs: [2, H, W, C] latent, [2, 77, 768] context
             {
                 auto task = ctx->createTask();
                 unet->queueExecute(
-                    task, noisePredUncond->getView(), currentLatent->getView(), t, uncondEmbeddings);
+                    task, noisePredBatched->getView(), latentBatched->getView(), t, textEmbeddings);
                 task.execute();
             }
-            {
-                auto task = ctx->createTask();
-                unet->queueExecute(
-                    task, noisePredCond->getView(), currentLatent->getView(), t, condEmbeddings);
-                task.execute();
-            }
+
+            // Slice output into uncond [0] and cond [1], then apply CFG
+            TensorView noiseUncond = noisePredBatched->getView();
+            noiseUncond.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
+
+            TensorView noiseCond = noisePredBatched->getView();
+            noiseCond.bufferView.offset += kLatentHeight * kLatentWidth * kLatentChannels * sizeof(float);
+            noiseCond.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
 
             // Combine: output = uncond + scale * (cond - uncond)
             {
                 auto task = ctx->createTask();
                 Dictionary<Expr, InputInfo> cfgInputs;
-                cfgInputs.add(cfgUncondExpr, noisePredUncond->getView());
-                cfgInputs.add(cfgCondExpr, noisePredCond->getView());
+                cfgInputs.add(cfgUncondExpr, noiseUncond);
+                cfgInputs.add(cfgCondExpr, noiseCond);
                 cfgInputs.add(cfgScaleExpr, InputInfo(guidanceScale));
                 cfgKernel->queueExecute(task, noisePredCombined->getView(), cfgInputs);
                 task.execute();
@@ -306,9 +352,12 @@ TensorView SDImageGenerator::generateImage(
         {
             // No CFG - single UNet pass
             auto task = ctx->createTask();
-            unet->queueExecute(task, noisePredCond->getView(), currentLatent->getView(), t, condEmbeddings);
+            // Use first slot of batched buffer for output
+            TensorView noisePred = noisePredBatched->getView();
+            noisePred.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
+            unet->queueExecute(task, noisePred, currentLatent->getView(), t, textEmbeddings);
             task.execute();
-            noisePredForDDIM = noisePredCond->getView();
+            noisePredForDDIM = noisePred;
         }
 
         // DDIM update step

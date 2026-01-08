@@ -356,6 +356,22 @@ public:
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
 };
 
+class DuplicateNode : public ExprNode
+{
+public:
+    Expr inner;
+    int dim;    // Which dimension to duplicate
+    int times;  // How many times to duplicate (output dim = input dim * times)
+
+    RefPtr<ProgramNode> innerProgram;
+
+    DuplicateNode(Expr inner, int dim, int times);
+
+    String getSlangTypeName(ElementType elemType) const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+};
+
 class UpsampleNode : public ExprNode
 {
 public:
@@ -499,6 +515,11 @@ Expr slice(Expr inner, int axis, int start, int size);
 
 // Convenience: slice along the last dimension
 Expr sliceLastDim(Expr inner, int start, int size);
+
+// Duplicate (tile) a dimension by a constant factor
+// E.g., duplicate(input, 0, 2) with input [1, H, W, C] → output [2, H, W, C]
+// The data is replicated along the specified dimension
+Expr duplicate(Expr inner, int dim, int times);
 
 // Upsample spatial dimensions by the given factor (nearest-neighbor)
 // Assumes NHWC layout by default (heightDim=1, widthDim=2)

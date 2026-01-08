@@ -410,6 +410,8 @@ public:
     // Time embedding
     RefPtr<LinearKernel> timeProj1;  // 320 → 1280
     RefPtr<LinearKernel> timeProj2;  // 1280 → 1280
+    Expr timeProj1InputBuf;    // For broadcast: actual input data
+    Expr timeProj1ShapeBuf;    // For broadcast: shape reference
     
     // Input
     RefPtr<Conv2DKernel> convIn;  // 4 → 320

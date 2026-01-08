@@ -1100,8 +1100,13 @@ SDUNet::SDUNet(RefPtr<InferencingContext> ctx)
     channelMult.add(1280);
     
     // Time embedding: sinusoidal (320) → Linear → SiLU → Linear (1280)
+    // Use broadcast to handle batch dimension (same timestep for all batch elements)
     // Fuse SiLU into timeProj1 output expression
-    timeProj1 = new LinearKernel(ctx, ElementType::Float32, buffer(), silu(kernelOutput()), 
+    timeProj1InputBuf = buffer();   // Actual input data [1, 320]
+    timeProj1ShapeBuf = buffer();   // Shape reference [batchSize, 320]
+    timeProj1 = new LinearKernel(ctx, ElementType::Float32, 
+                                  broadcast(timeProj1InputBuf, timeProj1ShapeBuf),
+                                  silu(kernelOutput()), 
                                   bufferSink(), 320, timeEmbedDim);
     timeProj2 = new LinearKernel(ctx, timeEmbedDim, timeEmbedDim);
     
@@ -1250,16 +1255,21 @@ void SDUNet::queueExecute(
         cachedTimestep = timestep;
     }
     
-    // Expand for batch if needed
+    // Time embedding projection with fused broadcast (same timestep for all batch elements)
+    // sinEmbedTensor is [1, 320], broadcast to [batchSize, 320] inside the kernel
     TensorView sinEmbedView = sinEmbedTensor->getView();
-    if (batchSize > 1)
-    {
-        // For simplicity, assume batch size 1 for now
-        // TODO: Tile the embedding for larger batches
-    }
     
     auto timeEmbed1 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, timeEmbedDim));
-    timeProj1->queueExecute(task, timeEmbed1, sinEmbedView);
+    {
+        // Use Dictionary to provide input with shape reference for broadcast
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(timeProj1InputBuf, sinEmbedView);  // Actual data [1, 320]
+        // Shape reference: create a view with target shape [batchSize, 320]
+        TensorView shapeRef = sinEmbedView;
+        shapeRef.shape = Shape(batchSize, 320);  // Logical shape for broadcast target
+        inputs.add(timeProj1ShapeBuf, shapeRef);
+        timeProj1->queueExecute(task, timeEmbed1, inputs);
+    }
     
     auto timeEmbed = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, timeEmbedDim));
     timeProj2->queueExecute(task, timeEmbed, timeEmbed1);

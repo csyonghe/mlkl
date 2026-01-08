@@ -288,6 +288,30 @@ struct Slice<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
 }
 
 // ============================================================================
+// Duplicate (tile) a dimension
+// ============================================================================
+
+// Duplicate (tile) values along a dimension
+// Output dimension = input dimension * times (implicit from output shape)
+// E.g., input [1, H, W, C] with dim=0 → output [2, H, W, C]
+// Maps output coord to input coord via modulo on the duplicated dimension
+struct Duplicate<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
+{
+    Inner inner;
+    uint dim;           // Which dimension to duplicate
+    uint originalSize;  // Original size of the dimension (e.g., 1)
+    uint stride;        // Stride for the dimension (elements per increment)
+
+    T.UnpackedType eval(Coord coord, Input<T> input)
+    {
+        // Map output coord back to input coord via modulo
+        Coord innerCoord = coord;
+        innerCoord[dim] = coord[dim] % originalSize;
+        return inner.eval(innerCoord, input);
+    }
+}
+
+// ============================================================================
 // Upsampling (nearest-neighbor)
 // ============================================================================
 

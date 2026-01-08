@@ -559,6 +559,78 @@ void SliceNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 }
 
 // =========================================================================
+// DUPLICATE NODE
+// =========================================================================
+
+DuplicateNode::DuplicateNode(Expr inner, int dim, int times)
+    : inner(inner), dim(dim), times(times)
+{
+    int regCounter = 0;
+    innerProgram = new ProgramNode();
+    *innerProgram = compileExprToProgram(inner, &regCounter);
+}
+
+String DuplicateNode::getSlangTypeName(ElementType elemType) const
+{
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return StringBuilder() << "Duplicate<" << elemTypeName << ", "
+                           << innerProgram->getSlangTypeName(elemType) << ">";
+}
+
+Shape DuplicateNode::resolveShape(const EvalContext& ctx) const
+{
+    Shape innerShape = inner.node->resolveShape(ctx);
+    
+    // Handle negative dim
+    int trueDim = dim;
+    if (trueDim < 0)
+        trueDim += innerShape.getRank();
+    
+    if (trueDim < 0 || trueDim >= innerShape.getRank())
+        throw std::runtime_error("Duplicate: Invalid dimension");
+    
+    // Build output shape with duplicated dimension
+    Shape result;
+    for (int i = 0; i < innerShape.getRank(); i++)
+    {
+        if (i == trueDim)
+        {
+            result.dims.add(innerShape[i] * times);
+        }
+        else
+        {
+            result.dims.add(innerShape[i]);
+        }
+    }
+    return result;
+}
+
+void DuplicateNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // Pack inner program
+    innerProgram->pack(writer, ctx);
+    
+    // Resolve true dim
+    Shape innerShape = inner.node->resolveShape(ctx);
+    int trueDim = dim;
+    if (trueDim < 0)
+        trueDim += innerShape.getRank();
+    
+    // Compute stride for the duplicated dimension
+    // For input [1, H, W, C] with dim=0, the stride is H*W*C
+    int stride = 1;
+    for (int i = trueDim + 1; i < innerShape.getRank(); i++)
+    {
+        stride *= innerShape[i];
+    }
+    
+    // Pack: dim, originalSize, stride
+    writer.write((uint32_t)trueDim);
+    writer.write((uint32_t)innerShape[trueDim]);
+    writer.write((uint32_t)stride);
+}
+
+// =========================================================================
 // UPSAMPLE NODE
 // =========================================================================
 
@@ -951,6 +1023,11 @@ Expr sliceLastDim(Expr inner, int start, int size)
     return slice(inner, -1, start, size);
 }
 
+Expr duplicate(Expr inner, int dim, int times)
+{
+    return Expr(new DuplicateNode(inner, dim, times));
+}
+
 // Represent the output buffer that the kernel will write into.
 SinkExpr bufferSink()
 {
@@ -1121,6 +1198,10 @@ void visitAllExpr(HashSet<ExprNode*>& visited, ExprNode* node, Func f)
     {
         visitAllExpr(visited, up->inner.node, f);
     }
+    else if (auto dup = dynamic_cast<DuplicateNode*>(node))
+    {
+        visitAllExpr(visited, dup->inner.node, f);
+    }
     else if (auto leaf = dynamic_cast<LeafNode*>(node))
     {
     }
@@ -1193,6 +1274,13 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
         // Just re-compile if needed for proper register numbering
         up->innerProgram = new ProgramNode();
         *up->innerProgram = compileExprToProgram(up->inner, ctx.globalRegCounter);
+    }
+    else if (auto dup = dynamic_cast<DuplicateNode*>(node))
+    {
+        // Inner program is already compiled in the constructor
+        // Just re-compile if needed for proper register numbering
+        dup->innerProgram = new ProgramNode();
+        *dup->innerProgram = compileExprToProgram(dup->inner, ctx.globalRegCounter);
     }
     ctx.visited.insert(node);
     ctx.topoOrder.add(node);

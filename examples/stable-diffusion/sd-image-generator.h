@@ -50,10 +50,14 @@ private:
     RefPtr<ElementwiseKernel> vaeScaleKernel;
 
     // CFG combination kernel: output = uncond + scale * (cond - uncond)
+    // Takes sliced views of batched noise prediction
     RefPtr<ElementwiseKernel> cfgKernel;
     Expr cfgUncondExpr;
     Expr cfgCondExpr;
     Expr cfgScaleExpr;
+
+    // Latent duplicate kernel: duplicates [1,H,W,C] → [2,H,W,C] for batched CFG
+    RefPtr<ElementwiseKernel> latentDuplicateKernel;
 
     // DDIM sampler
     RefPtr<DDIMSampler> sampler;
@@ -62,9 +66,9 @@ private:
     RefPtr<Tensor> tokenIds;
     RefPtr<Tensor> latent;
     RefPtr<Tensor> latentNext;
-    RefPtr<Tensor> noisePredCond;      // Conditional noise prediction
-    RefPtr<Tensor> noisePredUncond;    // Unconditional noise prediction (for CFG)
-    RefPtr<Tensor> noisePredCombined;  // Combined noise after CFG
+    RefPtr<Tensor> noisePredBatched;   // [2, H, W, C] for batched CFG
+    RefPtr<Tensor> noisePredCombined;  // [1, H, W, C] Combined noise after CFG
+    RefPtr<Tensor> latentBatched;      // [2, H, W, C] duplicated latent for batched UNet
     RefPtr<Tensor> scaledLatent;
     RefPtr<Tensor> outputImage;
 
