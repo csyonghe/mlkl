@@ -124,7 +124,9 @@ struct SimpleUNetProgram : public TestBase
 
         int trainingSteps = 500;
         int inferenceSteps = 50;
-        DDIMSampler sampler(gInferencingCtx, 500, 50);
+        // Linear schedule with default beta range
+        DiffusionSchedule schedule(trainingSteps, 0.0001f, 0.02f, /*scaled_linear=*/false);
+        DDIMSampler sampler(gInferencingCtx, std::move(schedule), inferenceSteps);
 
         auto imageAStorage = gInferencingCtx->createTensor(
             ElementType::Float32,
@@ -148,7 +150,7 @@ struct SimpleUNetProgram : public TestBase
             ElementType::Float32,
             Shape(1, imageSize, imageSize, inputChannelCount),
             "predictedNoise");
-        for (int step = inferenceSteps - 1; step >= 0; step--)
+        for (int step = 0; step < inferenceSteps; step++)
         {
             // Use 't' for the model, but 'step' for the loop logic
             int t = sampler.timesteps[step];

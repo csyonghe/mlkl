@@ -150,10 +150,10 @@ SlangResult testSDUNet(InferencingContext* ctx)
     printf("testSDUNet: Loading SD 1.5 UNet...\n");
 
     // Find the UNet weights file
-    String weightsPath = getTestFilePath("test_data/unet.safetensors");
+    String weightsPath = getTestFilePath("models/unet.safetensors");
     if (weightsPath.getLength() == 0)
     {
-        printf("  UNet weights not found. Run unet-test-generate.py first.\n");
+        printf("  UNet weights not found. Run: python download_models.py\n");
         printf("testSDUNet: SKIPPED (no weights)\n");
         return SLANG_OK;
     }

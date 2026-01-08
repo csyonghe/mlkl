@@ -12,13 +12,34 @@ struct DiffusionSchedule
     std::vector<float> alphas_cumprod;
     int train_steps;
 
-    DiffusionSchedule(int steps = 500, float beta_min = 0.0001f, float beta_max = 0.02f)
+    // beta_schedule: "linear" or "scaled_linear"
+    // SD 1.5 uses: steps=1000, beta_start=0.00085, beta_end=0.012, scaled_linear
+    DiffusionSchedule(
+        int steps,
+        float beta_start,
+        float beta_end,
+        bool scaled_linear = false)
         : train_steps(steps)
     {
         float current_alpha_cumprod = 1.0f;
+        
         for (int i = 0; i < steps; i++)
         {
-            float beta = beta_min + (beta_max - beta_min) * ((float)i / (steps - 1));
+            float t = (float)i / (steps - 1);
+            float beta;
+            
+            if (scaled_linear)
+            {
+                // scaled_linear: betas = linspace(sqrt(start), sqrt(end))^2
+                float sqrt_beta = std::sqrt(beta_start) + t * (std::sqrt(beta_end) - std::sqrt(beta_start));
+                beta = sqrt_beta * sqrt_beta;
+            }
+            else
+            {
+                // linear: betas = linspace(start, end)
+                beta = beta_start + t * (beta_end - beta_start);
+            }
+            
             float alpha = 1.0f - beta;
             current_alpha_cumprod *= alpha;
             alphas_cumprod.push_back(current_alpha_cumprod);
@@ -45,24 +66,20 @@ public:
     Slang::List<int> timesteps;
     int inference_steps;
 
-    DDIMSampler(InferencingContext* context, int train_steps, int infer_steps)
-        : ctx(context), schedule(train_steps), inference_steps(infer_steps)
+    DDIMSampler(InferencingContext* context, DiffusionSchedule sched, int infer_steps)
+        : ctx(context), schedule(std::move(sched)), inference_steps(infer_steps)
     {
-        // 1. Improved Schedule: "Trailing" mapping
-        // This ensures we always start at the max noise (t=499) and end at t=0.
-        // Formula: t = i * (train_max / infer_max)
+        int train_steps = schedule.train_steps;
+        
+        // Match diffusers DDIM timestep schedule exactly:
+        // step_ratio = train_steps // infer_steps
+        // timesteps = [0, step_ratio, 2*step_ratio, ..., (infer_steps-1)*step_ratio] reversed
+        // For 1000 train, 20 infer: [950, 900, 850, ..., 50, 0]
         timesteps.clear();
-        if (infer_steps > 1)
+        int step_ratio = train_steps / infer_steps;
+        for (int i = infer_steps - 1; i >= 0; i--)
         {
-            for (int i = 0; i < infer_steps; i++)
-            {
-                int t = (int)((float)i / (float)(infer_steps - 1) * (train_steps - 1));
-                timesteps.add(t);
-            }
-        }
-        else
-        {
-            timesteps.add(train_steps - 1);
+            timesteps.add(i * step_ratio);
         }
 
         // 2. Build Kernel with x0
@@ -76,7 +93,8 @@ public:
         updateKernel = new ElementwiseKernel(ctx, next_x);
     }
 
-    // Takes the Loop Index 'i' (from inference_steps-1 down to 0)
+    // Takes the Loop Index 'i' (from 0 to inference_steps-1)
+    // timesteps are stored in descending order: [950, 900, ..., 50, 0]
     int step(
         InferencingTask& task,
         TensorView out_x_prev,
@@ -88,9 +106,9 @@ public:
         // Current Step t
         int t = timesteps[index];
 
-        // Previous Step t_prev
-        // For the very last step (index 0), we go to -1 (which effectively means alpha=1.0)
-        int t_prev = (index > 0) ? timesteps[index - 1] : -1;
+        // Previous Step t_prev (next index in array since timesteps are descending)
+        // For the very last step, we go to -1 (which effectively means alpha=1.0)
+        int t_prev = (index < inference_steps - 1) ? timesteps[index + 1] : -1;
 
         // 2. Get Alphas
         float alpha_bar_t = schedule.alphas_cumprod[t];

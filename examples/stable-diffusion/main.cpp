@@ -1,97 +1,137 @@
 // Stable Diffusion Example
-// Runs tokenizer, VAE decoder, CLIP encoder, and UNet tests
+// With --test: runs all component tests
+// Without --test: generates an image from a hardcoded prompt
 
 #include "clip-encoder-test.h"
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
+#include "example-base/test-utils.h"
 #include "inference-context.h"
+#include "sd-image-generator.h"
 #include "tokenizer-test.h"
 #include "unet-test.h"
 #include "vae-decoder-test.h"
 
 #include <cstdio>
+#include <cstring>
 
 using namespace Slang;
 
 static const ExampleResources resourceBase("stable-diffusion");
 
-struct StableDiffusionProgram : public TestBase
+// ============================================================================
+// Test Mode
+// ============================================================================
+static SlangResult runTests(InferencingContext* ctx)
 {
-    ComPtr<rhi::IDevice> device;
-    RefPtr<InferencingContext> ctx;
+    printf("=== Running Stable Diffusion Component Tests ===\n\n");
 
-    SlangResult execute(int argc, char* argv[])
+    // Test tokenizer
+    printf("--- Tokenizer Tests ---\n");
+    SLANG_RETURN_ON_FAIL(testCLIPTokenizer());
+
+    // Test VAE decoder
+    printf("\n--- VAE Decoder Tests ---\n");
+    SLANG_RETURN_ON_FAIL(testVAEDecoderSD15(ctx));
+
+    // Test UNet
+    printf("\n--- UNet Tests ---\n");
+    SLANG_RETURN_ON_FAIL(testSDUNet(ctx));
+
+    // Test CLIP encoder
+    printf("\n--- CLIP Encoder Tests ---\n");
+    SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
+
+    printf("\n=== All tests passed! ===\n");
+    return SLANG_OK;
+}
+
+// ============================================================================
+// Image Generation Mode
+// ============================================================================
+static SlangResult generateImage(InferencingContext* ctx)
+{
+    // Configuration
+    const char* prompt = "a beautiful sunset over mountains, digital art, highly detailed";
+    const unsigned int seed = 42;
+    const int inferenceSteps = 20;
+    const float guidanceScale = 7.5f; // CFG: 1.0 = no guidance, 7.5 = typical, higher = stronger
+    const char* outputPath = "result.png";
+
+    printf("=== Stable Diffusion Image Generation ===\n\n");
+    printf("Prompt: \"%s\"\n", prompt);
+    printf("Seed: %u\n", seed);
+    printf("Steps: %d\n", inferenceSteps);
+    printf("Guidance scale: %.1f\n\n", guidanceScale);
+
+    // ========================================================================
+    // Initialize generator
+    // ========================================================================
+    printf("Initializing SD generator (compiling shaders)...\n");
+    RefPtr<SDImageGenerator> generator = new SDImageGenerator(ctx);
+
+    // ========================================================================
+    // Load models
+    // ========================================================================
+    printf("Loading models...\n");
+    String modelsDir = getTestFilePath("models");
+    SLANG_RETURN_ON_FAIL(generator->loadModels(modelsDir));
+
+    // ========================================================================
+    // Generate image
+    // ========================================================================
+    printf("Generating image...\n");
+    TensorView imageView = generator->generateImage(prompt, seed, inferenceSteps, guidanceScale);
+    if (!imageView)
     {
-        parseOption(argc, argv);
-
-        printf("=== Stable Diffusion Tests ===\n\n");
-
-        // Run tokenizer tests (no GPU required)
-        printf("--- Tokenizer Tests ---\n");
-        SLANG_RETURN_ON_FAIL(testCLIPTokenizer());
-
-        // Initialize GPU device
-        rhi::DeviceDesc deviceDesc;
-        deviceDesc.slang.targetProfile = "spirv_1_6";
-
-        List<slang::CompilerOptionEntry> compilerOptionsEntries;
-        const char* capabilities[] = {"spvGroupNonUniformBallot", "spvGroupNonUniformArithmetic"};
-        for (auto cap : capabilities)
-        {
-            slang::CompilerOptionEntry entry;
-            entry.name = slang::CompilerOptionName::Capability;
-            slang::CompilerOptionValue value;
-            value.kind = slang::CompilerOptionValueKind::String;
-            value.stringValue0 = cap;
-            entry.value = value;
-            compilerOptionsEntries.add(entry);
-        }
-
-        deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
-        deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
-        deviceDesc.deviceType = rhi::DeviceType::Vulkan;
-
-        device = rhi::getRHI()->createDevice(deviceDesc);
-        if (!device)
-        {
-            printf("Failed to create GPU device\n");
-            return SLANG_FAIL;
-        }
-
-        ctx = new InferencingContext(device);
-
-        // Run UNet tests
-        printf("\n--- UNet Tests ---\n");
-        SLANG_RETURN_ON_FAIL(testSDUNet(ctx));
-        SLANG_RETURN_ON_FAIL(testSDResNetBlock(ctx));
-        SLANG_RETURN_ON_FAIL(testSDSelfAttention(ctx));
-        SLANG_RETURN_ON_FAIL(testSDCrossAttention(ctx));
-        SLANG_RETURN_ON_FAIL(testSDSpatialTransformer(ctx));
-
-        // Run CLIP encoder tests
-        printf("\n--- CLIP Encoder Tests ---\n");
-        SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
-
-        // Run VAE decoder tests
-        printf("\n--- VAE Decoder Tests ---\n");
-        SLANG_RETURN_ON_FAIL(testVAEDecoderSD15(ctx));
-        SLANG_RETURN_ON_FAIL(testVAEResNetBlock(ctx));
-        SLANG_RETURN_ON_FAIL(testVAEAttentionBlock(ctx));
-        SLANG_RETURN_ON_FAIL(testVAEUpBlock(ctx));
-        SLANG_RETURN_ON_FAIL(testVAEDecoderSmall(ctx));
-
-
-        printf("\n=== All tests passed! ===\n");
-        return SLANG_OK;
+        printf("Failed to generate image\n");
+        return SLANG_FAIL;
     }
-};
 
+    // ========================================================================
+    // Save image
+    // ========================================================================
+    printf("Saving image to %s...\n", outputPath);
+    auto imageData = ctx->readBuffer<float>(imageView);
+    writeImagePNG(
+        outputPath,
+        generator->getImageWidth(),
+        generator->getImageHeight(),
+        3,
+        imageData);
+
+    printf("\nDone! Image saved to %s\n", outputPath);
+    return SLANG_OK;
+}
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
 int main(int argc, char** argv)
 {
-    StableDiffusionProgram app;
-    if (SLANG_FAILED(app.execute(argc, argv)))
+    // Check for --test flag
+    bool testMode = false;
+    for (int i = 1; i < argc; i++)
     {
-        return -1;
+        if (strcmp(argv[i], "--test") == 0)
+        {
+            testMode = true;
+            break;
+        }
     }
-    return 0;
+
+    // Create inferencing context
+    RefPtr<InferencingContext> ctx = new InferencingContext();
+
+    SlangResult result;
+    if (testMode)
+    {
+        result = runTests(ctx);
+    }
+    else
+    {
+        result = generateImage(ctx);
+    }
+
+    return SLANG_SUCCEEDED(result) ? 0 : 1;
 }

@@ -6,15 +6,86 @@ This document provides a comprehensive overview of our Stable Diffusion 1.5 impl
 
 ## Table of Contents
 
-1. [Stable Diffusion Architecture](#stable-diffusion-architecture)
-2. [The Kernel Scheduling Problem](#the-kernel-scheduling-problem)
-3. [Understanding Kernel Fusion](#understanding-kernel-fusion)
-4. [The IExpr System](#the-iexpr-system)
-5. [Fusion Catalog](#fusion-catalog)
-6. [Results: Detailed Kernel Count Analysis](#results-detailed-kernel-count-analysis)
-7. [Usage](#usage)
-8. [Implementation Reference](#implementation-reference)
-9. [Conclusion](#conclusion)
+1. [Quick Start](#quick-start)
+2. [Stable Diffusion Architecture](#stable-diffusion-architecture)
+3. [The Kernel Scheduling Problem](#the-kernel-scheduling-problem)
+4. [Understanding Kernel Fusion](#understanding-kernel-fusion)
+5. [The IExpr System](#the-iexpr-system)
+6. [Fusion Catalog](#fusion-catalog)
+7. [Results: Detailed Kernel Count Analysis](#results-detailed-kernel-count-analysis)
+8. [API Usage](#api-usage)
+9. [Implementation Reference](#implementation-reference)
+10. [Conclusion](#conclusion)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **GPU**: Vulkan-capable GPU with compute shader support
+- **Python 3.8+** (for downloading models)
+- **CMake 3.16+**
+
+### 1. Download Model Weights
+
+From the repository root, run:
+
+```bash
+# Install Python dependencies
+pip install torch diffusers transformers safetensors huggingface_hub
+
+# Download models (~5GB) and generate test data
+python download_models.py
+```
+
+This creates:
+- `models/` - Model weights (CLIP, UNet, VAE, tokenizer)
+- `test_data/` - Reference test data for validation
+
+### 2. Build
+
+```bash
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release
+```
+
+### 3. Run Tests
+
+```bash
+./bin/stable-diffusion --test
+```
+
+Expected output:
+```
+=== Stable Diffusion Tests ===
+
+--- Tokenizer Tests ---
+testCLIPTokenizer: PASSED
+
+--- UNet Tests ---
+testSDUNet: PASSED
+...
+
+=== All tests passed! ===
+```
+
+### 4. Generate an Image
+
+```bash
+./bin/stable-diffusion
+```
+
+This generates `result.png` from the default prompt:
+> "a beautiful sunset over mountains, digital art, highly detailed"
+
+### Command-Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--test` | Run component tests instead of generating an image |
+| (none) | Generate image with default prompt, save to `result.png` |
 
 ---
 
@@ -852,50 +923,81 @@ This stands in contrast to traditional approaches where each fusion requires a c
 
 ---
 
-## Usage
+## API Usage
+
+### Basic Pipeline
 
 ```cpp
 #include "clip-encoder.h"
 #include "unet.h"
 #include "vae-decoder.h"
-#include "ddim-sampler.h"
+#include "shared/ddim-sampler.h"
+#include "tokenizer.h"
 
-// Initialize
-auto ctx = InferencingContext::create(device);
+// Initialize context with GPU device
+auto ctx = new InferencingContext(device);
 
-// Load models
-auto clip = new CLIPTextEncoder(ctx, 49408, 768, 12, 12);
-clip->loadParams(clipReader, "text_model.");
+// Load tokenizer
+CLIPTokenizer tokenizer;
+tokenizer.load("models/vocab.json", "models/merges.txt");
 
-auto unet = new SDUNet(ctx, 4, 320, 768);
-unet->loadParams(unetReader, "");
+// Load models (using default SD 1.5 architecture)
+SafeTensorsReader clipReader, unetReader, vaeReader;
+clipReader.load("models/clip.safetensors");
+unetReader.load("models/unet.safetensors");
+vaeReader.load("models/vae.safetensors");
 
-auto vae = new VAEDecoder(ctx, 4, 128);
-vae->loadParams(vaeReader, "decoder.");
+auto clip = new CLIPTextEncoder(ctx);
+clip->loadParams(clipReader);
 
-// Text encoding
-InferencingTask clipTask(ctx);
-clip->queueExecute(clipTask, textEmbeddings, tokenIds, seqLen, batchSize);
-clipTask.execute();
+auto unet = new SDUNet(ctx);
+unet->loadParams(unetReader);
 
-// Diffusion loop (50 steps)
-DDIMSampler sampler(1000, 50);
-auto latent = /* random noise */;
+auto vae = new VAEDecoder(ctx);
+vae->loadParams(vaeReader);
 
-for (int i = 0; i < 50; i++) {
-    int timestep = sampler.getTimestep(i);
-    
-    InferencingTask unetTask(ctx);
-    unet->queueExecute(unetTask, noisePred, latent, textEmbeddings, timestep);
-    unetTask.execute();
-    
-    sampler.step(latent, noisePred, i);
+// Tokenize prompt
+List<int> tokens = tokenizer.encode("a photo of a cat");
+auto tokenTensor = ctx->createTensor(ElementType::Float32, Shape{1, 77}, tokenData);
+
+// Encode text
+auto textEmbed = clip->allocateResultBuffer(ElementType::Float32, 77, 1);
+{
+    auto task = ctx->createTask();
+    clip->queueExecute(task, textEmbed, tokenTensor->getView(), 77, 1);
+    task.execute();
 }
 
-// VAE decode
-InferencingTask vaeTask(ctx);
-vae->queueExecute(vaeTask, image, latent);
-vaeTask.execute();
+// Initialize random latent [1, 64, 64, 4]
+auto latent = ctx->createTensor(ElementType::Float32, Shape{1, 64, 64, 4}, noiseData);
+auto noisePred = ctx->createTensor(ElementType::Float32, Shape{1, 64, 64, 4}, ...);
+auto latentNext = ctx->createTensor(ElementType::Float32, Shape{1, 64, 64, 4}, ...);
+
+// DDIM sampling loop (20 steps)
+DDIMSampler sampler(ctx, 1000, 20);  // 1000 train steps, 20 inference steps
+
+for (int i = 19; i >= 0; i--) {
+    int t = sampler.timesteps[i];
+    
+    auto task = ctx->createTask();
+    unet->queueExecute(task, noisePred->getView(), latent->getView(), t, textEmbed);
+    sampler.step(task, latentNext->getView(), latent->getView(), noisePred->getView(), i);
+    task.execute();
+    
+    std::swap(latent, latentNext);
+}
+
+// VAE decode to image
+auto imageView = vae->allocateResultBuffer(ElementType::Float32, 64, 64, 1);
+{
+    auto task = ctx->createTask();
+    vae->queueExecute(task, imageView, latent->getView());
+    task.execute();
+}
+
+// Read back and save
+auto imageData = ctx->readBuffer<float>(imageView);
+writeImagePNG("output.png", 512, 512, 3, imageData.getBuffer());
 ```
 
 ---

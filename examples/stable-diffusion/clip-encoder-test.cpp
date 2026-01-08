@@ -108,12 +108,11 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
     printf("testCLIPEncoderSD15: Loading CLIP text encoder...\n");
 
     // Load CLIP model weights
-    String modelPath = getTestFilePath("test_data/clip_text_model.safetensors");
+    String modelPath = getTestFilePath("models/clip.safetensors");
 
     if (!File::exists(modelPath))
     {
-        printf("  CLIP model not found at %s\n", modelPath.getBuffer());
-        printf("  Run clip-encoder-test-generate.py to download and prepare the model.\n");
+        printf("  CLIP model not found. Run: python download_models.py\n");
         printf("  testCLIPEncoderSD15: SKIPPED\n");
         return SLANG_OK;
     }

@@ -74,7 +74,9 @@ struct SimpleUNetProgram : public TestBase
         }
 
         // 3. Prepare Sampler
-        DDIMSampler sampler(ctx, train_steps, inference_steps);
+        // Linear schedule with default beta range
+        DiffusionSchedule schedule(train_steps, 0.0001f, 0.02f, /*scaled_linear=*/false);
+        DDIMSampler sampler(ctx, std::move(schedule), inference_steps);
 
         // 4. Prepare Tensors (NHWC layout)
         List<float> noiseData;
@@ -120,7 +122,7 @@ struct SimpleUNetProgram : public TestBase
         ctx->pushAllocScope();
         SLANG_DEFER(ctx->popAllocScope());
 
-        for (int step = inference_steps - 1; step >= 0; step--)
+        for (int step = 0; step < inference_steps; step++)
         {
             // Get the actual training timestep
             int t = sampler.timesteps[step];

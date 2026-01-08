@@ -174,27 +174,27 @@ SlangResult VAEAttentionBlock::loadParams(SafeTensorsReader& reader, const Strin
         (prefix + "group_norm.bias").getUnownedSlice()));
     
     // Load Q, K, V projections
-    // SD VAE uses: query, key, value, proj_attn (not to_q, to_k, to_v, to_out)
+    // Diffusers VAE uses: to_q, to_k, to_v, to_out.0
     SLANG_RETURN_ON_FAIL(projQ->loadParams(
         reader,
-        (prefix + "query.weight").getUnownedSlice(),
-        (prefix + "query.bias").getUnownedSlice()));
+        (prefix + "to_q.weight").getUnownedSlice(),
+        (prefix + "to_q.bias").getUnownedSlice()));
     
     SLANG_RETURN_ON_FAIL(projK->loadParams(
         reader,
-        (prefix + "key.weight").getUnownedSlice(),
-        (prefix + "key.bias").getUnownedSlice()));
+        (prefix + "to_k.weight").getUnownedSlice(),
+        (prefix + "to_k.bias").getUnownedSlice()));
     
     SLANG_RETURN_ON_FAIL(projV->loadParams(
         reader,
-        (prefix + "value.weight").getUnownedSlice(),
-        (prefix + "value.bias").getUnownedSlice()));
+        (prefix + "to_v.weight").getUnownedSlice(),
+        (prefix + "to_v.bias").getUnownedSlice()));
     
-    // Output projection
+    // Output projection (diffusers uses to_out.0)
     SLANG_RETURN_ON_FAIL(projOut->loadParams(
         reader,
-        (prefix + "proj_attn.weight").getUnownedSlice(),
-        (prefix + "proj_attn.bias").getUnownedSlice()));
+        (prefix + "to_out.0.weight").getUnownedSlice(),
+        (prefix + "to_out.0.bias").getUnownedSlice()));
     
     return SLANG_OK;
 }

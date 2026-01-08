@@ -17,8 +17,8 @@ SlangResult testCLIPTokenizer()
     // Load tokenizer
     CLIPTokenizer tokenizer;
 
-    String vocabPath = getTestFilePath("examples/stable-diffusion/model/vocab.json");
-    String mergesPath = getTestFilePath("examples/stable-diffusion/model/merges.txt");
+    String vocabPath = getTestFilePath("models/vocab.json");
+    String mergesPath = getTestFilePath("models/merges.txt");
 
     SLANG_RETURN_ON_FAIL(tokenizer.load(vocabPath, mergesPath));
 

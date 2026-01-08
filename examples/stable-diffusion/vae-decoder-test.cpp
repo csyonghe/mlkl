@@ -158,14 +158,12 @@ SlangResult testVAEDecoderSD15(InferencingContext* ctx)
 
     // Try to load SD 1.5 VAE weights
     SafeTensorsReader reader;
-    SlangResult loadResult = reader.load(
-        getTestFilePath("examples/stable-diffusion/model/diffusion_pytorch_model.safetensors"));
+    SlangResult loadResult = reader.load(getTestFilePath("models/vae.safetensors"));
 
     if (SLANG_FAILED(loadResult))
     {
         printf("testVAEDecoderSD15: SKIPPED (weights not found)\n");
-        printf("  To run this test, download SD 1.5 VAE weights:\n");
-        printf("  huggingface-cli download stabilityai/sd-vae-ft-mse\n");
+        printf("  Run: python download_models.py\n");
         return SLANG_OK; // Skip, don't fail
     }
 
