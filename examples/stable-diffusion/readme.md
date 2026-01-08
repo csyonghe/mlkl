@@ -13,7 +13,8 @@ This document provides a comprehensive overview of our Stable Diffusion 1.5 impl
 5. [Fusion Catalog](#fusion-catalog)
 6. [Results: Detailed Kernel Count Analysis](#results-detailed-kernel-count-analysis)
 7. [Usage](#usage)
-8. [Conclusion](#conclusion)
+8. [Implementation Reference](#implementation-reference)
+9. [Conclusion](#conclusion)
 
 ---
 
@@ -899,16 +900,112 @@ vaeTask.execute();
 
 ---
 
-## Files
+## Implementation Reference
+
+### Component-to-Class Mapping
+
+The following tables map Stable Diffusion model components to their C++ class implementations.
+
+#### CLIP Text Encoder (`clip-encoder.h/cpp`)
+
+| Model Component | C++ Class | Description |
+|-----------------|-----------|-------------|
+| CLIP Text Model | `CLIPTextEncoder` | Top-level encoder: embeddings → transformer layers → output |
+| Transformer Layer | `CLIPTransformerBlock` | LayerNorm → SelfAttention → LayerNorm → MLP |
+| Self-Attention | `CLIPSelfAttention` | Multi-head self-attention with causal mask |
+| MLP (Feed-Forward) | `CLIPMLP` | Linear → QuickGELU → Linear |
+
+#### UNet Noise Predictor (`unet.h/cpp`)
+
+| Model Component | C++ Class | Description |
+|-----------------|-----------|-------------|
+| Full UNet | `SDUNet` | Time embedding + ConvIn + DownBlocks + MidBlock + UpBlocks + ConvOut |
+| Down Block | `SDDownBlock` | 2× ResNet + optional Attention + optional Downsample |
+| Mid Block | `SDMidBlock` | ResNet + Attention + ResNet |
+| Up Block | `SDUpBlock` | 3× ResNet (with skip concat) + optional Attention + optional Upsample |
+| ResNet Block | `SDResNetBlock` | GroupNorm → SiLU → Conv → TimeEmbed → GroupNorm → SiLU → Conv + Residual |
+| Spatial Transformer | `SDSpatialTransformer` | GroupNorm → ProjIn → BasicTransformerBlock → ProjOut + Residual |
+| Basic Transformer Block | `SDBasicTransformerBlock` | SelfAttn → CrossAttn → FeedForward (with residuals) |
+| Self-Attention | `SDSelfAttention` | Q/K/V projection → FlashAttention → Output projection |
+| Cross-Attention | `SDCrossAttention` | Q from hidden, K/V from context → FlashAttention → Output projection |
+| Feed-Forward (GEGLU) | `SDFeedForward` | Linear → GEGLU split → gelu(gate) × hidden → Linear |
+
+#### VAE Decoder (`vae-decoder.h/cpp`)
+
+| Model Component | C++ Class | Description |
+|-----------------|-----------|-------------|
+| Full VAE Decoder | `VAEDecoder` | ConvIn → MidBlock → UpBlocks → ConvOut |
+| Up Block | `VAEUpBlock` | 3× ResNet + optional Upsample |
+| ResNet Block | `VAEResNetBlock` | GroupNorm → SiLU → Conv → GroupNorm → SiLU → Conv + Residual |
+| Attention Block | `VAEAttentionBlock` | GroupNorm → Q/K/V → Attention → Output + Residual |
+
+### Class Hierarchy Diagram
+
+```
+SDUNet
+├── TimeEmbedding (LinearKernel × 2)
+├── ConvIn (Conv2DKernel)
+├── SDDownBlock × 4
+│   ├── SDResNetBlock × 2
+│   │   ├── GroupNormKernel (norm1, norm2)
+│   │   ├── Conv2DKernel (conv1, conv2)
+│   │   ├── LinearKernel (timeProj)
+│   │   └── Conv2DKernel (residualConv, optional)
+│   ├── SDSpatialTransformer × 0-1
+│   │   ├── GroupNormKernel
+│   │   ├── Conv2DKernel (projIn, projOut)
+│   │   └── SDBasicTransformerBlock
+│   │       ├── LayerNormKernel × 3
+│   │       ├── SDSelfAttention
+│   │       │   ├── LinearKernel (toQ, toK, toV, toOut)
+│   │       │   └── FlashAttentionKernel
+│   │       ├── SDCrossAttention
+│   │       │   ├── LinearKernel (toQ, toK, toV, toOut)
+│   │       │   └── FlashAttentionKernel
+│   │       └── SDFeedForward
+│   │           └── LinearKernel (proj1, proj2)
+│   └── Conv2DKernel (downsample, optional)
+├── SDMidBlock
+│   ├── SDResNetBlock × 2
+│   └── SDSpatialTransformer
+└── SDUpBlock × 4
+    ├── SDResNetBlock × 3 (with fused skip concat)
+    ├── SDSpatialTransformer × 0-1
+    └── Conv2DKernel (upsample, optional, with fused upsample2x)
+
+CLIPTextEncoder
+├── GatherKernel (token embedding)
+├── GatherKernel (position embedding)
+└── CLIPTransformerBlock × 12
+    ├── LayerNormKernel × 2
+    ├── CLIPSelfAttention
+    │   ├── LinearKernel (qProj, kProj, vProj, outProj)
+    │   └── FlashAttentionKernel (causal)
+    └── CLIPMLP
+        └── LinearKernel (fc1 with QuickGELU, fc2)
+
+VAEDecoder
+├── Conv2DKernel (convIn)
+├── VAEResNetBlock × 2 (mid block)
+├── VAEAttentionBlock (mid block)
+├── VAEUpBlock × 4
+│   ├── VAEResNetBlock × 3
+│   └── Conv2DKernel (upsample, optional)
+├── GroupNormKernel (normOut)
+└── Conv2DKernel (convOut with clamp)
+```
+
+### Files
 
 | File | Description |
 |------|-------------|
 | `clip-encoder.h/cpp` | CLIP ViT-L/14 text encoder |
-| `clip-encoder-test.cpp` | CLIP unit tests |
+| `clip-encoder-test.cpp` | CLIP unit tests with reference comparison |
 | `unet.h/cpp` | UNet noise predictor with all fusions |
-| `unet-test.cpp` | UNet unit tests |
+| `unet-test.cpp` | UNet unit tests with reference comparison |
+| `unet-test-generate.py` | Python script to generate UNet test data |
 | `vae-decoder.h/cpp` | VAE image decoder |
-| `vae-decoder-test.cpp` | VAE unit tests |
+| `vae-decoder-test.cpp` | VAE unit tests with reference comparison |
 
 ---
 
