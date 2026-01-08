@@ -1,10 +1,11 @@
 // Stable Diffusion Example
-// Runs VAE decoder, CLIP encoder, and UNet tests
+// Runs tokenizer, VAE decoder, CLIP encoder, and UNet tests
 
 #include "clip-encoder-test.h"
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
 #include "inference-context.h"
+#include "tokenizer-test.h"
 #include "unet-test.h"
 #include "vae-decoder-test.h"
 
@@ -24,6 +25,10 @@ struct StableDiffusionProgram : public TestBase
         parseOption(argc, argv);
 
         printf("=== Stable Diffusion Tests ===\n\n");
+
+        // Run tokenizer tests (no GPU required)
+        printf("--- Tokenizer Tests ---\n");
+        SLANG_RETURN_ON_FAIL(testCLIPTokenizer());
 
         // Initialize GPU device
         rhi::DeviceDesc deviceDesc;
