@@ -24,3 +24,4 @@ SlangResult testVAEDecoderSmall(InferencingContext* ctx);
 // Test full VAE decoder with real SD 1.5 weights
 SlangResult testVAEDecoderSD15(InferencingContext* ctx);
 
+

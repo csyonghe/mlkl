@@ -88,6 +88,8 @@ void VAEResNetBlock::queueExecute(
     TensorView output,
     TensorView input)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     auto shape = input.shape;
     int B = shape[0], H = shape[1], W = shape[2];
     
@@ -213,6 +215,8 @@ void VAEAttentionBlock::queueExecute(
     TensorView output,
     TensorView input)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     auto shape = input.shape;
     int B = shape[0], H = shape[1], W = shape[2], C = shape[3];
     int seqLen = H * W;
@@ -349,6 +353,8 @@ void VAEUpBlock::queueExecute(
     TensorView output,
     TensorView input)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     auto shape = input.shape;
     int B = shape[0], H = shape[1], W = shape[2];
     
@@ -472,6 +478,8 @@ void VAEDecoder::queueExecute(
     TensorView output,
     TensorView latentInput)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     auto shape = latentInput.shape;
     int B = shape[0], H = shape[1], W = shape[2];
     

@@ -1,10 +1,11 @@
 // Stable Diffusion Example
-// Runs VAE decoder and CLIP encoder tests
+// Runs VAE decoder, CLIP encoder, and UNet tests
 
 #include "clip-encoder-test.h"
 #include "core/slang-basic.h"
 #include "example-base/example-base.h"
 #include "inference-context.h"
+#include "unet-test.h"
 #include "vae-decoder-test.h"
 
 #include <cstdio>
@@ -54,23 +55,26 @@ struct StableDiffusionProgram : public TestBase
 
         ctx = new InferencingContext(device);
 
-
         // Run CLIP encoder tests
         printf("\n--- CLIP Encoder Tests ---\n");
         SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
 
-
         // Run VAE decoder tests
-        printf("--- VAE Decoder Tests ---\n");
-
-        // Full SD 1.5 test (requires weights)
+        printf("\n--- VAE Decoder Tests ---\n");
         SLANG_RETURN_ON_FAIL(testVAEDecoderSD15(ctx));
-
-        // Basic component tests (no weights needed)
         SLANG_RETURN_ON_FAIL(testVAEResNetBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEAttentionBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEUpBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEDecoderSmall(ctx));
+
+        // Run UNet tests
+        printf("\n--- UNet Tests ---\n");
+        SLANG_RETURN_ON_FAIL(testSDResNetBlock(ctx));
+        SLANG_RETURN_ON_FAIL(testSDSelfAttention(ctx));
+        SLANG_RETURN_ON_FAIL(testSDCrossAttention(ctx));
+        SLANG_RETURN_ON_FAIL(testSDSpatialTransformer(ctx));
+        SLANG_RETURN_ON_FAIL(testSDUNet(ctx));
+
         printf("\n=== All tests passed! ===\n");
         return SLANG_OK;
     }

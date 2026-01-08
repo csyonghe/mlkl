@@ -454,6 +454,20 @@ Expr uniformConstant();
 // Represent the output of the current kernel before applying any output transformations.
 Expr kernelOutput();
 
+// Check if an expression is a raw buffer() with no transformations.
+bool isRawBufferExpr(const Expr& expr);
+
+// Check if an expression contains any buffer() nodes.
+bool containsBufferNode(const Expr& expr);
+
+// Check if an expression contains kernelOutput() node.
+bool containsKernelOutputNode(const Expr& expr);
+
+// Validates that an output expression is well-formed.
+// An output expression should reference kernelOutput() if it references buffer().
+// Returns true if valid, false if likely a mistake (has buffer() but no kernelOutput()).
+bool isValidOutputExpr(const Expr& expr);
+
 Expr broadcast(Expr inner, Expr shapeOf);
 Expr concat(Expr left, Expr right, Expr axis);
 Expr permute(Expr inner, ArrayView<int> dims);

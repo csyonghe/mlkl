@@ -170,8 +170,12 @@ public:
     // Return a slice of the tensor view along the first dimension.
     TensorView slice(int index, int count) const;
 
-    // Ensure the tensor has the given rank, adding singleton dimensions if needed.
+    // Ensure the tensor has the given rank, adding singleton dimensions to the front if needed.
     TensorView ensureRank(int rank) const;
+    
+    // Remove the specified number of leading dimensions.
+    // Throws if any removed dimension is not size 1 (singleton).
+    TensorView squeezeFront(int count = 1) const;
 };
 
 class Tensor : public Slang::RefObject

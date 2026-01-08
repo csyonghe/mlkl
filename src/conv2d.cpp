@@ -91,6 +91,18 @@ Conv2DKernel::Conv2DKernel(
           bufferSink(),
           name)
 {
+    // Validate that outputExpr is well-formed.
+    // It's a mistake if outputExpr contains buffer() but no kernelOutput().
+    // This catches the common error of passing silu(buffer()) as outputExpr instead of inputExpr.
+    if (!isValidOutputExpr(outputExpr))
+    {
+        throw std::runtime_error(
+            "Conv2DKernel: outputExpr contains buffer() but no kernelOutput() - this is likely a mistake. "
+            "buffer() is for INPUT expressions. For output transformations, use kernelOutput(). "
+            "If you need a custom input expression (like silu(buffer())), use the full constructor:\n"
+            "  Conv2DKernel(ctx, elemType, tileSize, kernelSize, stride, inCh, outCh, "
+            "inputExpr, outputExpr, sinkExpr)");
+    }
 }
 
 SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseBNorm)
@@ -379,19 +391,42 @@ void Conv2DKernel::queueExecute(
 void Conv2DKernel::queueExecute(
     InferencingTask& task,
     TensorView output,
+    const std::initializer_list<InputInfo>& inputs,
+    int padding)
+{
+    EvalContext ctx;
+    auto iter = inputs.begin();
+    auto consume = [&]()
+    {
+        if (iter == inputs.end())
+            throw std::runtime_error("Conv2DKernel: insufficient input buffers.");
+        return *(iter++);
+    };
+    for (auto bufferNode : inputProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    for (auto bufferNode : outputProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    queueExecute(task, ctx, output, padding);
+}
+
+void Conv2DKernel::queueExecute(
+    InferencingTask& task,
+    TensorView output,
     TensorView inputImage,
     int padding)
 {
     EvalContext ctx;
     if (inputProgram.bufferNodes.getCount() > 1)
     {
-        throw std::runtime_error("insufficient input buffers for Conv2D kernel.");
+        throw std::runtime_error("Conv2DKernel: kernel requires multiple input buffers, use initializer_list overload.");
     }
-    if (inputProgram.bufferNodes.getCount() < 1)
+    if (inputProgram.bufferNodes.getCount() == 1)
     {
-        throw std::runtime_error("The Conv2D kernel does not take any input buffers.");
+        ctx.inputs.add(inputProgram.bufferNodes[0], inputImage);
     }
-    ctx.inputs.add(inputProgram.bufferNodes[0], inputImage);
-
+    if (outputProgram.bufferNodes.getCount() > 0)
+    {
+        throw std::runtime_error("Conv2DKernel: kernel requires additional output buffers, use initializer_list overload.");
+    }
     queueExecute(task, ctx, output, padding);
 }

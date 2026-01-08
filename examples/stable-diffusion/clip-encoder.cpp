@@ -40,6 +40,8 @@ SlangResult CLIPMLP::loadParams(SafeTensorsReader& reader, const String& prefix)
 
 void CLIPMLP::queueExecute(InferencingTask& task, TensorView output, TensorView input)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     auto fc1Out =
         ctx->allocScratchTensor(ElementType::Float32, Shape(input.shape[0], intermediateSize));
     fc1->queueExecute(task, fc1Out, input); // fc1 with fused QuickGELU
@@ -121,6 +123,8 @@ void CLIPSelfAttention::queueExecute(
     int seqLen,
     int batchSize)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     int totalTokens = batchSize * seqLen;
 
     TensorView inputFlat = input;
@@ -235,6 +239,8 @@ void CLIPTransformerBlock::queueExecute(
     int seqLen,
     int batchSize)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     int totalTokens = batchSize * seqLen;
 
     // LayerNorm1
@@ -359,6 +365,8 @@ void CLIPTextEncoder::queueExecute(
     int seqLen,
     int batchSize)
 {
+    InferencingContext::ScratchScope scope(ctx);
+    
     int totalTokens = batchSize * seqLen;
 
     // ========================================================================

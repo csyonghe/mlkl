@@ -12,7 +12,7 @@
 using namespace Slang;
 
 // Define this to 1 to enable intermediate mode that runs kernels synchronously
-// on the CPU for easier debugging.
+// at each queueExecute for easier debugging.
 #define IMMEDIATE_MODE 0
 
 class InferencingContext;
@@ -145,12 +145,12 @@ public:
     // ========================================================================
     // TENSOR ALLOCATION METHODS
     // ========================================================================
-    
+
     // createTensor: Creates a PERSISTENT tensor with optional initial data.
     // - Returns RefPtr<Tensor> - caller owns the reference
     // - Tensor persists as long as the RefPtr is held
     // - Use for: model weights, input data, output buffers that outlive a single inference call
-    // 
+    //
     // IMPORTANT: Do NOT create tensors with createTensor inside queueExecute() methods!
     // The RefPtr will be destroyed when the function returns, but async GPU commands
     // may still reference the tensor. This causes crashes with INTERMEDIATE_MODE=0.
@@ -226,7 +226,6 @@ inline void logInfo(const char* format, TArgs... args)
 {
     // Verbose logging disabled by default
     // Uncomment to enable: printf(format, std::forward<TArgs>(args)...);
-    (void)format;  // Suppress unused parameter warnings
+    (void)format; // Suppress unused parameter warnings
     ((void)args, ...);
 }
-

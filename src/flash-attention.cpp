@@ -90,7 +90,37 @@ TensorView FlashAttentionKernel::allocateResultBuffer(
 void FlashAttentionKernel::queueExecute(
     InferencingTask& task,
     TensorView output,
-    const Dictionary<Expr, InputInfo>& inputs,
+    const std::initializer_list<InputInfo>& inputs,
+    uint32_t seqLenQ,
+    uint32_t seqLenKV,
+    uint32_t numHeads,
+    uint32_t batchSize,
+    float scale,
+    bool isCausal)
+{
+    EvalContext ctx;
+    auto iter = inputs.begin();
+    auto consume = [&]()
+    {
+        if (iter == inputs.end())
+            throw std::runtime_error("FlashAttentionKernel: insufficient input buffers.");
+        return *(iter++);
+    };
+    for (auto bufferNode : qProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    for (auto bufferNode : kProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    for (auto bufferNode : vProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    for (auto bufferNode : outFuncProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    queueExecute(task, output, ctx, seqLenQ, seqLenKV, numHeads, batchSize, scale, isCausal);
+}
+
+void FlashAttentionKernel::queueExecute(
+    InferencingTask& task,
+    TensorView output,
+    EvalContext& evalCtx,
     uint32_t seqLenQ,
     uint32_t seqLenKV,
     uint32_t numHeads,
@@ -100,14 +130,10 @@ void FlashAttentionKernel::queueExecute(
 {
     // Validate element types
     validateTensorElementType(output, "output");
-    for (auto it : inputs)
+    for (auto it : evalCtx.inputs)
     {
         validateTensorElementType(it.second.tensorView, "input");
     }
-
-    EvalContext evalCtx;
-    for (auto it : inputs)
-        evalCtx.inputs.add(it.first.node, it.second);
 
     // Validate that Q, K, V expressions resolve to expected shapes [B, H, S, D]
     // after any permutations are applied. This catches shape format mismatches.

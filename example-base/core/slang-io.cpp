@@ -187,8 +187,9 @@ namespace Slang
 bool File::exists(const String& fileName)
 {
 #ifdef _WIN32
-    struct _stat32 statVar;
-    return ::_wstat32(((String)fileName).toWString(), &statVar) != -1;
+    // Use _wstat64 to support files larger than 2GB
+    struct _stat64 statVar;
+    return ::_wstat64(((String)fileName).toWString(), &statVar) != -1;
 #else
     struct stat statVar;
     return ::stat(fileName.getBuffer(), &statVar) == 0;
@@ -820,9 +821,9 @@ bool Path::createDirectoryRecursive(const String& path)
 /* static */ SlangResult Path::getPathType(const String& path, SlangPathType* pathTypeOut)
 {
 #ifdef _WIN32
-    // https://msdn.microsoft.com/en-us/library/14h5k7ff.aspx
-    struct _stat32 statVar;
-    if (::_wstat32(String(path).toWString(), &statVar) == 0)
+    // Use _wstat64 to support files larger than 2GB
+    struct _stat64 statVar;
+    if (::_wstat64(String(path).toWString(), &statVar) == 0)
     {
         if (statVar.st_mode & _S_IFDIR)
         {

@@ -1318,3 +1318,54 @@ void ElementwiseKernel::queueExecute(
     }
     queueExecute(task, ctx, output);
 }
+
+
+bool isRawBufferExpr(const Expr& expr)
+{
+    return dynamic_cast<BufferNode*>(expr.node.Ptr()) != nullptr;
+}
+
+bool containsBufferNode(const Expr& expr)
+{
+    HashSet<ExprNode*> visited;
+    bool found = false;
+    visitAllExpr(
+        visited,
+        expr.node,
+        [&](ExprNode* node)
+        {
+            if (dynamic_cast<BufferNode*>(node))
+                found = true;
+        });
+    return found;
+}
+
+bool containsKernelOutputNode(const Expr& expr)
+{
+    HashSet<ExprNode*> visited;
+    bool found = false;
+    visitAllExpr(
+        visited,
+        expr.node,
+        [&](ExprNode* node)
+        {
+            if (dynamic_cast<KernelOutputNode*>(node))
+                found = true;
+        });
+    return found;
+}
+
+bool isValidOutputExpr(const Expr& expr)
+{
+    // An output expression that contains buffer() but no kernelOutput() is likely a mistake.
+    // Valid cases:
+    //   - kernelOutput()                    (just the kernel output)
+    //   - clamp(kernelOutput(), -1, 1)      (transformed kernel output)
+    //   - buffer() + kernelOutput()         (kernel output combined with input - valid but rare)
+    // Invalid case:
+    //   - buffer()                          (input expression, not output!)
+    //   - silu(buffer())                    (input expression, not output!)
+    if (containsBufferNode(expr) && !containsKernelOutputNode(expr))
+        return false;
+    return true;
+}

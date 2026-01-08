@@ -48,3 +48,4 @@ __pycache__/
 *.pth
 /examples/stable-diffusion/model/diffusion_pytorch_model.safetensors
 /test_data/clip_text_model.safetensors
+/test_data/unet.safetensors

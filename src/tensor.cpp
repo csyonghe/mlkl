@@ -140,6 +140,35 @@ TensorView TensorView::ensureRank(int rank) const
     return TensorView(bufferView, elementType, newShape);
 }
 
+TensorView TensorView::squeezeFront(int count) const
+{
+    if (count <= 0)
+    {
+        return *this;
+    }
+    if (count > shape.getRank())
+    {
+        throw std::runtime_error(
+            "TensorView::squeezeFront: Cannot remove more dimensions than tensor rank");
+    }
+    // Verify the dimensions to remove are all size 1 (singleton).
+    for (int i = 0; i < count; i++)
+    {
+        if (shape.dims[i] != 1)
+        {
+            throw std::runtime_error(
+                "TensorView::squeezeFront: Cannot squeeze non-singleton dimension");
+        }
+    }
+    // Create new shape without the leading singleton dimensions.
+    Shape newShape;
+    for (Index i = count; i < shape.getRank(); i++)
+    {
+        newShape.dims.add(shape.dims[i]);
+    }
+    return TensorView(bufferView, elementType, newShape);
+}
+
 List<uint8_t> convertFloatData(const float* data, size_t count, ElementType targetType)
 {
     List<uint8_t> result;

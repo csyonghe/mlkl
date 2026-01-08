@@ -91,7 +91,33 @@ public:
     void queueExecute(
         InferencingTask& task,
         TensorView output,
+        EvalContext& ctx,
+        uint32_t seqLenQ,
+        uint32_t seqLenKV,
+        uint32_t numHeads,
+        uint32_t batchSize,
+        float scale,
+        bool isCausal);
+
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
         const Dictionary<Expr, InputInfo>& inputs,
+        uint32_t seqLenQ,
+        uint32_t seqLenKV,
+        uint32_t numHeads,
+        uint32_t batchSize,
+        float scale,
+        bool isCausal)
+    {
+        EvalContext ctx = makeEvalContext(inputs);
+        return queueExecute(task, output, ctx, seqLenQ, seqLenKV, numHeads, batchSize, scale, isCausal);
+    }
+
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
+        const std::initializer_list<InputInfo>& inputs,
         uint32_t seqLenQ,
         uint32_t seqLenKV,
         uint32_t numHeads,
