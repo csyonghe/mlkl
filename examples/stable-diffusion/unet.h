@@ -35,6 +35,10 @@ class SDUpBlock;
 // ============================================================================
 // Structure: GroupNorm → SiLU → Conv → GroupNorm → SiLU → Conv + residual
 // Time embedding is added after first conv via projection
+//
+// For up blocks, can optionally fuse a concat operation into norm1's inputExpr.
+// When fuseConcatInput=true, queueExecute takes two inputs (current, skip) that
+// are concatenated along the channel dimension before normalization.
 class SDResNetBlock : public RefObject
 {
 public:
@@ -51,21 +55,45 @@ public:
     int outChannels;
     int timeEmbedDim;
     bool hasResidualConv;
+    bool hasFusedConcat;  // True if norm1 has fused concat inputExpr
+    
+    // Expressions for fused concat (stored to map inputs at runtime)
+    Expr norm1Buf0, norm1Buf1, norm1ConcatAxis;
+    Expr resBuf0, resBuf1, residualConvConcatAxis;
     
 public:
+    // Standard constructor (no concat fusion)
     SDResNetBlock(
         RefPtr<InferencingContext> ctx,
         int inChannels,
         int outChannels,
         int timeEmbedDim = 1280);
     
+    // Constructor with optional concat fusion for up blocks
+    // When fuseConcatInput=true, inChannels should be currentChannels + skipChannels
+    SDResNetBlock(
+        RefPtr<InferencingContext> ctx,
+        int inChannels,
+        int outChannels,
+        int timeEmbedDim,
+        bool fuseConcatInput);
+    
     SlangResult loadParams(SafeTensorsReader& reader, const String& prefix);
     
+    // Standard execution (single input)
     void queueExecute(
         InferencingTask& task,
         TensorView output,
         TensorView input,
         TensorView timeEmbed);  // [B, timeEmbedDim]
+    
+    // Execution with fused concat (two inputs concatenated along channel dim)
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
+        TensorView current,
+        TensorView skip,
+        TensorView timeEmbed);
 };
 
 // ============================================================================

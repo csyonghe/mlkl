@@ -80,17 +80,13 @@ void ReduceKernel::queueExecute(
 void ReduceKernel::queueExecute(
     InferencingTask& task,
     BufferView statsOutput,
-    TensorView input,
+    const EvalContext& ctx,
     const GroupNormLayoutParams& layout)
 {
     if (layoutType != ReductionLayoutType::GroupNorm)
     {
         throw std::runtime_error("ReduceKernel: Layout type mismatch (expected GroupNorm)");
     }
-
-    EvalContext ctx;
-    for (auto bufferNode : inputProgram.bufferNodes)
-        ctx.inputs.add(bufferNode, InputInfo{input});
 
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
@@ -116,6 +112,34 @@ void ReduceKernel::queueExecute(
 
     // Dispatch: one thread group per (batch, group) pair
     task.dispatchKernel(pipeline, numGroups, 1, 1, paramData);
+}
+
+void ReduceKernel::queueExecute(
+    InferencingTask& task,
+    BufferView statsOutput,
+    const std::initializer_list<InputInfo>& inputs,
+    const GroupNormLayoutParams& layout)
+{
+    EvalContext ctx;
+    auto iter = inputs.begin();
+    auto consume = [&]()
+    {
+        if (iter == inputs.end())
+            throw std::runtime_error("ReduceKernel: insufficient input buffers.");
+        return *(iter++);
+    };
+    for (auto bufferNode : inputProgram.bufferNodes)
+        ctx.inputs.add(bufferNode, consume());
+    return queueExecute(task, statsOutput, ctx, layout);
+}
+
+void ReduceKernel::queueExecute(
+    InferencingTask& task,
+    BufferView statsOutput,
+    TensorView input,
+    const GroupNormLayoutParams& layout)
+{
+    return queueExecute(task, statsOutput, std::initializer_list<InputInfo>{input}, layout);
 }
 
 void ReduceKernel::queueExecute(

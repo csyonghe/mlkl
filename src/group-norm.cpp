@@ -130,17 +130,6 @@ void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, con
     int channelsPerGroup = channels / numGroups;
     int totalGroups = batchSize * numGroups;
 
-    // Get input tensor from context
-    TensorView inputTensor;
-    for (auto bufferNode : inputProgram.bufferNodes)
-    {
-        if (auto info = ctx.inputs.tryGetValue(bufferNode))
-        {
-            inputTensor = info->tensorView;
-            break;
-        }
-    }
-
     // =========================================================================
     // Pass 1: Reduce - compute sum and sumSq per (batch, group)
     // =========================================================================
@@ -153,7 +142,8 @@ void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, con
     layoutParams.numGroups = numGroups;
     layoutParams.channelsPerGroup = channelsPerGroup;
 
-    reduceKernel->queueExecute(task, statsBuffer, inputTensor, layoutParams);
+    // Pass the full EvalContext to reduce kernel (supports multi-input expressions)
+    reduceKernel->queueExecute(task, statsBuffer, ctx, layoutParams);
 
     // =========================================================================
     // Pass 2: Normalize - apply normalization to each element
@@ -193,10 +183,25 @@ void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, con
     }
 }
 
-void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, TensorView input)
+void GroupNormKernel::queueExecute(
+    InferencingTask& task,
+    TensorView output,
+    const std::initializer_list<InputInfo>& inputs)
 {
     EvalContext ctx;
+    auto iter = inputs.begin();
+    auto consume = [&]()
+    {
+        if (iter == inputs.end())
+            throw std::runtime_error("GroupNormKernel: insufficient input buffers.");
+        return *(iter++);
+    };
     for (auto bufferNode : inputProgram.bufferNodes)
-        ctx.inputs.add(bufferNode, InputInfo{input});
+        ctx.inputs.add(bufferNode, consume());
     return queueExecute(task, output, ctx);
+}
+
+void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, TensorView input)
+{
+    return queueExecute(task, output, std::initializer_list<InputInfo>{input});
 }

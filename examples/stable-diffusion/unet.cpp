@@ -33,15 +33,40 @@ SDResNetBlock::SDResNetBlock(
     int inChannels,
     int outChannels,
     int timeEmbedDim)
+    : SDResNetBlock(ctx, inChannels, outChannels, timeEmbedDim, false)
+{
+}
+
+SDResNetBlock::SDResNetBlock(
+    RefPtr<InferencingContext> ctx,
+    int inChannels,
+    int outChannels,
+    int timeEmbedDim,
+    bool fuseConcatInput)
     : ctx(ctx)
     , inChannels(inChannels)
     , outChannels(outChannels)
     , timeEmbedDim(timeEmbedDim)
     , hasResidualConv(inChannels != outChannels)
+    , hasFusedConcat(fuseConcatInput)
 {
+    // norm1: optionally with fused concat for up blocks
+    if (fuseConcatInput)
+    {
+        // norm1 with fused concat: norm(concat(current, skip, axis=3))
+        // Store expressions as members to map inputs at runtime
+        norm1Buf0 = buffer();  // current [B, H, W, C1]
+        norm1Buf1 = buffer();  // skip [B, H, W, C2]
+        norm1ConcatAxis = uniformConstant();  // axis provided at runtime
+        auto concatExpr = concat(norm1Buf0, norm1Buf1, norm1ConcatAxis);
+        norm1 = new GroupNormKernel(ctx, ElementType::Float32, concatExpr, bufferSink(), inChannels, 32);
+    }
+    else
+    {
+        norm1 = new GroupNormKernel(ctx, inChannels, 32);
+    }
+    
     // GroupNorm → SiLU → Conv3x3
-    // Use full constructor: (ctx, elemType, tileSize, kernelSize, stride, inCh, outCh, inputExpr, outputExpr, sinkExpr)
-    norm1 = new GroupNormKernel(ctx, inChannels, 32);
     conv1 = new Conv2DKernel(ctx, ElementType::Float32, 16, 3, 1, inChannels, outChannels,
                               silu(buffer()), kernelOutput(), bufferSink());
     
@@ -49,16 +74,35 @@ SDResNetBlock::SDResNetBlock(
     timeProj = new LinearKernel(ctx, ElementType::Float32, silu(buffer()), kernelOutput(),
                                  bufferSink(), timeEmbedDim, outChannels);
     
-    // GroupNorm → SiLU → Conv3x3 with fused residual addition
-    // outputExpr = kernelOutput() + buffer() means conv output + residual input
-    norm2 = new GroupNormKernel(ctx, outChannels, 32);
+    // GroupNorm with fused time embedding add: norm(conv1_out + broadcast(time_proj))
+    // Buffer order: buf0 = conv1 output, buf1 = time projection (broadcast)
+    auto timeBuf0 = buffer();  // conv1 output [B, H, W, C]
+    auto timeBuf1 = buffer();  // time projection [B, 1, 1, C] (will be broadcast)
+    auto timeAddExpr = timeBuf0 + broadcast(timeBuf1, timeBuf0);
+    norm2 = new GroupNormKernel(ctx, ElementType::Float32, timeAddExpr, bufferSink(), outChannels, 32);
+    
+    // SiLU → Conv3x3 with fused residual addition
     conv2 = new Conv2DKernel(ctx, ElementType::Float32, 16, 3, 1, outChannels, outChannels,
                               silu(buffer()), kernelOutput() + buffer(), bufferSink());
     
     // Residual projection if channel mismatch
     if (hasResidualConv)
     {
-        residualConv = new Conv2DKernel(ctx, 16, 1, 1, inChannels, outChannels);
+        if (fuseConcatInput)
+        {
+            // residualConv with fused concat: conv(concat(current, skip))
+            // Store expressions as members to map inputs at runtime
+            resBuf0 = buffer();  // current
+            resBuf1 = buffer();  // skip
+            residualConvConcatAxis = uniformConstant();  // axis provided at runtime
+            auto resConcatExpr = concat(resBuf0, resBuf1, residualConvConcatAxis);
+            residualConv = new Conv2DKernel(ctx, ElementType::Float32, 16, 1, 1, inChannels, outChannels,
+                                            resConcatExpr, kernelOutput(), bufferSink());
+        }
+        else
+        {
+            residualConv = new Conv2DKernel(ctx, 16, 1, 1, inChannels, outChannels);
+        }
     }
 }
 
@@ -119,8 +163,7 @@ void SDResNetBlock::queueExecute(
     auto afterConv1 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
     conv1->queueExecute(task, afterConv1, normed1, 1);
     
-    // Time embedding projection and addition
-    // timeEmbed: [B, timeEmbedDim] → [B, outChannels]
+    // Time embedding projection: [B, timeEmbedDim] → [B, outChannels]
     auto timeProj_out = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, outChannels));
     timeProj->queueExecute(task, timeProj_out, timeEmbed);
     
@@ -128,18 +171,10 @@ void SDResNetBlock::queueExecute(
     TensorView timeProjReshaped = timeProj_out;
     timeProjReshaped.shape = Shape(batchSize, 1, 1, outChannels);
     
-    // Add time embedding to conv1 output (broadcast: [B,H,W,C] + [B,1,1,C])
-    auto buf1 = buffer();
-    auto buf2 = buffer();
-    auto addTimeExpr = buf1 + broadcast(buf2, buf1);
-    auto addTimeKernel = new ElementwiseKernel(ctx, addTimeExpr);
-    auto afterTimeAdd = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
-    addTimeKernel->queueExecute(task, afterTimeAdd, afterConv1, timeProjReshaped);
-    
-    // norm2 → silu → conv2 with fused residual addition
-    // conv2 outputExpr = kernelOutput() + buffer(), so pass {normed2, residual} as inputs
+    // norm2 with fused time embedding add: norm(conv1 + broadcast(time))
+    // Buffer order matches constructor: {buf0=afterConv1, buf1=timeProjReshaped}
     auto normed2 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
-    norm2->queueExecute(task, normed2, afterTimeAdd);
+    norm2->queueExecute(task, normed2, {afterConv1, timeProjReshaped});
     
     if (hasResidualConv)
     {
@@ -152,6 +187,73 @@ void SDResNetBlock::queueExecute(
     {
         // Input is the residual directly
         conv2->queueExecute(task, output, {normed2, input}, 1);
+    }
+}
+
+void SDResNetBlock::queueExecute(
+    InferencingTask& task,
+    TensorView output,
+    TensorView current,
+    TensorView skip,
+    TensorView timeEmbed)
+{
+    if (!hasFusedConcat)
+    {
+        throw std::runtime_error("SDResNetBlock: Two-input queueExecute requires fuseConcatInput=true");
+    }
+    
+    InferencingContext::ScratchScope scope(ctx);
+    
+    int batchSize = current.shape[0];
+    int height = current.shape[1];
+    int width = current.shape[2];
+    
+    // norm1 with fused concat: norm(concat(current, skip))
+    // Build EvalContext to map expressions to inputs including the axis
+    auto normed1 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, inChannels));
+    {
+        EvalContext norm1Ctx;
+        norm1Ctx.inputs.add(norm1Buf0.node, InputInfo{current});
+        norm1Ctx.inputs.add(norm1Buf1.node, InputInfo{skip});
+        norm1Ctx.inputs.add(norm1ConcatAxis.node, InputInfo{3.0f});
+        norm1->queueExecute(task, normed1, norm1Ctx);
+    }
+    
+    auto afterConv1 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
+    conv1->queueExecute(task, afterConv1, normed1, 1);
+    
+    // Time embedding projection: [B, timeEmbedDim] → [B, outChannels]
+    auto timeProj_out = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, outChannels));
+    timeProj->queueExecute(task, timeProj_out, timeEmbed);
+    
+    // Reshape for broadcast: [B, outChannels] → [B, 1, 1, outChannels]
+    TensorView timeProjReshaped = timeProj_out;
+    timeProjReshaped.shape = Shape(batchSize, 1, 1, outChannels);
+    
+    // norm2 with fused time embedding add
+    auto normed2 = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
+    norm2->queueExecute(task, normed2, {afterConv1, timeProjReshaped});
+    
+    // For fused concat case, residualConv also has fused concat in its inputExpr
+    if (hasResidualConv)
+    {
+        // residualConv with fused concat: build EvalContext with axis
+        auto residual = ctx->allocScratchTensor(ElementType::Float32, Shape(batchSize, height, width, outChannels));
+        {
+            EvalContext resConvCtx;
+            resConvCtx.inputs.add(resBuf0.node, InputInfo{current});
+            resConvCtx.inputs.add(resBuf1.node, InputInfo{skip});
+            resConvCtx.inputs.add(residualConvConcatAxis.node, InputInfo{3.0f});
+            residualConv->queueExecute(task, resConvCtx, residual, 0);
+        }
+        conv2->queueExecute(task, output, {normed2, residual}, 1);
+    }
+    else
+    {
+        // No residual conv means inChannels == outChannels
+        // But with concat, inChannels = currentCh + skipCh, outChannels = some fixed value
+        // This case shouldn't happen for up blocks since they always have channel changes
+        throw std::runtime_error("SDResNetBlock: Fused concat without residual conv not supported");
     }
 }
 
@@ -876,12 +978,14 @@ SDUpBlock::SDUpBlock(
 {
     // ResNets take concatenated input (skip connection + current)
     // Each resnet may have different skip channel count
+    // Use fused concat to eliminate separate ConcatKernel
     int numLayers = (int)skipChannels.getCount();
     for (int i = 0; i < numLayers; i++)
     {
         int currentChannels = (i == 0) ? prevChannels : outChannels;
         int skipCh = skipChannels[i];
-        resnets.add(new SDResNetBlock(ctx, currentChannels + skipCh, outChannels, timeEmbedDim));
+        // fuseConcatInput=true: norm1 and residualConv will have fused concat
+        resnets.add(new SDResNetBlock(ctx, currentChannels + skipCh, outChannels, timeEmbedDim, true));
     }
     
     if (hasAttention)
@@ -954,16 +1058,6 @@ void SDUpBlock::queueExecute(
         
         int currentHeight = current.shape[1];
         int currentWidth = current.shape[2];
-        int skipChannels = skip.shape[3];
-        int currentChannels = current.shape[3];
-        
-        // Concatenate current and skip along channel dim (axis 3 = channels in NHWC)
-        // Order matches diffusers: torch.cat([hidden_states, res_hidden_states], dim=1)
-        auto concatKernel = new ConcatKernel(ctx, 2);  // 2 operands
-        auto concatenated = ctx->allocScratchTensor(ElementType::Float32, 
-            Shape(batchSize, currentHeight, currentWidth, currentChannels + skipChannels));
-        TensorView concatInputs[] = {current, skip};
-        concatKernel->queueExecute(task, concatenated, makeArrayView(concatInputs), 3);
         
         bool isLastIteration = (i == numResnets - 1);
         bool hasTransformerThisIteration = hasAttention && i < transformers.getCount();
@@ -973,7 +1067,9 @@ void SDUpBlock::queueExecute(
             ? output 
             : ctx->allocScratchTensor(ElementType::Float32, 
                 Shape(batchSize, currentHeight, currentWidth, outChannels));
-        resnets[i]->queueExecute(task, resnetDest, concatenated, timeEmbed);
+        
+        // Use two-input queueExecute with fused concat (current, skip)
+        resnets[i]->queueExecute(task, resnetDest, current, skip, timeEmbed);
         current = resnetDest;
         
         if (hasTransformerThisIteration)

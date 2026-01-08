@@ -68,19 +68,33 @@ public:
     // Allocate stats buffer: [numGroups * 2] elements for (sum, sumSq) pairs
     BufferView allocateStatsBuffer(int numGroups);
 
+    // Execute reduction with EvalContext (core implementation)
+    void queueExecute(
+        InferencingTask& task,
+        BufferView statsOutput,
+        const EvalContext& ctx,
+        const GroupNormLayoutParams& layout);
+
+    // Execute reduction with multiple input tensors (for fused expressions)
+    void queueExecute(
+        InferencingTask& task,
+        BufferView statsOutput,
+        const std::initializer_list<InputInfo>& inputs,
+        const GroupNormLayoutParams& layout);
+
+    // Execute reduction with single input tensor
+    void queueExecute(
+        InferencingTask& task,
+        BufferView statsOutput,
+        TensorView input,
+        const GroupNormLayoutParams& layout);
+
     // Execute reduction with LastDimLayout
     void queueExecute(
         InferencingTask& task,
         BufferView statsOutput,
         TensorView input,
         const LastDimLayoutParams& layout);
-
-    // Execute reduction with GroupNormLayout
-    void queueExecute(
-        InferencingTask& task,
-        BufferView statsOutput,
-        TensorView input,
-        const GroupNormLayoutParams& layout);
 
     // Execute reduction with AxisLayout
     void queueExecute(

@@ -55,6 +55,14 @@ struct StableDiffusionProgram : public TestBase
 
         ctx = new InferencingContext(device);
 
+        // Run UNet tests
+        printf("\n--- UNet Tests ---\n");
+        SLANG_RETURN_ON_FAIL(testSDUNet(ctx));
+        SLANG_RETURN_ON_FAIL(testSDResNetBlock(ctx));
+        SLANG_RETURN_ON_FAIL(testSDSelfAttention(ctx));
+        SLANG_RETURN_ON_FAIL(testSDCrossAttention(ctx));
+        SLANG_RETURN_ON_FAIL(testSDSpatialTransformer(ctx));
+
         // Run CLIP encoder tests
         printf("\n--- CLIP Encoder Tests ---\n");
         SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
@@ -67,13 +75,6 @@ struct StableDiffusionProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testVAEUpBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEDecoderSmall(ctx));
 
-        // Run UNet tests
-        printf("\n--- UNet Tests ---\n");
-        SLANG_RETURN_ON_FAIL(testSDResNetBlock(ctx));
-        SLANG_RETURN_ON_FAIL(testSDSelfAttention(ctx));
-        SLANG_RETURN_ON_FAIL(testSDCrossAttention(ctx));
-        SLANG_RETURN_ON_FAIL(testSDSpatialTransformer(ctx));
-        SLANG_RETURN_ON_FAIL(testSDUNet(ctx));
 
         printf("\n=== All tests passed! ===\n");
         return SLANG_OK;

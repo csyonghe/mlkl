@@ -86,6 +86,9 @@ public:
     // Execute with full EvalContext
     void queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx);
 
+    // Execute with multiple input tensors (for fused expressions)
+    void queueExecute(InferencingTask& task, TensorView output, const std::initializer_list<InputInfo>& inputs);
+
     // Execute with single input tensor
     void queueExecute(InferencingTask& task, TensorView output, TensorView input);
 };

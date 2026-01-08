@@ -18,12 +18,15 @@ The implementation uses aggressive kernel fusion to minimize memory bandwidth an
 
 | Operation | Fusion | Implementation |
 |-----------|--------|----------------|
+| concat (up blocks only) | Concat fused into norm1 inputExpr | `norm1 = GroupNormKernel(..., concat(buf0, buf1, 3), ...)` |
 | norm1 → SiLU → conv1 | SiLU fused into conv1 inputExpr | `conv1 = Conv2DKernel(..., silu(buffer()), ...)` |
 | SiLU → timeProj | SiLU fused into timeProj inputExpr | `timeProj = LinearKernel(..., silu(buffer()), ...)` |
+| conv1 + time_emb → norm2 | Time add fused into norm2 inputExpr | `norm2 = GroupNormKernel(..., buf0 + broadcast(buf1, buf0), ...)` |
 | norm2 → SiLU → conv2 | SiLU fused into conv2 inputExpr | `conv2 = Conv2DKernel(..., silu(buffer()), ...)` |
 | conv2 + residual | Residual fused into conv2 outputExpr | `conv2 = Conv2DKernel(..., kernelOutput() + buffer(), ...)` |
+| residualConv (with concat) | Concat fused into residualConv inputExpr | `residualConv = Conv2DKernel(..., concat(buf0, buf1, 3), ...)` |
 
-**Remaining standalone kernel:** Time embedding broadcast add (requires GroupNorm inputExpr support)
+**All operations fused - no standalone kernels!**
 
 ---
 
@@ -97,14 +100,14 @@ The implementation uses aggressive kernel fusion to minimize memory bandwidth an
 
 | Category | Before | After | Reduction |
 |----------|--------|-------|-----------|
-| UNet ElementwiseKernels | 9 | 2 | 78% |
+| UNet ElementwiseKernels | 9 | 1 | 89% |
 | UNet standalone add/copy ops | 6 | 0 | 100% |
 
 ### Remaining Standalone Kernels (UNet)
 
-1. **Time embedding broadcast add** - Would require GroupNormKernel to support inputExpr
-2. **GEGLU permute** - Required for contiguous memory layout before slice
-3. **ConcatKernel** - Architecturally required for skip connections
+1. **GEGLU permute** - Required for contiguous memory layout before slice
+
+Note: ConcatKernel has been eliminated by fusing `concat()` expression into the ResNet's norm1 and residualConv inputExprs.
 
 ---
 
