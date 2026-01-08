@@ -243,13 +243,6 @@ SlangResult testVAEDecoderSD15(InferencingContext* ctx)
     SafeTensorsReader reader;
     SlangResult loadResult = reader.load(
         getTestFilePath("examples/stable-diffusion/model/diffusion_pytorch_model.safetensors"));
-    List<String> names;
-    reader.getTensorNames(names);
-    for (auto& name : names)
-    {
-        if (name.indexOf("attention") != -1 || name.indexOf("attn") != -1)
-            printf("  %s\n", name.getBuffer());
-    }
 
     if (SLANG_FAILED(loadResult))
     {

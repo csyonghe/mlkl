@@ -122,7 +122,7 @@ void InferencingContext::diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
 InferencingTask InferencingContext::createTask()
 {
     InferencingTask task = InferencingTask(
-#if !INTERMEDIATE_MODE
+#if !IMMEDIATE_MODE
         device->getQueue(rhi::QueueType::Graphics)->createCommandEncoder(),
 #else
         nullptr,
@@ -221,7 +221,7 @@ void InferencingTask::dispatchKernel(
     const void* paramData,
     size_t paramDataSize)
 {
-#if INTERMEDIATE_MODE
+#if IMMEDIATE_MODE
     auto queue = context->getDevice()->getQueue(rhi::QueueType::Graphics);
     encoder = queue->createCommandEncoder();
 #endif
@@ -251,7 +251,7 @@ void InferencingTask::dispatchKernel(
     computeEncoder->dispatchCompute(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     computeEncoder->end();
     encoder->globalBarrier();
-#if INTERMEDIATE_MODE
+#if IMMEDIATE_MODE
     if (SLANG_FAILED(queue->submit(encoder->finish())))
     {
         reportError("Failed to submit compute command buffer\n");
@@ -266,7 +266,7 @@ void InferencingTask::dispatchKernel(
 
 void InferencingTask::execute()
 {
-#if !INTERMEDIATE_MODE
+#if !IMMEDIATE_MODE
     auto commandBuffer = encoder->finish();
     auto queue = context->getDevice()->getQueue(rhi::QueueType::Graphics);
     auto result = queue->submit(commandBuffer);

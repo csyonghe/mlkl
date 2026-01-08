@@ -12,7 +12,7 @@ using namespace Slang;
 
 // Define this to 1 to enable intermediate mode that runs kernels synchronously
 // on the CPU for easier debugging.
-#define INTERMEDIATE_MODE 1
+#define IMMEDIATE_MODE 0
 
 class InferencingContext;
 
@@ -100,6 +100,40 @@ public:
 
     void pushAllocScope() { allocator->push(); }
     void popAllocScope() { allocator->pop(); }
+
+    // RAII helper for scoped scratch allocations.
+    // All scratch tensors allocated within the scope are freed when the scope exits.
+    //
+    // IMPORTANT: Only use ScratchScope AFTER task.execute() completes!
+    // With async GPU execution, kernels are queued but not executed until task.execute().
+    // If ScratchScope exits before task.execute(), buffers may be freed while GPU is still using
+    // them.
+    //
+    // CORRECT usage:
+    //   ctx->pushAllocScope();
+    //   model.queueExecute(task, output, input);
+    //   task.execute();  // GPU actually runs here
+    //   ctx->popAllocScope();  // Safe to free now
+    //
+    // WRONG usage (inside queueExecute):
+    //   void Model::queueExecute(...) {
+    //       ScratchScope scope(ctx);  // BAD: exits before GPU runs!
+    //       ...
+    //   }
+    class ScratchScope
+    {
+        InferencingContext* ctx;
+
+    public:
+        ScratchScope(InferencingContext* ctx)
+            : ctx(ctx)
+        {
+            ctx->pushAllocScope();
+        }
+        ~ScratchScope() { ctx->popAllocScope(); }
+        ScratchScope(const ScratchScope&) = delete;
+        ScratchScope& operator=(const ScratchScope&) = delete;
+    };
     BufferView allocScratchBuffer(size_t size, const char* label = nullptr);
 
     ComPtr<rhi::IBuffer> createPersistentBuffer(
@@ -107,6 +141,19 @@ public:
         size_t size,
         const char* label = nullptr);
 
+    // ========================================================================
+    // TENSOR ALLOCATION METHODS
+    // ========================================================================
+    
+    // createTensor: Creates a PERSISTENT tensor with optional initial data.
+    // - Returns RefPtr<Tensor> - caller owns the reference
+    // - Tensor persists as long as the RefPtr is held
+    // - Use for: model weights, input data, output buffers that outlive a single inference call
+    // 
+    // IMPORTANT: Do NOT create tensors with createTensor inside queueExecute() methods!
+    // The RefPtr will be destroyed when the function returns, but async GPU commands
+    // may still reference the tensor. This causes crashes with INTERMEDIATE_MODE=0.
+    // Instead, store such tensors as class members or use allocScratchTensor.
     RefPtr<Tensor> createTensor(
         ElementType elementType,
         const Shape& shape,
@@ -114,6 +161,14 @@ public:
         const void* initialData = nullptr,
         const char* label = nullptr);
 
+    // allocScratchTensor: Allocates a TEMPORARY tensor from the scratch pool.
+    // - Returns TensorView - memory managed by InferencingContext
+    // - Memory may be reused after popAllocScope() is called
+    // - Use for: intermediate results within queueExecute() methods
+    //
+    // This is the preferred method for allocating intermediate buffers during
+    // inference. The scratch allocator efficiently reuses memory and handles
+    // lifetime management automatically.
     TensorView allocScratchTensor(
         ElementType elementType,
         const Shape& shape,
@@ -141,6 +196,8 @@ public:
         return createPersistentBuffer(data.getBuffer(), data.getCount() * sizeof(T), label);
     }
 
+    // Convenience overload of createTensor with typed data.
+    // See createTensor() above for usage guidelines and warnings.
     template<typename T>
     RefPtr<Tensor> createTensor(
         ElementType elementType,
@@ -166,7 +223,10 @@ public:
 template<typename... TArgs>
 inline void logInfo(const char* format, TArgs... args)
 {
-    printf(format, std::forward<TArgs>(args)...);
+    // Verbose logging disabled by default
+    // Uncomment to enable: printf(format, std::forward<TArgs>(args)...);
+    (void)format;  // Suppress unused parameter warnings
+    ((void)args, ...);
 }
 
 inline unsigned short floatToHalf(float val)

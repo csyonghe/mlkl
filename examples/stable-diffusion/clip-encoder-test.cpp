@@ -29,14 +29,14 @@ static SlangResult loadBinaryTensor(const String& path, List<float>& outData)
 {
     if (!File::exists(path))
         return SLANG_E_NOT_FOUND;
-    
+
     List<uint8_t> bytes;
     SLANG_RETURN_ON_FAIL(File::readAllBytes(path, bytes));
-    
+
     size_t numFloats = bytes.getCount() / sizeof(float);
     outData.setCount(numFloats);
     memcpy(outData.getBuffer(), bytes.getBuffer(), bytes.getCount());
-    
+
     return SLANG_OK;
 }
 
@@ -49,11 +49,13 @@ static bool checkApproxEqual(
 {
     if (actual.getCount() != expected.getCount())
     {
-        printf("Size mismatch: got %lld, expected %lld\n",
-            (long long)actual.getCount(), (long long)expected.getCount());
+        printf(
+            "Size mismatch: got %lld, expected %lld\n",
+            (long long)actual.getCount(),
+            (long long)expected.getCount());
         return false;
     }
-    
+
     int errorCount = 0;
     for (Index i = 0; i < actual.getCount() && errorCount < 10; i++)
     {
@@ -61,12 +63,17 @@ static bool checkApproxEqual(
         float threshold = atol + rtol * std::abs(expected[i]);
         if (diff > threshold)
         {
-            printf("Mismatch at %lld: got %.6f, expected %.6f (diff=%.6f, threshold=%.6f)\n",
-                (long long)i, actual[i], expected[i], diff, threshold);
+            printf(
+                "Mismatch at %lld: got %.6f, expected %.6f (diff=%.6f, threshold=%.6f)\n",
+                (long long)i,
+                actual[i],
+                expected[i],
+                diff,
+                threshold);
             errorCount++;
         }
     }
-    
+
     if (errorCount > 0)
     {
         // Count total errors
@@ -81,7 +88,7 @@ static bool checkApproxEqual(
         printf("Total errors: %d / %lld\n", totalErrors, (long long)actual.getCount());
         return false;
     }
-    
+
     return true;
 }
 
@@ -90,7 +97,7 @@ static void printAllTensorNames(SafeTensorsReader& reader, const char* label)
 {
     List<String> names;
     reader.getTensorNames(names);
-    
+
     printf("\n=== Tensor names in %s (%lld tensors) ===\n", label, (long long)names.getCount());
     for (const auto& name : names)
     {
@@ -100,7 +107,8 @@ static void printAllTensorNames(SafeTensorsReader& reader, const char* label)
             printf("  %s: shape=[", name.getBuffer());
             for (int i = 0; i < info->shape.getRank(); i++)
             {
-                if (i > 0) printf(",");
+                if (i > 0)
+                    printf(",");
                 printf("%d", info->shape[i]);
             }
             printf("]\n");
@@ -124,24 +132,24 @@ static bool checkWeightExists(SafeTensorsReader& reader, const String& name, con
 static void verifyClipWeights(SafeTensorsReader& reader, const String& prefix)
 {
     printf("\nVerifying CLIP weights with prefix '%s'...\n", prefix.getBuffer());
-    
+
     List<String> expectedWeights;
-    
+
     // Embeddings
     expectedWeights.add(prefix + "embeddings.token_embedding.weight");
     expectedWeights.add(prefix + "embeddings.position_embedding.weight");
-    
+
     // 12 transformer layers
     for (int i = 0; i < 12; i++)
     {
         String layerPrefix = prefix + "encoder.layers." + String(i) + ".";
-        
+
         // Layer norms
         expectedWeights.add(layerPrefix + "layer_norm1.weight");
         expectedWeights.add(layerPrefix + "layer_norm1.bias");
         expectedWeights.add(layerPrefix + "layer_norm2.weight");
         expectedWeights.add(layerPrefix + "layer_norm2.bias");
-        
+
         // Self attention
         expectedWeights.add(layerPrefix + "self_attn.q_proj.weight");
         expectedWeights.add(layerPrefix + "self_attn.q_proj.bias");
@@ -151,18 +159,18 @@ static void verifyClipWeights(SafeTensorsReader& reader, const String& prefix)
         expectedWeights.add(layerPrefix + "self_attn.v_proj.bias");
         expectedWeights.add(layerPrefix + "self_attn.out_proj.weight");
         expectedWeights.add(layerPrefix + "self_attn.out_proj.bias");
-        
+
         // MLP
         expectedWeights.add(layerPrefix + "mlp.fc1.weight");
         expectedWeights.add(layerPrefix + "mlp.fc1.bias");
         expectedWeights.add(layerPrefix + "mlp.fc2.weight");
         expectedWeights.add(layerPrefix + "mlp.fc2.bias");
     }
-    
+
     // Final layer norm
     expectedWeights.add(prefix + "final_layer_norm.weight");
     expectedWeights.add(prefix + "final_layer_norm.bias");
-    
+
     int missingCount = 0;
     for (const auto& name : expectedWeights)
     {
@@ -172,7 +180,7 @@ static void verifyClipWeights(SafeTensorsReader& reader, const String& prefix)
             missingCount++;
         }
     }
-    
+
     if (missingCount == 0)
     {
         printf("  All %lld expected weights found.\n", (long long)expectedWeights.getCount());
@@ -186,10 +194,10 @@ static void verifyClipWeights(SafeTensorsReader& reader, const String& prefix)
 SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
 {
     printf("testCLIPEncoderSD15: Loading CLIP text encoder...\n");
-    
+
     // Load CLIP model weights
     String modelPath = getTestFilePath("test_data/clip_text_model.safetensors");
-    
+
     if (!File::exists(modelPath))
     {
         printf("  CLIP model not found at %s\n", modelPath.getBuffer());
@@ -197,17 +205,14 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
         printf("  testCLIPEncoderSD15: SKIPPED\n");
         return SLANG_OK;
     }
-    
+
     SafeTensorsReader reader;
     if (SLANG_FAILED(reader.load(modelPath)))
     {
         printf("  Failed to load CLIP model from %s\n", modelPath.getBuffer());
         return SLANG_FAIL;
     }
-    
-    // Debug: print all tensor names
-    printAllTensorNames(reader, "clip_text_model.safetensors");
-    
+
     // Determine the weight prefix by checking first tensor name
     List<String> tensorNames;
     reader.getTensorNames(tensorNames);
@@ -221,14 +226,14 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
     {
         printf("  Using weight prefix: '' (empty)\n");
     }
-    
+
     // Verify expected weights exist
     verifyClipWeights(reader, clipPrefix);
-    
+
     // Create encoder
     printf("  Creating CLIP encoder...\n");
     CLIPTextEncoder encoder(ctx);
-    
+
     // Load parameters
     printf("  Loading parameters...\n");
     if (SLANG_FAILED(encoder.loadParams(reader, clipPrefix)))
@@ -237,7 +242,7 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
         printf("  testCLIPEncoderSD15: FAILED\n");
         return SLANG_FAIL;
     }
-    
+
     // Load test input
     String inputPath = getTestFilePath("test_data/clip_input_tokens.bin");
     List<float> inputTokens;
@@ -248,42 +253,52 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
         printf("  testCLIPEncoderSD15: SKIPPED\n");
         return SLANG_OK;
     }
-    
+
     int batchSize = 1;
     int seqLen = 77;
-    
+
     if (inputTokens.getCount() != (Index)(batchSize * seqLen))
     {
-        printf("  Input size mismatch: got %lld, expected %d\n",
-            (long long)inputTokens.getCount(), batchSize * seqLen);
+        printf(
+            "  Input size mismatch: got %lld, expected %d\n",
+            (long long)inputTokens.getCount(),
+            batchSize * seqLen);
         return SLANG_FAIL;
     }
-    
+
     // Create input tensor
     auto inputTensor = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, seqLen), inputTokens, "InputTokens");
-    
+        ElementType::Float32,
+        Shape(batchSize, seqLen),
+        inputTokens,
+        "InputTokens");
+
     // Allocate output
     auto outputTensor = encoder.allocateResultBuffer(ElementType::Float32, seqLen, batchSize);
-    
-    // Execute
+
+    // Run encoder
     printf("  Running encoder...\n");
-    auto task = ctx->createTask();
-    encoder.queueExecute(task, outputTensor, inputTensor->getView(), seqLen, batchSize);
-    task.execute();
-    
+    {
+        auto task = ctx->createTask();
+        encoder.queueExecute(task, outputTensor, inputTensor->getView(), seqLen, batchSize);
+        task.execute();
+    }
+    printf("  Encoder done.\n");
+
     // Read output
     auto output = ctx->readBuffer<float>(outputTensor);
-    
+
     // Verify shape
     int expectedSize = batchSize * seqLen * encoder.hiddenSize;
     if (output.getCount() != expectedSize)
     {
-        printf("  Output size mismatch: got %lld, expected %d\n",
-            (long long)output.getCount(), expectedSize);
+        printf(
+            "  Output size mismatch: got %lld, expected %d\n",
+            (long long)output.getCount(),
+            expectedSize);
         return SLANG_FAIL;
     }
-    
+
     // Check against reference if available
     String refPath = getTestFilePath("test_data/clip_output.bin");
     List<float> expectedOutput;
@@ -298,7 +313,7 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
     else
     {
         printf("  No reference output found, skipping numerical validation\n");
-        
+
         // Print first few output values for inspection
         printf("  First 8 output values: ");
         for (int i = 0; i < 8 && i < output.getCount(); i++)
@@ -307,8 +322,7 @@ SlangResult testCLIPEncoderSD15(InferencingContext* ctx)
         }
         printf("\n");
     }
-    
+
     printf("testCLIPEncoderSD15: PASSED\n");
     return SLANG_OK;
 }
-

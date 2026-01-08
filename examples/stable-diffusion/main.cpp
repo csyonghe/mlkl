@@ -54,9 +54,11 @@ struct StableDiffusionProgram : public TestBase
 
         ctx = new InferencingContext(device);
 
+
         // Run CLIP encoder tests
         printf("\n--- CLIP Encoder Tests ---\n");
         SLANG_RETURN_ON_FAIL(testCLIPEncoderSD15(ctx));
+
 
         // Run VAE decoder tests
         printf("--- VAE Decoder Tests ---\n");
@@ -69,7 +71,6 @@ struct StableDiffusionProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testVAEAttentionBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEUpBlock(ctx));
         SLANG_RETURN_ON_FAIL(testVAEDecoderSmall(ctx));
-
         printf("\n=== All tests passed! ===\n");
         return SLANG_OK;
     }

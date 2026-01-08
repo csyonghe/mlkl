@@ -126,23 +126,20 @@ class CLIPTextEncoder : public RefObject
 public:
     RefPtr<InferencingContext> ctx;
     
-    // Fused embeddings: gather(tokenTable, tokenIds) + gather(posTable, posIds)
-    // This replaces 3 separate kernels with 1 fused kernel
-    RefPtr<ElementwiseKernel> embeddingKernel;
-    Expr tokenTableExpr;   // Token embedding table [vocab, hidden]
-    Expr tokenIdsExpr;     // Token ID indices
-    Expr posTableExpr;     // Position embedding table [maxSeq, hidden]
-    Expr posIdsExpr;       // Position ID indices
-    
-    // Embedding table buffers (loaded from SafeTensors)
-    ComPtr<rhi::IBuffer> tokenTableBuffer;
-    ComPtr<rhi::IBuffer> posTableBuffer;
+    // Embeddings (using separate kernels for now - simpler and safer)
+    RefPtr<GatherKernel> tokenEmbedding;     // [vocab_size, hidden_size]
+    RefPtr<GatherKernel> positionEmbedding;  // [max_seq_len, hidden_size]
+    RefPtr<ElementwiseKernel> embeddingAdd;  // token + position
     
     // Transformer layers
     List<RefPtr<CLIPTransformerBlock>> layers;
     
     // Final layer norm
     RefPtr<LayerNormKernel> finalLayerNorm;
+    
+    // Pre-computed position IDs (0, 1, 2, ..., maxSeqLen-1)
+    // Stored as member to ensure it persists for async GPU execution
+    RefPtr<Tensor> positionIdsTensor;
     
     // Configuration
     int vocabSize;
