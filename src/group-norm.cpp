@@ -1,4 +1,5 @@
 #include "group-norm.h"
+
 #include "safetensors-reader.h"
 
 GroupNormKernel::GroupNormKernel(
@@ -29,7 +30,8 @@ GroupNormKernel::GroupNormKernel(
         elemTypeName,
         inputProgram.getSlangTypeName(elementType),
         sinkExpr.node->getSlangTypeName(elementType)};
-    normalizePipeline = context->createComputePipeline("groupNormNormalize", makeArrayView(normalizeArgs));
+    normalizePipeline =
+        context->createComputePipeline("groupNormNormalize", makeArrayView(normalizeArgs));
 }
 
 void GroupNormKernel::validateTensorElementType(const TensorView& tv, const char* name) const
@@ -97,10 +99,7 @@ TensorView GroupNormKernel::allocateResultBuffer(
         "groupnorm_output");
 }
 
-void GroupNormKernel::queueExecute(
-    InferencingTask& task,
-    TensorView output,
-    const EvalContext& ctx)
+void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx)
 {
     // Validate element types
     validateTensorElementType(output, "output");
@@ -124,7 +123,8 @@ void GroupNormKernel::queueExecute(
 
     if (channels != numChannels)
     {
-        throw std::runtime_error("GroupNormKernel: Input channels don't match configured channels.");
+        throw std::runtime_error(
+            "GroupNormKernel: Input channels don't match configured channels.");
     }
 
     int channelsPerGroup = channels / numGroups;
@@ -193,10 +193,7 @@ void GroupNormKernel::queueExecute(
     }
 }
 
-void GroupNormKernel::queueExecute(
-    InferencingTask& task,
-    TensorView output,
-    TensorView input)
+void GroupNormKernel::queueExecute(InferencingTask& task, TensorView output, TensorView input)
 {
     EvalContext ctx;
     for (auto bufferNode : inputProgram.bufferNodes)

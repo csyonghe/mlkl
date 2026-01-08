@@ -3,6 +3,7 @@
 #include "core/slang-basic.h"
 #include "core/slang-crypto.h"
 #include "external/slang-rhi/include/slang-rhi.h"
+#include "half.h"
 #include "slang-com-ptr.h"
 #include "slang.h"
 #include "stack-allocator.h"
@@ -229,29 +230,3 @@ inline void logInfo(const char* format, TArgs... args)
     ((void)args, ...);
 }
 
-inline unsigned short floatToHalf(float val)
-{
-    uint32_t x = 0;
-    memcpy(&x, &val, sizeof(float));
-
-    unsigned short bits = (x >> 16) & 0x8000;
-    unsigned short m = (x >> 12) & 0x07ff;
-    unsigned int e = (x >> 23) & 0xff;
-    if (e < 103)
-        return bits;
-    if (e > 142)
-    {
-        bits |= 0x7c00u;
-        bits |= e == 255 && (x & 0x007fffffu);
-        return bits;
-    }
-    if (e < 113)
-    {
-        m |= 0x0800u;
-        bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1);
-        return bits;
-    }
-    bits |= ((e - 112) << 10) | (m >> 1);
-    bits += m & 1;
-    return bits;
-}

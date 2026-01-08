@@ -1,4 +1,5 @@
 #include "tensor.h"
+#include "half.h"
 
 using namespace Slang;
 
@@ -139,30 +140,6 @@ TensorView TensorView::ensureRank(int rank) const
     return TensorView(bufferView, elementType, newShape);
 }
 
-// IEEE 754 half-precision format conversion
-static uint16_t floatToHalfBits(float f)
-{
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(float));
-
-    uint32_t sign = (bits >> 16) & 0x8000;
-    int32_t exponent = ((bits >> 23) & 0xFF) - 127 + 15;
-    uint32_t mantissa = bits & 0x7FFFFF;
-
-    if (exponent <= 0)
-    {
-        // Underflow to zero
-        return (uint16_t)sign;
-    }
-    else if (exponent >= 31)
-    {
-        // Overflow to infinity
-        return (uint16_t)(sign | 0x7C00);
-    }
-
-    return (uint16_t)(sign | (exponent << 10) | (mantissa >> 13));
-}
-
 List<uint8_t> convertFloatData(const float* data, size_t count, ElementType targetType)
 {
     List<uint8_t> result;
@@ -181,7 +158,7 @@ List<uint8_t> convertFloatData(const float* data, size_t count, ElementType targ
             uint16_t* dst = (uint16_t*)result.getBuffer();
             for (size_t i = 0; i < count; i++)
             {
-                dst[i] = floatToHalfBits(data[i]);
+                dst[i] = floatToHalf(data[i]);
             }
             break;
         }

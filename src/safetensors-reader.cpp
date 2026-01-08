@@ -1,74 +1,9 @@
 #include "safetensors-reader.h"
 
 #include "core/slang-io.h"
+#include "half.h"
+#include "inference-context.h"
 #include "json.h"
-
-// Convert half-precision float (F16) to single-precision float (F32)
-static float halfToFloat(uint16_t h)
-{
-    uint32_t sign = (h & 0x8000) << 16;
-    uint32_t exponent = (h >> 10) & 0x1F;
-    uint32_t mantissa = h & 0x3FF;
-
-    if (exponent == 0)
-    {
-        // Zero or denormalized
-        if (mantissa == 0)
-        {
-            // Zero
-            uint32_t result = sign;
-            return *reinterpret_cast<float*>(&result);
-        }
-        else
-        {
-            // Denormalized - normalize it
-            while ((mantissa & 0x400) == 0)
-            {
-                mantissa <<= 1;
-                exponent--;
-            }
-            exponent++;
-            mantissa &= 0x3FF;
-        }
-    }
-    else if (exponent == 31)
-    {
-        // Infinity or NaN
-        uint32_t result = sign | 0x7F800000 | (mantissa << 13);
-        return *reinterpret_cast<float*>(&result);
-    }
-
-    // Normalized number
-    exponent = exponent + (127 - 15);
-    mantissa = mantissa << 13;
-
-    uint32_t result = sign | (exponent << 23) | mantissa;
-    return *reinterpret_cast<float*>(&result);
-}
-
-// IEEE 754 half-precision format conversion (F32 -> F16)
-static uint16_t floatToHalf(float f)
-{
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(float));
-
-    uint32_t sign = (bits >> 16) & 0x8000;
-    int32_t exponent = ((bits >> 23) & 0xFF) - 127 + 15;
-    uint32_t mantissa = bits & 0x7FFFFF;
-
-    if (exponent <= 0)
-    {
-        // Underflow to zero
-        return (uint16_t)sign;
-    }
-    else if (exponent >= 31)
-    {
-        // Overflow to infinity
-        return (uint16_t)(sign | 0x7C00);
-    }
-
-    return (uint16_t)(sign | (exponent << 10) | (mantissa >> 13));
-}
 
 // Convert SafeTensors dtype string to ElementType
 static bool parseElementType(UnownedStringSlice dtypeStr, ElementType& outType)
@@ -156,10 +91,7 @@ static float elementToFloat(const void* src, ElementType srcType)
     case ElementType::Float16:
         return halfToFloat(*reinterpret_cast<const uint16_t*>(src));
     case ElementType::BFloat16:
-        {
-            uint32_t f32Bits = uint32_t(*reinterpret_cast<const uint16_t*>(src)) << 16;
-            return *reinterpret_cast<const float*>(&f32Bits);
-        }
+        return bfloat16ToFloat(*reinterpret_cast<const uint16_t*>(src));
     default:
         return 0.0f;
     }
@@ -177,11 +109,7 @@ static void floatToElement(float value, void* dst, ElementType dstType)
         *reinterpret_cast<uint16_t*>(dst) = floatToHalf(value);
         break;
     case ElementType::BFloat16:
-        {
-            uint32_t f32Bits;
-            memcpy(&f32Bits, &value, sizeof(float));
-            *reinterpret_cast<uint16_t*>(dst) = (uint16_t)(f32Bits >> 16);
-        }
+        *reinterpret_cast<uint16_t*>(dst) = floatToBFloat16(value);
         break;
     default:
         break;
@@ -327,7 +255,7 @@ SlangResult SafeTensorsReader::readTensor(
     const SafeTensorInfo* info = getTensorInfo(name);
     if (!info)
     {
-        printf(
+        logInfo(
             "warning: tensor '%.*s' not found in weights file\n",
             (int)name.getLength(),
             name.begin());
