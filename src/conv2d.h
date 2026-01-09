@@ -1,9 +1,19 @@
 #pragma once
 
+#include "batch-gemm.h"
 #include "elementwise.h"
 #include "kernel-base.h"
 
 class SafeTensorsReader;
+
+// Convolution algorithm selection
+enum class ConvolutionAlgorithm
+{
+    Auto,   // Automatically select based on input size (uses Gemm)
+    Flat,   // Flat kernel (good for small spatial sizes)
+    Tiled,  // Tiled kernel (good for large spatial sizes)
+    Gemm,   // GEMM-style tiled conv (caches both weights and input in shared mem)
+};
 
 // 2D Convolution Kernel
 // - Weights layout: [InChannels, KernelSize, KernelSize, OutChannels]
@@ -43,6 +53,7 @@ private:
     ComPtr<rhi::IComputePipeline> tilePipeline;
     ComPtr<rhi::IComputePipeline> flatPipeline;
     ComPtr<rhi::IComputePipeline> flatWaveReducePipeline;
+    ComPtr<rhi::IComputePipeline> gemmPipeline;
 
     InferencingContext* context;
     ElementType elementType;
@@ -139,23 +150,43 @@ public:
         int padding,
         int batchSize);
 
-    void queueExecute(InferencingTask& task, EvalContext& evalCtx, TensorView output, int padding);
+    void queueExecute(
+        InferencingTask& task,
+        EvalContext& evalCtx,
+        TensorView output,
+        int padding,
+        ConvolutionAlgorithm algorithm = ConvolutionAlgorithm::Auto);
 
     void queueExecute(
         InferencingTask& task,
         TensorView output,
         const Dictionary<Expr, InputInfo>& inputs,
-        int padding)
+        int padding,
+        ConvolutionAlgorithm algorithm = ConvolutionAlgorithm::Auto)
     {
         EvalContext ctx = makeEvalContext(inputs);
-        return queueExecute(task, ctx, output, padding);
+        return queueExecute(task, ctx, output, padding, algorithm);
     }
 
     void queueExecute(
         InferencingTask& task,
         TensorView output,
         const std::initializer_list<InputInfo>& inputs,
-        int padding);
+        int padding,
+        ConvolutionAlgorithm algorithm = ConvolutionAlgorithm::Auto);
 
-    void queueExecute(InferencingTask& task, TensorView output, TensorView inputImage, int padding);
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
+        TensorView inputImage,
+        int padding,
+        ConvolutionAlgorithm algorithm = ConvolutionAlgorithm::Auto);
+
+private:
+    // GEMM-style tiled convolution (called when algorithm == Gemm)
+    void executeGemmConv(
+        InferencingTask& task,
+        EvalContext& ctx,
+        TensorView output,
+        int padding);
 };

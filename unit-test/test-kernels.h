@@ -118,6 +118,15 @@ SlangResult testCrossAttentionFull(InferencingContext* ctx);
 SlangResult testConv2D(InferencingContext* ctx);
 SlangResult testConv2DHalf(InferencingContext* ctx);
 SlangResult testConv2DInt(InferencingContext* ctx);
+SlangResult testConv2DGemmWithOutputExpr(InferencingContext* ctx);
+SlangResult testConv2DGemmBatchedHalfFused(InferencingContext* ctx);
+SlangResult testConv2DGemmMultipleSizes(InferencingContext* ctx);
+SlangResult testIm2ColExpressionOnly(InferencingContext* ctx);
+SlangResult testConv2DOutputSink(InferencingContext* ctx);
+SlangResult testConv2DWithPermuteSink(InferencingContext* ctx);
+SlangResult testConv2DWithFusedResidual(InferencingContext* ctx);
+SlangResult testConv2DGemm(InferencingContext* ctx);
+SlangResult testConv2DGemmBatched(InferencingContext* ctx);
 
 // Defined in test-transposed-conv2d.cpp
 SlangResult testTransposedConv2D(InferencingContext* ctx);

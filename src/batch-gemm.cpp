@@ -98,6 +98,12 @@ void BatchGemmKernel::queueExecute(
     SinkExprEvalContext sinkExprCtx;
     sinkExprCtx.outputBuffer = output;
     sinkExprCtx.logicalShape = Shape(batchSize, M, N);
+    sinkExprCtx.inputs = ctx.inputs; // Pass inputs for uniformConstant resolution in sink
+
+    // Create context for output expression with kernel output shape
+    // This is needed for broadcast(x, kernelOutput()) to resolve correctly
+    EvalContext outCtx = ctx;
+    outCtx.kernelOutputShape = Shape(batchSize, M, N);
 
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
@@ -107,7 +113,7 @@ void BatchGemmKernel::queueExecute(
     programB.pack(writer, ctx);
     programC.pack(writer, ctx);
     sinkExpr.node->pack(writer, sinkExprCtx);
-    programOut.pack(writer, ctx);
+    programOut.pack(writer, outCtx);
     writer.write<uint32_t>((uint32_t)M);
     writer.write<uint32_t>((uint32_t)N);
     writer.write<uint32_t>((uint32_t)K);

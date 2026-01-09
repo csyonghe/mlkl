@@ -512,20 +512,20 @@ String SliceNode::getSlangTypeName(ElementType elemType) const
 Shape SliceNode::resolveShape(const EvalContext& ctx) const
 {
     Shape innerShape = inner.node->resolveShape(ctx);
-    
+
     // Handle negative axis
     int trueAxis = axis;
     if (trueAxis < 0)
         trueAxis += innerShape.getRank();
-    
+
     if (trueAxis < 0 || trueAxis >= innerShape.getRank())
         throw std::runtime_error("Slice: Invalid axis");
-    
+
     // Validate bounds
     int dimSize = innerShape[trueAxis];
     if (start < 0 || start >= dimSize || start + size > dimSize)
         throw std::runtime_error("Slice: Out of bounds");
-    
+
     // Build output shape with sliced dimension
     Shape result;
     for (int i = 0; i < innerShape.getRank(); i++)
@@ -546,13 +546,13 @@ void SliceNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
     // Pack inner program
     innerProgram->pack(writer, ctx);
-    
+
     // Resolve true axis
     Shape innerShape = inner.node->resolveShape(ctx);
     int trueAxis = axis;
     if (trueAxis < 0)
         trueAxis += innerShape.getRank();
-    
+
     // Pack axis and start offset
     writer.write((uint32_t)trueAxis);
     writer.write((uint32_t)start);
@@ -580,15 +580,15 @@ String DuplicateNode::getSlangTypeName(ElementType elemType) const
 Shape DuplicateNode::resolveShape(const EvalContext& ctx) const
 {
     Shape innerShape = inner.node->resolveShape(ctx);
-    
+
     // Handle negative dim
     int trueDim = dim;
     if (trueDim < 0)
         trueDim += innerShape.getRank();
-    
+
     if (trueDim < 0 || trueDim >= innerShape.getRank())
         throw std::runtime_error("Duplicate: Invalid dimension");
-    
+
     // Build output shape with duplicated dimension
     Shape result;
     for (int i = 0; i < innerShape.getRank(); i++)
@@ -609,13 +609,13 @@ void DuplicateNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 {
     // Pack inner program
     innerProgram->pack(writer, ctx);
-    
+
     // Resolve true dim
     Shape innerShape = inner.node->resolveShape(ctx);
     int trueDim = dim;
     if (trueDim < 0)
         trueDim += innerShape.getRank();
-    
+
     // Compute stride for the duplicated dimension
     // For input [1, H, W, C] with dim=0, the stride is H*W*C
     int stride = 1;
@@ -623,7 +623,7 @@ void DuplicateNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
     {
         stride *= innerShape[i];
     }
-    
+
     // Pack: dim, originalSize, stride
     writer.write((uint32_t)trueDim);
     writer.write((uint32_t)innerShape[trueDim]);
@@ -683,6 +683,176 @@ void UpsampleNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
 Expr upsample(Expr inner, uint32_t factor, uint32_t heightDim, uint32_t widthDim)
 {
     return new UpsampleNode(inner, factor, heightDim, widthDim);
+}
+
+// ============================================================================
+// Im2ColNode Implementation
+// ============================================================================
+
+// Helper to resolve an Expr to uint32_t (works for both constant and uniformConstant)
+static uint32_t resolveExprToUint(Expr expr, const EvalContext& ctx)
+{
+    // Try as ConstantNode first
+    if (auto* constNode = dynamic_cast<ConstantNode*>(expr.node.Ptr()))
+    {
+        return (uint32_t)constNode->getValue();
+    }
+
+    // Try as UniformConstantNode (lookup in context)
+    if (auto* info = ctx.inputs.tryGetValue(expr.node))
+    {
+        return (uint32_t)info->scalarValue;
+    }
+
+    throw std::runtime_error("Im2ColNode: Cannot resolve expression to uint32_t");
+}
+
+Im2ColNode::Im2ColNode(
+    Expr inner,
+    uint32_t kernelH,
+    uint32_t kernelW,
+    uint32_t strideH,
+    uint32_t strideW,
+    uint32_t inputC,
+    Expr padH,
+    Expr padW,
+    Expr inputH,
+    Expr inputW,
+    Expr outputH,
+    Expr outputW,
+    Expr batchSize)
+    : inner(inner)
+    , kernelH(kernelH)
+    , kernelW(kernelW)
+    , strideH(strideH)
+    , strideW(strideW)
+    , inputC(inputC)
+    , padHExpr(padH)
+    , padWExpr(padW)
+    , inputHExpr(inputH)
+    , inputWExpr(inputW)
+    , outputHExpr(outputH)
+    , outputWExpr(outputW)
+    , batchSizeExpr(batchSize)
+{
+    int regCounter = 0;
+    innerProgram = new ProgramNode();
+    *innerProgram = compileExprToProgram(inner, &regCounter);
+}
+
+String Im2ColNode::getSlangTypeName(ElementType elemType) const
+{
+    String elemTypeName = getSlangElementTypeName(elemType);
+    return StringBuilder() << "Im2Col<" << elemTypeName << ", "
+                           << innerProgram->getSlangTypeName(elemType) << ">";
+}
+
+Shape Im2ColNode::resolveShape(const EvalContext& ctx) const
+{
+    // Output shape is [1, K, N] where:
+    //   K = IC * KH * KW (reduction dimension for GEMM)
+    //   N = Batch * OH * OW (all batches and spatial positions flattened together)
+    //
+    // NOTE: The leading 1 is intentional and NOT the input batch size!
+    // We flatten the input batch dimension into the column dimension (N = Batch * OH * OW),
+    // so one large GEMM processes all batch elements together. This is more efficient than
+    // doing Batch separate smaller GEMMs. The batch index is recovered in the Slang eval()
+    // by decoding: n = col / (OH * OW).
+    //
+    // The leading 1 is just the GEMM batch dimension required by BatchGemmKernel's [B,K,N] API.
+    uint32_t kSize = inputC * kernelH * kernelW;
+    uint32_t oh = resolveExprToUint(outputHExpr, ctx);
+    uint32_t ow = resolveExprToUint(outputWExpr, ctx);
+    uint32_t batch = resolveExprToUint(batchSizeExpr, ctx);
+    uint32_t spatialSize = batch * oh * ow;
+    return Shape(1, kSize, spatialSize);
+}
+
+void Im2ColNode::pack(ParameterWriter& writer, const EvalContext& ctx) const
+{
+    // 1. Pack inner program
+    innerProgram->pack(writer, ctx);
+
+    // 2. Pack im2col parameters (fixed)
+    writer.write(kernelH);
+    writer.write(kernelW);
+    writer.write(strideH);
+    writer.write(strideW);
+
+    // 3. Pack variable parameters (resolved from Expr)
+    writer.write(resolveExprToUint(padHExpr, ctx));
+    writer.write(resolveExprToUint(padWExpr, ctx));
+    writer.write(resolveExprToUint(inputHExpr, ctx));
+    writer.write(resolveExprToUint(inputWExpr, ctx));
+    writer.write(inputC);
+    writer.write(resolveExprToUint(outputHExpr, ctx));
+    writer.write(resolveExprToUint(outputWExpr, ctx));
+    writer.write(resolveExprToUint(batchSizeExpr, ctx));
+}
+
+// Static variant: converts uint32_t to constant() expressions
+Expr im2col(
+    Expr inner,
+    uint32_t kernelH,
+    uint32_t kernelW,
+    uint32_t strideH,
+    uint32_t strideW,
+    uint32_t padH,
+    uint32_t padW,
+    uint32_t inputH,
+    uint32_t inputW,
+    uint32_t inputC,
+    uint32_t batchSize)
+{
+    uint32_t outputH = (inputH + 2 * padH - kernelH) / strideH + 1;
+    uint32_t outputW = (inputW + 2 * padW - kernelW) / strideW + 1;
+
+    return new Im2ColNode(
+        inner,
+        kernelH,
+        kernelW,
+        strideH,
+        strideW,
+        inputC,
+        constant((float)padH),
+        constant((float)padW),
+        constant((float)inputH),
+        constant((float)inputW),
+        constant((float)outputH),
+        constant((float)outputW),
+        constant((float)batchSize));
+}
+
+// Dynamic variant: accepts Expr directly
+Expr im2col(
+    Expr inner,
+    uint32_t kernelH,
+    uint32_t kernelW,
+    uint32_t strideH,
+    uint32_t strideW,
+    uint32_t inputC,
+    Expr padH,
+    Expr padW,
+    Expr inputH,
+    Expr inputW,
+    Expr outputH,
+    Expr outputW,
+    Expr batchSize)
+{
+    return new Im2ColNode(
+        inner,
+        kernelH,
+        kernelW,
+        strideH,
+        strideW,
+        inputC,
+        padH,
+        padW,
+        inputH,
+        inputW,
+        outputH,
+        outputW,
+        batchSize);
 }
 
 // =========================================================================
@@ -862,6 +1032,74 @@ void PartitionSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext&
     writer.write((uint32_t)dimIndex);
     int partitionSize = evalCtx.logicalShape[dimIndex] / (int)partitionCount;
     writer.write((uint32_t)partitionSize);
+}
+
+// --- Conv2DOutputSinkNode ---
+// Transforms [1, OC, N*OH*OW] → [N, OH, OW, OC]
+
+Conv2DOutputSinkNode::Conv2DOutputSinkNode(SinkExpr child, Expr outputH, Expr outputW)
+    : child(child), outputHExpr(outputH), outputWExpr(outputW)
+{
+}
+
+String Conv2DOutputSinkNode::getSlangTypeName(ElementType elemType) const
+{
+    return String("Conv2DOutputSink<") + getSlangElementTypeName(elemType) + ", " +
+           child.node->getSlangTypeName(elemType) + ">";
+}
+
+Shape Conv2DOutputSinkNode::resolvePhysicalShape(const Shape& logicalOutputShape) const
+{
+    // Logical shape: [1, OC, N*OH*OW]
+    // Physical shape: [N, OH, OW, OC]
+    // We can't compute this without knowing OH, OW, which are runtime values.
+    // For now, delegate to child - the actual shape resolution happens at pack time.
+    return child.node->resolvePhysicalShape(logicalOutputShape);
+}
+
+void Conv2DOutputSinkNode::pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const
+{
+    // Resolve OH, OW to compute the transformed shape
+    auto resolveUint = [&](Expr expr) -> uint32_t
+    {
+        if (auto* constNode = dynamic_cast<ConstantNode*>(expr.node.Ptr()))
+            return (uint32_t)constNode->getValue();
+        if (auto* info = evalCtx.inputs.tryGetValue(expr.node))
+            return (uint32_t)info->scalarValue;
+        throw std::runtime_error("Conv2DOutputSinkNode: Cannot resolve expression");
+    };
+
+    uint32_t outputH = resolveUint(outputHExpr);
+    uint32_t outputW = resolveUint(outputWExpr);
+
+    // Input logical shape: [1, OC, N*OH*OW]
+    // Output physical shape: [N, OH, OW, OC]
+    // Compute N from the flattened dimension
+    int oc = evalCtx.logicalShape[1];
+    int flattenedSpatial = evalCtx.logicalShape[2]; // N * OH * OW
+    int spatialSize = (int)(outputH * outputW);
+    int batchSize = flattenedSpatial / spatialSize;
+
+    // Create child context with transformed shape [N, OH, OW, OC]
+    SinkExprEvalContext childCtx = evalCtx;
+    childCtx.logicalShape = Shape(batchSize, (int)outputH, (int)outputW, oc);
+
+    // Pass down to child with transformed shape
+    child.node->pack(writer, childCtx);
+
+    // Write OH, OW for the shader
+    writer.write(outputH);
+    writer.write(outputW);
+}
+
+size_t Conv2DOutputSinkNode::getParameterAlignment() const
+{
+    return child.node->getParameterAlignment();
+}
+
+SinkExpr conv2DOutputSink(SinkExpr child, Expr outputH, Expr outputW)
+{
+    return new Conv2DOutputSinkNode(child, outputH, outputW);
 }
 
 // --- BinaryNode ---
@@ -1202,6 +1440,17 @@ void visitAllExpr(HashSet<ExprNode*>& visited, ExprNode* node, Func f)
     {
         visitAllExpr(visited, dup->inner.node, f);
     }
+    else if (auto im2col = dynamic_cast<Im2ColNode*>(node))
+    {
+        visitAllExpr(visited, im2col->inner.node, f);
+        visitAllExpr(visited, im2col->padHExpr.node, f);
+        visitAllExpr(visited, im2col->padWExpr.node, f);
+        visitAllExpr(visited, im2col->inputHExpr.node, f);
+        visitAllExpr(visited, im2col->inputWExpr.node, f);
+        visitAllExpr(visited, im2col->outputHExpr.node, f);
+        visitAllExpr(visited, im2col->outputWExpr.node, f);
+        visitAllExpr(visited, im2col->batchSizeExpr.node, f);
+    }
     else if (auto leaf = dynamic_cast<LeafNode*>(node))
     {
     }
@@ -1281,6 +1530,13 @@ void topoVisit(ExprNode* node, SSAGenContext& ctx)
         // Just re-compile if needed for proper register numbering
         dup->innerProgram = new ProgramNode();
         *dup->innerProgram = compileExprToProgram(dup->inner, ctx.globalRegCounter);
+    }
+    else if (auto im2col = dynamic_cast<Im2ColNode*>(node))
+    {
+        // Inner program is already compiled in the constructor
+        // Just re-compile if needed for proper register numbering
+        im2col->innerProgram = new ProgramNode();
+        *im2col->innerProgram = compileExprToProgram(im2col->inner, ctx.globalRegCounter);
     }
     ctx.visited.insert(node);
     ctx.topoOrder.add(node);
@@ -1529,6 +1785,212 @@ bool containsKernelOutputNode(const Expr& expr)
                 found = true;
         });
     return found;
+}
+
+// ============================================================================
+// ExprTransformer implementation
+// ============================================================================
+
+Expr ExprTransformer::transform(const Expr& expr)
+{
+    if (!expr.node)
+        return expr;
+    return dispatch(expr.node);
+}
+
+Expr ExprTransformer::dispatch(ExprNode* node)
+{
+    if (!node)
+        return Expr();
+    
+    // Check cache (handles DAG structure)
+    if (auto cached = cache.tryGetValue(node))
+        return *cached;
+    
+    // Use visitor pattern - each node calls back to the appropriate visit method
+    // This ensures compile-time checking: new nodes without accept() won't compile
+    Expr result = node->accept(*this);
+    
+    cache[node] = result;
+    return result;
+}
+
+// Leaf nodes: return as-is by default
+Expr ExprTransformer::visitBuffer(BufferNode* node) { return Expr(node); }
+Expr ExprTransformer::visitConstant(ConstantNode* node) { return Expr(node); }
+Expr ExprTransformer::visitUniformConstant(UniformConstantNode* node) { return Expr(node); }
+Expr ExprTransformer::visitKernelOutput(KernelOutputNode* node) { return Expr(node); }
+
+// Binary node
+Expr ExprTransformer::visitBinary(BinaryNode* node)
+{
+    Expr newLeft = transform(node->left);
+    Expr newRight = transform(node->right);
+    
+    if (newLeft.node == node->left.node && newRight.node == node->right.node)
+        return Expr(node);
+    
+    return Expr(new BinaryNode(newLeft, newRight, node->op));
+}
+
+// Unary node
+Expr ExprTransformer::visitUnary(UnaryNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return Expr(new UnaryNode(newInner, node->op));
+}
+
+// Broadcast node
+Expr ExprTransformer::visitBroadcast(BroadcastNode* node)
+{
+    Expr newInner = transform(node->inner);
+    Expr newTarget = transform(node->targetShapeOf);
+    
+    if (newInner.node == node->inner.node && newTarget.node == node->targetShapeOf.node)
+        return Expr(node);
+    
+    return broadcast(newInner, newTarget);
+}
+
+// Permute node
+Expr ExprTransformer::visitPermute(PermuteNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return permute(newInner, node->dims.getArrayView());
+}
+
+// Transpose node
+Expr ExprTransformer::visitTranspose(TransposeNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return transpose(newInner, node->dim0, node->dim1);
+}
+
+// Concat node
+Expr ExprTransformer::visitConcat(ConcatNode* node)
+{
+    Expr newLeft = transform(node->left);
+    Expr newRight = transform(node->right);
+    Expr newAxis = transform(node->axis);
+    
+    if (newLeft.node == node->left.node && 
+        newRight.node == node->right.node &&
+        newAxis.node == node->axis.node)
+        return Expr(node);
+    
+    return concat(newLeft, newRight, newAxis);
+}
+
+// Slice node
+Expr ExprTransformer::visitSlice(SliceNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return slice(newInner, node->axis, node->start, node->size);
+}
+
+// Gather node
+Expr ExprTransformer::visitGather(GatherNode* node)
+{
+    Expr newTable = transform(node->table);
+    Expr newIndices = transform(node->indices);
+    
+    if (newTable.node == node->table.node && newIndices.node == node->indices.node)
+        return Expr(node);
+    
+    return gather(newTable, newIndices);
+}
+
+// Upsample node
+Expr ExprTransformer::visitUpsample(UpsampleNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return upsample(newInner, node->factor, node->heightDim, node->widthDim);
+}
+
+// Duplicate node
+Expr ExprTransformer::visitDuplicate(DuplicateNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return duplicate(newInner, node->dim, node->times);
+}
+
+// Im2Col node
+Expr ExprTransformer::visitIm2Col(Im2ColNode* node)
+{
+    Expr newInner = transform(node->inner);
+    
+    if (newInner.node == node->inner.node)
+        return Expr(node);
+    
+    return im2col(newInner, node->kernelH, node->kernelW, node->strideH, node->strideW,
+                  node->inputC, node->padHExpr, node->padWExpr, node->inputHExpr, node->inputWExpr,
+                  node->outputHExpr, node->outputWExpr, node->batchSizeExpr);
+}
+
+// ============================================================================
+// accept() implementations for visitor pattern
+// ============================================================================
+
+Expr BufferNode::accept(ExprTransformer& visitor) { return visitor.visitBuffer(this); }
+Expr ConstantNode::accept(ExprTransformer& visitor) { return visitor.visitConstant(this); }
+Expr UniformConstantNode::accept(ExprTransformer& visitor) { return visitor.visitUniformConstant(this); }
+Expr KernelOutputNode::accept(ExprTransformer& visitor) { return visitor.visitKernelOutput(this); }
+Expr BinaryNode::accept(ExprTransformer& visitor) { return visitor.visitBinary(this); }
+Expr UnaryNode::accept(ExprTransformer& visitor) { return visitor.visitUnary(this); }
+Expr BroadcastNode::accept(ExprTransformer& visitor) { return visitor.visitBroadcast(this); }
+Expr PermuteNode::accept(ExprTransformer& visitor) { return visitor.visitPermute(this); }
+Expr TransposeNode::accept(ExprTransformer& visitor) { return visitor.visitTranspose(this); }
+Expr GatherNode::accept(ExprTransformer& visitor) { return visitor.visitGather(this); }
+Expr ConcatNode::accept(ExprTransformer& visitor) { return visitor.visitConcat(this); }
+Expr SliceNode::accept(ExprTransformer& visitor) { return visitor.visitSlice(this); }
+Expr DuplicateNode::accept(ExprTransformer& visitor) { return visitor.visitDuplicate(this); }
+Expr UpsampleNode::accept(ExprTransformer& visitor) { return visitor.visitUpsample(this); }
+Expr Im2ColNode::accept(ExprTransformer& visitor) { return visitor.visitIm2Col(this); }
+
+// ============================================================================
+// KernelOutput substitution using ExprTransformer
+// ============================================================================
+
+class KernelOutputSubstituter : public ExprTransformer
+{
+    Expr replacement;
+public:
+    KernelOutputSubstituter(const Expr& r) : replacement(r) {}
+    
+protected:
+    Expr visitKernelOutput(KernelOutputNode*) override
+    {
+        return replacement;
+    }
+};
+
+Expr substituteKernelOutput(const Expr& expr, const Expr& replacement)
+{
+    return KernelOutputSubstituter(replacement).transform(expr);
 }
 
 bool isValidOutputExpr(const Expr& expr)

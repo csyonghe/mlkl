@@ -56,6 +56,14 @@ Conv2DKernel::Conv2DKernel(
     flatPipeline = context->createComputePipeline("flatConvolution", makeArrayView(flatArgs));
     flatWaveReducePipeline =
         context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
+
+    // ========================================================================
+    // Create GEMM-style tiled convolution (for ConvolutionAlgorithm::Gemm)
+    // ========================================================================
+    // This kernel caches both weights AND input in shared memory for maximum reuse.
+    // Uses the same ConvolutionParams struct as tiledConvolution/flatConvolution.
+    // Note: tileSize is included for API consistency but not used by gemmConvolution.
+    gemmPipeline = context->createComputePipeline("gemmConvolution", makeArrayView(specArgs));
 }
 
 void Conv2DKernel::validateTensorElementType(const TensorView& tv, const char* name) const
@@ -303,7 +311,8 @@ void Conv2DKernel::queueExecute(
     InferencingTask& task,
     EvalContext& ctx,
     TensorView output,
-    int padding)
+    int padding,
+    ConvolutionAlgorithm algorithm)
 {
     // Validate element types
     validateTensorElementType(output, "output");
@@ -326,8 +335,29 @@ void Conv2DKernel::queueExecute(
     int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
     int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
 
+    int totalOutputValues = outputWidth * outputHeight * outChannels;
+
+    // Determine which algorithm to use
+    ConvolutionAlgorithm effectiveAlgorithm = algorithm;
+    if (algorithm == ConvolutionAlgorithm::Auto)
+    {
+        // Use GEMM-style tiled convolution for best performance
+        // It caches both weights and input in shared memory
+        effectiveAlgorithm = ConvolutionAlgorithm::Gemm;
+    }
+
+    // GEMM-style tiled convolution (caches both weights and input)
+    if (effectiveAlgorithm == ConvolutionAlgorithm::Gemm)
+    {
+        executeGemmConv(task, ctx, output, padding);
+        return;
+    }
+
+    // Standard tiled/flat kernels
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
+    // Set kernelOutputShape for outputExpr to resolve kernelOutput() shape
+    ctx.kernelOutputShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
     inputProgram.pack(writer, ctx);
     outputProgram.pack(writer, ctx);
 
@@ -344,39 +374,31 @@ void Conv2DKernel::queueExecute(
     writer.write<int>(outputWidth);
     writer.write<int>(outputHeight);
     writer.write<int>(padding);
-    writer.write<int>(batchSize); // Set Batch Size
+    writer.write<int>(batchSize);
     writer.finish();
 
-    int totalOutputValues = outputWidth * outputHeight * outChannels;
-    // For dispatch calculations, we multiply total work by batch size where linear indexing is
-    // used.
-
-    if (outputWidth * outputHeight <= 16 && inChannels >= 32)
+    if (effectiveAlgorithm == ConvolutionAlgorithm::Flat)
     {
-        // FlatWaveReduce
-        // Thread Group (256) handles a contiguous chunk of (Batch * Pixel * Channel)
-        // Global Linear Index covers everything.
-        int totalWorkItems = totalOutputValues * batchSize;
-
-        int valuesPerBlock = 256 / 32; // Each warp takes 1 item
-        int numGroups = (totalWorkItems + valuesPerBlock - 1) / valuesPerBlock;
-
-        task.dispatchKernel(flatWaveReducePipeline, numGroups, 1, 1, paramData);
+        if (outputWidth * outputHeight <= 16 && inChannels >= 32)
+        {
+            // FlatWaveReduce for very small spatial sizes
+            int totalWorkItems = totalOutputValues * batchSize;
+            int valuesPerBlock = 256 / 32;
+            int numGroups = (totalWorkItems + valuesPerBlock - 1) / valuesPerBlock;
+            task.dispatchKernel(flatWaveReducePipeline, numGroups, 1, 1, paramData);
+        }
+        else
+        {
+            // Standard Flat Kernel
+            int totalWorkItems = totalOutputValues * batchSize;
+            int numGroups = (totalWorkItems + 255) / 256;
+            task.dispatchKernel(flatPipeline, numGroups, 1, 1, paramData);
+        }
     }
-    else if (outputWidth * outputHeight <= 1024)
+    else // Tiled
     {
-        // Flat Kernel
-        int totalWorkItems = totalOutputValues * batchSize;
-        int numGroups = (totalWorkItems + 255) / 256;
-        task.dispatchKernel(flatPipeline, numGroups, 1, 1, paramData);
-    }
-    else
-    {
-        // Tiled Kernel
         static const int batchOutChannels = 32;
         int zBlocksPerImage = (outChannels + batchOutChannels - 1) / batchOutChannels;
-
-        // Z Dimension now handles (Channels * Batches)
         int totalZBlocks = zBlocksPerImage * batchSize;
 
         task.dispatchKernel(
@@ -392,7 +414,8 @@ void Conv2DKernel::queueExecute(
     InferencingTask& task,
     TensorView output,
     const std::initializer_list<InputInfo>& inputs,
-    int padding)
+    int padding,
+    ConvolutionAlgorithm algorithm)
 {
     EvalContext ctx;
     auto iter = inputs.begin();
@@ -406,14 +429,15 @@ void Conv2DKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     for (auto bufferNode : outputProgram.bufferNodes)
         ctx.inputs.add(bufferNode, consume());
-    queueExecute(task, ctx, output, padding);
+    queueExecute(task, ctx, output, padding, algorithm);
 }
 
 void Conv2DKernel::queueExecute(
     InferencingTask& task,
     TensorView output,
     TensorView inputImage,
-    int padding)
+    int padding,
+    ConvolutionAlgorithm algorithm)
 {
     EvalContext ctx;
     if (inputProgram.bufferNodes.getCount() > 1)
@@ -428,5 +452,83 @@ void Conv2DKernel::queueExecute(
     {
         throw std::runtime_error("Conv2DKernel: kernel requires additional output buffers, use initializer_list overload.");
     }
-    queueExecute(task, ctx, output, padding);
+    queueExecute(task, ctx, output, padding, algorithm);
+}
+
+// ============================================================================
+// GEMM-style tiled convolution
+// ============================================================================
+// Uses shared memory for both weights and input for maximum data reuse.
+// Tile sizes defined in convolution.slang:
+//   GEMM_TILE_OH = 8, GEMM_TILE_OW = 8, GEMM_TILE_OC = 32, GEMM_TILE_IC = 8
+
+void Conv2DKernel::executeGemmConv(
+    InferencingTask& task,
+    EvalContext& ctx,
+    TensorView output,
+    int padding)
+{
+    // Validate element types
+    validateTensorElementType(output, "output");
+
+    // Get input shape from the input expression
+    Shape inputShape = inputProgram.resolveShape(ctx);
+    if (inputShape.getRank() != 4)
+        throw std::runtime_error("Conv2DKernel: Input shape must be [B, H, W, C].");
+
+    int batchSize = inputShape[0];
+    int inputHeight = inputShape[1];
+    int inputWidth = inputShape[2];
+    int inputChannels = inputShape[3];
+
+    if (inputChannels != inChannels)
+        throw std::runtime_error("Conv2DKernel: Input channel count mismatch.");
+
+    // Compute output dimensions
+    int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
+    int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
+
+    // Pack parameters - same format as tiledConvolution (ConvolutionParams struct)
+    List<uint8_t> paramData;
+    ParameterWriter writer{paramData};
+
+    // Pack input/output expressions and sink
+    // Set kernelOutputShape for outputExpr to resolve kernelOutput() shape
+    ctx.kernelOutputShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+    inputProgram.pack(writer, ctx);
+    outputProgram.pack(writer, ctx);
+
+    SinkExprEvalContext sinkContext;
+    sinkContext.outputBuffer = output;
+    sinkContext.logicalShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+    sinkExpr.node->pack(writer, sinkContext);
+
+    // Pack weight/bias pointers (same layout as tiledConvolution)
+    writer.align(8);
+    writer.write(weightsBuffer->getDeviceAddress());           // weights (not used by gemmConv)
+    writer.write(biasesBuffer->getDeviceAddress());            // bias
+    writer.write(weightsTransposedBuffer->getDeviceAddress()); // weightsIOKK [OC, KH, KW, IC]
+
+    // Pack dimension parameters
+    writer.write<int>(inputWidth);
+    writer.write<int>(inputHeight);
+    writer.write<int>(outputWidth);
+    writer.write<int>(outputHeight);
+    writer.write<int>(padding);
+    writer.write<int>(batchSize);
+    writer.finish();
+
+    // Dispatch: tile sizes from convolution.slang
+    static const int GEMM_TILE_OH = 16;
+    static const int GEMM_TILE_OW = 16;
+    static const int GEMM_TILE_OC = 8;
+
+    int numOCTiles = (outChannels + GEMM_TILE_OC - 1) / GEMM_TILE_OC;
+
+    task.dispatchKernel(
+        gemmPipeline,
+        (outputWidth + GEMM_TILE_OW - 1) / GEMM_TILE_OW,
+        (outputHeight + GEMM_TILE_OH - 1) / GEMM_TILE_OH,
+        batchSize * numOCTiles,
+        paramData);
 }

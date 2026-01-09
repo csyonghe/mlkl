@@ -558,3 +558,208 @@ void flatTransposedConvolution<int kernelSize, int stride, int inChannels, int o
     outInput.value = sum;
     params.outputImage.store(outCoord, params.outputTransform.eval(outCoord, outInput));
 }
+
+// ============================================================================
+// GEMM-Style Optimized Convolution
+// ============================================================================
+// Key optimizations:
+// 1. Caches BOTH weights AND input in shared memory (unlike tiledConvolution which only caches input)
+// 2. Loads input tiles without im2col duplication - each pixel loaded once
+// 3. Full weight reuse across spatial positions
+//
+// Tile strategy:
+// - Outer loop over input channels (TILE_IC at a time)
+// - For each IC tile: load input region + weight slice, compute all kernel positions
+// - Each thread handles one (oh, ow) position, all output channels in tile
+
+static const int GEMM_TILE_OH = 16;   // Output spatial tile height
+static const int GEMM_TILE_OW = 16;   // Output spatial tile width
+static const int GEMM_TILE_OC = 8;    // Output channels per block (reduced for lower register pressure)
+static const int GEMM_TILE_IC = 8;    // Input channels per K-iteration
+
+// Dispatch: x = (outputW + GEMM_TILE_OW - 1) / GEMM_TILE_OW
+//           y = (outputH + GEMM_TILE_OH - 1) / GEMM_TILE_OH
+//           z = batchSize * ((outChannels + GEMM_TILE_OC - 1) / GEMM_TILE_OC)
+// Uses the same ConvolutionParams struct as tiledConvolution/flatConvolution
+[numthreads(GEMM_TILE_OW, GEMM_TILE_OH, 1)]
+void gemmConvolution<int tileSize, int kernelSize, int stride, int inChannels, int outChannels, T : ITensorElement, TInput : IExpr<T>, FOutput : IExpr<T>, TSink : ISink<T>>(
+    ConstantBuffer<ConvolutionParams<T, TInput, FOutput, TSink>, CDataLayout> params,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    // Decode batch and output channel tile
+    uint numOCTiles = (outChannels + GEMM_TILE_OC - 1) / GEMM_TILE_OC;
+    uint batchIdx = groupId.z / numOCTiles;
+    uint ocTileIdx = groupId.z % numOCTiles;
+
+    if (batchIdx >= uint(params.batchSize)) return;
+
+    // Output tile origin
+    uint ohBase = groupId.y * GEMM_TILE_OH;
+    uint owBase = groupId.x * GEMM_TILE_OW;
+    uint ocBase = ocTileIdx * GEMM_TILE_OC;
+
+    // This thread's output position
+    uint oh = ohBase + groupThreadId.y;
+    uint ow = owBase + groupThreadId.x;
+    bool validOutput = (oh < uint(params.outputImageHeight)) && (ow < uint(params.outputImageWidth));
+
+    // Shared memory for input tile
+    // Size: (TILE_OH-1)*stride + kernelSize) x (TILE_OW-1)*stride + kernelSize) x TILE_IC
+    static const int INPUT_TILE_H = (GEMM_TILE_OH - 1) * stride + kernelSize;
+    static const int INPUT_TILE_W = (GEMM_TILE_OW - 1) * stride + kernelSize;
+    static const int INPUT_TILE_SIZE = INPUT_TILE_H * INPUT_TILE_W;
+    static groupshared T.UnpackedType s_input[GEMM_TILE_IC][INPUT_TILE_SIZE];
+
+    // Shared memory for weight tile
+    // Size: TILE_OC x (kernelSize x kernelSize x TILE_IC)
+    static const int WEIGHT_K = kernelSize * kernelSize * GEMM_TILE_IC;
+    static groupshared T.UnpackedType s_weight[GEMM_TILE_OC][WEIGHT_K];
+
+    // Input tile origin in input image coordinates
+    int ihBase = int(ohBase * stride) - params.padding;
+    int iwBase = int(owBase * stride) - params.padding;
+
+    // Accumulators - each thread computes TILE_OC output channels
+    T.UnpackedType accum[GEMM_TILE_OC];
+
+    // Initialize with bias
+    [unroll]
+    for (int oc = 0; oc < GEMM_TILE_OC; oc++)
+    {
+        int globalOC = int(ocBase) + oc;
+        if (globalOC < outChannels)
+            accum[oc] = params.bias[globalOC].unpack();
+        else
+            accum[oc] = T.UnpackedType(0);
+    }
+
+    Input<T> emptyInput = {};
+    emptyInput.value = T.UnpackedType(0);
+
+    // Thread linear index for cooperative loading
+    int threadLinear = int(groupThreadId.y) * GEMM_TILE_OW + int(groupThreadId.x);
+    int numThreads = GEMM_TILE_OH * GEMM_TILE_OW;  // 64 threads
+
+    // Main loop over input channels
+    for (int icBase = 0; icBase < inChannels; icBase += GEMM_TILE_IC)
+    {
+        // ================================================================
+        // Cooperative load: Input tile
+        // ================================================================
+        for (int i = threadLinear; i < INPUT_TILE_SIZE; i += numThreads)
+        {
+            int sY = i / INPUT_TILE_W;
+            int sX = i % INPUT_TILE_W;
+            int ih = ihBase + sY;
+            int iw = iwBase + sX;
+
+            bool inBounds = ih >= 0 && ih < params.inputImageHeight &&
+                            iw >= 0 && iw < params.inputImageWidth;
+
+            for (int k = 0; k < GEMM_TILE_IC; ++k)
+            {
+                int currentIC = icBase + k;
+                if (inBounds && currentIC < inChannels)
+                {
+                    Coord inCoord = Coord(batchIdx, uint(ih), uint(iw), uint(currentIC));
+                    s_input[k][i] = params.inputImage.eval(inCoord, emptyInput);
+                }
+                else
+                {
+                    s_input[k][i] = T.UnpackedType(0);
+                }
+            }
+        }
+
+        // ================================================================
+        // Cooperative load: Weight tile
+        // ================================================================
+        // weightsIOKK layout: [OC, KH, KW, IC]
+        // We load weights[ocBase:ocBase+TILE_OC, :, :, icBase:icBase+TILE_IC]
+        static const int NUM_WEIGHTS = GEMM_TILE_OC * WEIGHT_K;
+        for (int i = threadLinear; i < NUM_WEIGHTS; i += numThreads)
+        {
+            int oc_local = i / WEIGHT_K;
+            int k = i % WEIGHT_K;
+
+            // Decode k -> (kh, kw, ic_local)
+            int ic_local = k % GEMM_TILE_IC;
+            int spatialK = k / GEMM_TILE_IC;
+            int kh = spatialK / kernelSize;
+            int kw = spatialK % kernelSize;
+
+            int globalOC = int(ocBase) + oc_local;
+            int globalIC = icBase + ic_local;
+
+            T.UnpackedType wval = T.UnpackedType(0);
+            if (globalOC < outChannels && globalIC < inChannels)
+            {
+                // Weight index: [oc, kh, kw, ic]
+                int64_t wIdx = int64_t(globalOC) * (kernelSize * kernelSize * inChannels) +
+                               int64_t(kh) * (kernelSize * inChannels) +
+                               int64_t(kw) * inChannels +
+                               int64_t(globalIC);
+                wval = params.weightsIOKK[wIdx].unpack();
+            }
+            s_weight[oc_local][k] = wval;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        // ================================================================
+        // Compute: iterate over kernel positions and accumulate
+        // ================================================================
+        if (validOutput)
+        {
+            for (int kh = 0; kh < kernelSize; kh++)
+            {
+                for (int kw = 0; kw < kernelSize; kw++)
+                {
+                    // Position in shared memory input tile
+                    int sY = int(groupThreadId.y) * stride + kh;
+                    int sX = int(groupThreadId.x) * stride + kw;
+                    int sharedIdx = sY * INPUT_TILE_W + sX;
+
+                    for (int ic_local = 0; ic_local < GEMM_TILE_IC; ic_local++)
+                    {
+                        int globalIC = icBase + ic_local;
+                        if (globalIC >= inChannels) break;
+
+                        T.UnpackedType inputVal = s_input[ic_local][sharedIdx];
+
+                        // Weight index in shared memory: (kh * kernelSize + kw) * TILE_IC + ic_local
+                        int wK = (kh * kernelSize + kw) * GEMM_TILE_IC + ic_local;
+
+                        // Accumulate for all output channels
+                        [unroll]
+                        for (int oc_local = 0; oc_local < GEMM_TILE_OC; oc_local++)
+                        {
+                            accum[oc_local] = accum[oc_local] + inputVal * s_weight[oc_local][wK];
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // ================================================================
+    // Write output
+    // ================================================================
+    if (validOutput)
+    {
+        for (int oc_local = 0; oc_local < GEMM_TILE_OC; oc_local++)
+        {
+            int globalOC = int(ocBase) + oc_local;
+            if (globalOC < outChannels)
+            {
+                Coord outCoord = Coord(batchIdx, oh, ow, uint(globalOC));
+                Input<T> outInput = {};
+                outInput.value = accum[oc_local];
+                params.outputImage.store(outCoord, params.outputTransform.eval(outCoord, outInput));
+            }
+        }
+    }
+}

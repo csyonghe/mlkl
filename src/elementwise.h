@@ -57,11 +57,15 @@ struct InputInfo
 
 class ExprNode;
 class ProgramNode;
+class ExprTransformer;  // Forward declare for visitor pattern
+struct Expr;            // Forward declare for accept() return type
 
 struct EvalContext
 {
     Dictionary<ExprNode*, InputInfo> inputs;
     Dictionary<ExprNode*, Shape>* additionalShapeMap = nullptr;
+    Shape kernelOutputShape;  // Shape for kernelOutput() nodes, set by kernel
+    
     Shape getShapeForNode(ExprNode* node) const
     {
         if (auto info = inputs.tryGetValue(node))
@@ -84,6 +88,7 @@ struct SinkExprEvalContext
 {
     Shape logicalShape; // The shape provided by the kernel (e.g., [B, H, S, D])
     TensorView outputBuffer;
+    Dictionary<ExprNode*, InputInfo> inputs; // For resolving uniformConstant in sink expressions
 };
 
 struct ParameterWriter
@@ -135,6 +140,10 @@ public:
     virtual void pack(ParameterWriter& writer, const EvalContext& ctx) const = 0;
 
     virtual size_t getAlignment() const { return sizeof(int32_t); }
+    
+    // Visitor pattern: accept a transformer and dispatch to the appropriate visit method.
+    // New node types MUST implement this, ensuring ExprTransformer is updated.
+    virtual Expr accept(ExprTransformer& visitor) = 0;
 };
 
 
@@ -200,6 +209,8 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     virtual size_t getAlignment() const override;
+    // ProgramNode is internal (compiled representation), not transformable
+    Expr accept(ExprTransformer&) override { return Expr(this); }
 };
 
 class LeafNode : public ExprNode
@@ -217,6 +228,7 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     virtual size_t getAlignment() const { return sizeof(void*); }
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class ConstantNode : public LeafNode
@@ -228,12 +240,14 @@ public:
         : value(v)
     {
     }
+    float getValue() const { return value; }
     Shape resolveShape(const EvalContext&) const override { return Shape(); }
     String getSlangTypeName(ElementType elemType) const override
     {
         return String("ConstantView<") + getSlangElementTypeName(elemType) + ">";
     }
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 // Represents a runtime constant provided via InputInfo
@@ -251,6 +265,7 @@ public:
     }
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class BroadcastNode : public ExprNode
@@ -267,6 +282,7 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class PermuteNode : public ExprNode
@@ -284,6 +300,7 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
     void validateDims();
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class TransposeNode : public ExprNode
@@ -300,6 +317,7 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class GatherNode : public ExprNode
@@ -317,6 +335,7 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class ConcatNode : public ExprNode
@@ -336,6 +355,7 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 // Slice along a specific axis: extracts a contiguous range [start, start+size) along axis
@@ -343,9 +363,9 @@ class SliceNode : public ExprNode
 {
 public:
     Expr inner;
-    int axis;   // Which axis to slice (can be negative for from-end indexing)
-    int start;  // Start index along the axis
-    int size;   // Number of elements to take
+    int axis;  // Which axis to slice (can be negative for from-end indexing)
+    int start; // Start index along the axis
+    int size;  // Number of elements to take
 
     RefPtr<ProgramNode> innerProgram;
 
@@ -354,14 +374,15 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class DuplicateNode : public ExprNode
 {
 public:
     Expr inner;
-    int dim;    // Which dimension to duplicate
-    int times;  // How many times to duplicate (output dim = input dim * times)
+    int dim;   // Which dimension to duplicate
+    int times; // How many times to duplicate (output dim = input dim * times)
 
     RefPtr<ProgramNode> innerProgram;
 
@@ -370,6 +391,7 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class UpsampleNode : public ExprNode
@@ -387,6 +409,71 @@ public:
     String getSlangTypeName(ElementType elemType) const override;
     Shape resolveShape(const EvalContext& ctx) const override;
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
+};
+
+// ============================================================================
+// Im2Col - Transforms input tensor for convolution via GEMM
+// ============================================================================
+//
+// Transforms [N, H, W, IC] input into [1, IC*KH*KW, N*OH*OW] matrix for GEMM.
+// The leading 1 makes this compatible with BatchGemmKernel's [B, K, N] shape.
+// When used with weight matrix [1, OC, IC*KH*KW], the GEMM produces [1, OC, N*OH*OW].
+//
+// K-dimension ordering is IC-minor for optimal memory coalescing with NHWC:
+//   row = kh * KW * IC + kw * IC + ic
+// This ensures consecutive K values access consecutive memory addresses.
+//
+// Two overloads:
+// 1. Static: all parameters as uint32_t (uses constant() internally)
+// 2. Dynamic: some params as Expr (can be uniformConstant() for runtime binding)
+//
+// Usage (static):
+//   Expr im2colExpr = im2col(buffer(), kH, kW, stride, stride, pad, pad, H, W, IC, N);
+//
+// Usage (dynamic - for reusable kernels):
+//   Expr inputHExpr = uniformConstant();  // etc.
+//   Expr im2colExpr = im2col(buffer(), kH, kW, stride, stride, pad, pad, IC,
+//                            inputHExpr, inputWExpr, outputHExpr, outputWExpr, batchExpr);
+//   // At queueExecute, bind the uniformConstants to actual values via EvalContext
+//
+class Im2ColNode : public ExprNode
+{
+public:
+    Expr inner;
+
+    // Fixed convolution parameters (always compile-time constants)
+    uint32_t kernelH, kernelW;
+    uint32_t strideH, strideW;
+    uint32_t inputC;
+
+    // Variable parameters as Expr (can be constant() or uniformConstant())
+    Expr padHExpr, padWExpr;
+    Expr inputHExpr, inputWExpr;
+    Expr outputHExpr, outputWExpr;
+    Expr batchSizeExpr;
+
+    RefPtr<ProgramNode> innerProgram;
+
+    Im2ColNode(
+        Expr inner,
+        uint32_t kernelH,
+        uint32_t kernelW,
+        uint32_t strideH,
+        uint32_t strideW,
+        uint32_t inputC,
+        Expr padH,
+        Expr padW,
+        Expr inputH,
+        Expr inputW,
+        Expr outputH,
+        Expr outputW,
+        Expr batchSize);
+
+    String getSlangTypeName(ElementType elemType) const override;
+    Shape resolveShape(const EvalContext& ctx) const override;
+    void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class BinaryNode : public ExprNode
@@ -403,6 +490,7 @@ public:
     Shape resolveShape(const EvalContext& ctx) const override;
 
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override;
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class UnaryNode : public ExprNode
@@ -421,17 +509,23 @@ public:
 
     // Normal pack does nothing (Register operands)
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class KernelOutputNode : public LeafNode
 {
 public:
-    Shape resolveShape(const EvalContext&) const override { return Shape(); }
+    Shape resolveShape(const EvalContext& ctx) const override
+    {
+        // Return kernel output shape if set by the kernel
+        return ctx.kernelOutputShape;
+    }
     String getSlangTypeName(ElementType elemType) const override
     {
         return String("KernelOutput<") + getSlangElementTypeName(elemType) + ">";
     }
     void pack(ParameterWriter& writer, const EvalContext& ctx) const override {}
+    Expr accept(ExprTransformer& visitor) override;
 };
 
 class BufferSinkNode : public SinkExprNode
@@ -479,6 +573,23 @@ public:
     size_t getParameterAlignment() const override;
 };
 
+// Transforms GEMM output [1, OC, N*OH*OW] → [N, OH, OW, OC] for Conv2D im2col path.
+// Decomposes the flattened spatial dimension and permutes channels to last position.
+// Parameters outputH and outputW are provided as uniformConstant expressions.
+class Conv2DOutputSinkNode : public SinkExprNode
+{
+public:
+    SinkExpr child;
+    Expr outputHExpr;  // uniformConstant for output height
+    Expr outputWExpr;  // uniformConstant for output width
+public:
+    Conv2DOutputSinkNode(SinkExpr child, Expr outputH, Expr outputW);
+    String getSlangTypeName(ElementType elemType) const override;
+    Shape resolvePhysicalShape(const Shape& logicalOutputShape) const override;
+    virtual void pack(ParameterWriter& writer, const SinkExprEvalContext& evalCtx) const override;
+    size_t getParameterAlignment() const override;
+};
+
 // Represent an input buffer to the kernel.
 Expr buffer();
 // Represent a static constant value.
@@ -496,6 +607,66 @@ bool containsBufferNode(const Expr& expr);
 
 // Check if an expression contains kernelOutput() node.
 bool containsKernelOutputNode(const Expr& expr);
+
+// ============================================================================
+// ExprTransformer: Copy-on-modify expression visitor
+// ============================================================================
+// Base class for expression transformations. Traverses the expression tree
+// and creates modified copies when needed, with proper sharing of unchanged subtrees.
+//
+// Usage: Subclass and override visitX methods for nodes you want to transform.
+// Default behavior: recursively transform children, return original if unchanged.
+//
+// Example - substitute kernelOutput() with a replacement:
+//   class KernelOutputSubstituter : public ExprTransformer {
+//       Expr replacement;
+//   public:
+//       KernelOutputSubstituter(Expr r) : replacement(r) {}
+//   protected:
+//       Expr visitKernelOutput(KernelOutputNode*) override { return replacement; }
+//   };
+
+class ExprTransformer
+{
+public:
+    virtual ~ExprTransformer() = default;
+    
+    // Main entry point - transforms an expression
+    Expr transform(const Expr& expr);
+    
+    // Override to customize specific node types
+    // Default: recursively transform children, reconstruct if any changed
+    // Made public for visitor pattern (called from ExprNode::accept())
+    // 
+    // Leaf nodes (no children):
+    virtual Expr visitBuffer(BufferNode* node);
+    virtual Expr visitConstant(ConstantNode* node);
+    virtual Expr visitUniformConstant(UniformConstantNode* node);
+    virtual Expr visitKernelOutput(KernelOutputNode* node);
+    // Binary nodes (left, right children):
+    virtual Expr visitBinary(BinaryNode* node);
+    // Unary nodes (inner child):
+    virtual Expr visitUnary(UnaryNode* node);
+    virtual Expr visitBroadcast(BroadcastNode* node);
+    virtual Expr visitPermute(PermuteNode* node);
+    virtual Expr visitTranspose(TransposeNode* node);
+    virtual Expr visitSlice(SliceNode* node);
+    virtual Expr visitUpsample(UpsampleNode* node);
+    virtual Expr visitDuplicate(DuplicateNode* node);
+    virtual Expr visitIm2Col(Im2ColNode* node);
+    // Multi-child nodes:
+    virtual Expr visitConcat(ConcatNode* node);
+    virtual Expr visitGather(GatherNode* node);
+    
+private:
+    Dictionary<ExprNode*, Expr> cache;  // Handle DAG, avoid redundant work
+    Expr dispatch(ExprNode* node);      // Route to correct visit method
+};
+
+// Substitute all kernelOutput() nodes in expr with replacement.
+// Used to compose output expressions: substituteKernelOutput(silu(kernelOutput()), kernelOutput() + bias)
+// produces silu(kernelOutput() + bias).
+Expr substituteKernelOutput(const Expr& expr, const Expr& replacement);
 
 // Validates that an output expression is well-formed.
 // An output expression should reference kernelOutput() if it references buffer().
@@ -531,11 +702,59 @@ inline Expr upsample2x(Expr inner)
     return upsample(inner, 2);
 }
 
+// Im2col transformation for convolution via GEMM
+// Transforms [N, H, W, IC] input into [1, IC*KH*KW, N*OH*OW] matrix
+// where OH = (H + 2*padH - kernelH) / strideH + 1
+//       OW = (W + 2*padW - kernelW) / strideW + 1
+//
+// K-dimension uses IC-minor ordering for optimal NHWC coalescing:
+//   row = kh * KW * IC + kw * IC + ic
+//
+// Use with BatchGemmKernel where:
+//   A = weight reshaped to [1, OC, IC*KH*KW]
+//   B = im2col(input, ...) = [1, IC*KH*KW, N*OH*OW]
+//   Output = A @ B = [1, OC, N*OH*OW]
+
+// Static variant: all parameters known at construction
+Expr im2col(
+    Expr inner,
+    uint32_t kernelH,
+    uint32_t kernelW,
+    uint32_t strideH,
+    uint32_t strideW,
+    uint32_t padH,
+    uint32_t padW,
+    uint32_t inputH,
+    uint32_t inputW,
+    uint32_t inputC,
+    uint32_t batchSize);
+
+// Dynamic variant: some params as Expr (can be uniformConstant for runtime binding)
+// This allows creating the GEMM kernel once and reusing it for different input sizes.
+Expr im2col(
+    Expr inner,
+    uint32_t kernelH,
+    uint32_t kernelW,
+    uint32_t strideH,
+    uint32_t strideW,
+    uint32_t inputC,
+    Expr padH,
+    Expr padW,
+    Expr inputH,
+    Expr inputW,
+    Expr outputH,
+    Expr outputW,
+    Expr batchSize);
+
 // Represent the output buffer that the kernel writes to.
 SinkExpr bufferSink();
 
 // Represent a permutation transformation (reorders dimensions) on the output buffer.
 SinkExpr permute(SinkExpr child, const std::initializer_list<int>& dims);
+
+// Transforms GEMM output [1, OC, N*OH*OW] → [N, OH, OW, OC] for Conv2D im2col path.
+// Decomposes the flattened spatial dimension and permutes channels to last position.
+SinkExpr conv2DOutputSink(SinkExpr child, Expr outputH, Expr outputW);
 
 // Represent a partitioning transformation on the output buffer. The logical output
 // tensor of the kernel is split into `partitionCount` partitions along dimension `dimIndex`,

@@ -14,7 +14,7 @@ using namespace Slang;
 
 // Define this to 1 to enable intermediate mode that runs kernels synchronously
 // at each queueExecute for easier debugging.
-#define IMMEDIATE_MODE 0
+#define IMMEDIATE_MODE 1
 
 class InferencingContext;
 
@@ -76,6 +76,29 @@ public:
     void execute();
 };
 
+// ============================================================================
+// GPU Performance Measurement
+// ============================================================================
+//
+// When enabled, timestamps are inserted before/after each kernel dispatch.
+// After task.execute(), call printPerfMeasurements() to see timing breakdown.
+//
+// Usage:
+//   ctx->setCollectPerfMeasurements(true);
+//   // ... run inference ...
+//   ctx->printPerfMeasurements();
+//   ctx->resetPerfMeasurements();  // Clear for next run
+//
+
+struct KernelPerfEntry
+{
+    String name;
+    double totalTimeMs = 0.0;
+    uint32_t callCount = 0;
+
+    double avgTimeMs() const { return callCount > 0 ? totalTimeMs / callCount : 0.0; }
+};
+
 class InferencingContext : public RefObject
 {
 private:
@@ -87,6 +110,22 @@ private:
     RefPtr<FileShaderCache> shaderCache;
     void initWithDevice(size_t defaultPageSize);
 
+    // Performance measurement state
+    bool collectPerfMeasurements = false;
+    ComPtr<rhi::IQueryPool> queryPool;
+    uint64_t timestampFrequency = 0;
+    static const uint32_t kMaxTimestampQueries = 65536;
+
+    // Each dispatch records: [startQueryIndex, endQueryIndex, kernelName]
+    struct TimestampRecord
+    {
+        uint32_t startIndex;
+        uint32_t endIndex;
+        String kernelName;
+    };
+    List<TimestampRecord> timestampRecords;
+    uint32_t nextQueryIndex = 0;
+
 public:
     InferencingContext(size_t defaultPageSize = 1024 * 1024 * 1024);
     InferencingContext(rhi::IDevice* device, size_t defaultPageSize = 1024 * 1024 * 1024);
@@ -96,6 +135,17 @@ public:
     void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob);
 
     inline rhi::IDevice* getDevice() const { return device; }
+
+    // Performance measurement controls
+    void setCollectPerfMeasurements(bool enable);
+    bool isCollectingPerfMeasurements() const { return collectPerfMeasurements; }
+    void resetPerfMeasurements();
+    void printPerfMeasurements();
+    List<KernelPerfEntry> getPerfMeasurements();
+
+    // Called by InferencingTask to record timestamps
+    void recordKernelTimestamp(rhi::ICommandEncoder* encoder, const char* kernelName, bool isStart);
+    uint32_t allocateTimestampQuery();
 
     StackAllocator* getAllocator() const { return allocator; }
 

@@ -62,6 +62,18 @@ struct UnitTestProgram : public TestBase
 
         gInferencingCtx = new InferencingContext(gDevice);
 
+        // Im2Col-based convolution tests
+        SLANG_RETURN_ON_FAIL(testIm2ColExpressionOnly(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DOutputSink(gInferencingCtx));
+        // testConv2DIm2Col removed - redundant with testConv2DGemm
+        SLANG_RETURN_ON_FAIL(testConv2DGemmWithOutputExpr(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DGemmBatchedHalfFused(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DGemmMultipleSizes(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DWithPermuteSink(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DWithFusedResidual(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DGemm(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DGemmBatched(gInferencingCtx));
+
         SLANG_RETURN_ON_FAIL(testLinear(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testLinearPartitioned(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTranspose(gInferencingCtx));
@@ -91,6 +103,7 @@ struct UnitTestProgram : public TestBase
         // Integer tests
         SLANG_RETURN_ON_FAIL(testLinearInt(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2DInt(gInferencingCtx));
+
         SLANG_RETURN_ON_FAIL(testFlashAttention(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testFlashAttentionInputPermutationOnly(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testFlashAttentionFusedPermutation(gInferencingCtx));

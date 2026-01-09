@@ -337,6 +337,64 @@ struct Upsample<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
 }
 
 // ============================================================================
+// Im2Col - Transform input tensor for convolution via GEMM
+// ============================================================================
+//
+// Transforms [N, H, W, IC] input into [IC*KH*KW, N*OH*OW] matrix.
+// K-dimension uses IC-minor ordering for optimal NHWC memory coalescing:
+//   row = kh * KW * IC + kw * IC + ic
+//
+// This ensures consecutive K values access consecutive memory addresses
+// when reading from NHWC layout tensors.
+//
+struct Im2Col<T : ITensorElement, Inner : IExpr<T>> : IExpr<T>
+{
+    Inner inner;
+    uint kernelH, kernelW;
+    uint strideH, strideW;
+    uint padH, padW;
+    uint inputH, inputW, inputC;
+    uint outputH, outputW;
+    uint batchSize;
+
+    T.UnpackedType eval(Coord coord, Input<T> input)
+    {
+        // coord = [batch, row, col] in im2col matrix (batch dimension is always 0)
+        // row: K dimension (0..IC*KH*KW-1)
+        // col: spatial dimension (0..N*OH*OW-1)
+        uint row = coord[1];
+        uint col = coord[2];
+
+        // Decode output spatial position from col
+        uint spatialSize = outputH * outputW;
+        uint n = col / spatialSize;
+        uint spatial = col % spatialSize;
+        uint oh = spatial / outputW;
+        uint ow = spatial % outputW;
+
+        // Decode kernel position from row using IC-minor ordering:
+        // row = kh * KW * IC + kw * IC + ic
+        // This gives optimal memory coalescing for NHWC input
+        uint ic = row % inputC;
+        uint spatialK = row / inputC;
+        uint kh = spatialK / kernelW;
+        uint kw = spatialK % kernelW;
+
+        // Compute input position
+        int ih = int(oh * strideH + kh) - int(padH);
+        int iw = int(ow * strideW + kw) - int(padW);
+
+        // Zero padding for out-of-bounds
+        if (ih < 0 || ih >= int(inputH) || iw < 0 || iw >= int(inputW))
+            return T.UnpackedType(0);
+
+        // Evaluate inner at [n, ih, iw, ic] (NHWC layout)
+        Coord innerCoord = Coord(n, uint(ih), uint(iw), ic);
+        return inner.eval(innerCoord, input);
+    }
+}
+
+// ============================================================================
 
 struct Gather<T : ITensorElement, Table : IExpr<T>, Indices : IExpr<T>> : IExpr<T>
 {
@@ -661,6 +719,41 @@ struct PartitionSink<T : ITensorElement, Child : ISink<T>> : ISink<T>
             
             physicalCoord[i + 1] = val;
         }
+
+        child.store(physicalCoord, value);
+    }
+};
+
+// Conv2DOutputSink: Transforms GEMM output [1, OC, N*OH*OW] → [N, OH, OW, OC]
+// Used for im2col-based convolution to write directly to NHWC output format.
+struct Conv2DOutputSink<T : ITensorElement, Child : ISink<T>> : ISink<T>
+{
+    Child child;
+    uint outputH;
+    uint outputW;
+
+    void store(Coord logicalCoord, T.UnpackedType value)
+    {
+        // Input logical coord: [1, oc, col] where col = n * OH * OW + oh * OW + ow
+        // Note: logicalCoord[0] is always 0 (batch dim of GEMM is 1)
+        uint oc = logicalCoord[1];
+        uint col = logicalCoord[2];
+
+        // Decompose col → (n, oh, ow)
+        uint spatialSize = outputH * outputW;
+        uint n = col / spatialSize;
+        uint spatial = col % spatialSize;
+        uint oh = spatial / outputW;
+        uint ow = spatial % outputW;
+
+        // Output physical coord: [n, oh, ow, oc]
+        Coord physicalCoord;
+        physicalCoord.baseOffset = logicalCoord.baseOffset;
+        physicalCoord.coords = makeArrayFromElement<uint, 8>(0);
+        physicalCoord[0] = n;
+        physicalCoord[1] = oh;
+        physicalCoord[2] = ow;
+        physicalCoord[3] = oc;
 
         child.store(physicalCoord, value);
     }

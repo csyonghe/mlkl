@@ -80,6 +80,9 @@ static SlangResult generateImage(InferencingContext* ctx)
     // ========================================================================
     // Generate image
     // ========================================================================
+    // Reset perf measurements here so we only measure the actual generation, not shader compilation
+    ctx->resetPerfMeasurements();
+
     printf("Generating image...\n");
     TensorView imageView = generator->generateImage(prompt, seed, inferenceSteps, guidanceScale);
     if (!imageView)
@@ -121,19 +124,30 @@ static SlangResult generateImage(InferencingContext* ctx)
 // ============================================================================
 int main(int argc, char** argv)
 {
-    // Check for --test flag
+    // Parse command line flags
     bool testMode = false;
+    bool profileMode = false;
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--test") == 0)
         {
             testMode = true;
-            break;
+        }
+        else if (strcmp(argv[i], "--profile") == 0)
+        {
+            profileMode = true;
         }
     }
 
     // Create inferencing context
     RefPtr<InferencingContext> ctx = new InferencingContext();
+
+    // Enable GPU profiling if requested
+    if (profileMode)
+    {
+        printf("GPU profiling enabled\n\n");
+        ctx->setCollectPerfMeasurements(true);
+    }
 
     SlangResult result;
     if (testMode)
@@ -143,6 +157,12 @@ int main(int argc, char** argv)
     else
     {
         result = generateImage(ctx);
+    }
+
+    // Print GPU profiling results if enabled
+    if (profileMode)
+    {
+        ctx->printPerfMeasurements();
     }
 
     return SLANG_SUCCEEDED(result) ? 0 : 1;
