@@ -38,7 +38,10 @@ LinearKernel::LinearKernel(
         inputProgram.getSlangTypeName(elementType),
         sinkExpr.node->getSlangTypeName(elementType),
         outputProgram.getSlangTypeName(elementType)};
-    pipeline = context->createComputePipeline("linearTiled", makeConstArrayView(specArgs));
+    tiledPipeline = context->createComputePipeline("linearTiled", makeConstArrayView(specArgs));
+    
+    // Create GEMV pipeline (uses same params struct but different dispatch)
+    gemvPipeline = context->createComputePipeline("linearGemv", makeConstArrayView(specArgs));
 }
 
 void LinearKernel::validateTensorElementType(const TensorView& tv, const char* name) const
@@ -120,7 +123,11 @@ TensorView LinearKernel::allocateResultBuffer(ElementType elementType, int batch
     return outputBuffer;
 }
 
-void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx)
+void LinearKernel::queueExecute(
+    InferencingTask& task,
+    TensorView output,
+    const EvalContext& ctx,
+    LinearAlgorithm algorithm)
 {
     // Validate element types
     validateTensorElementType(output, "output");
@@ -152,17 +159,11 @@ void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const 
             throw std::runtime_error("Input tensor is missing batch dimension.");
     }
 
-    // 1. Calculate Grid Dimensions
-    // tileN covers the output features (N), tileM covers the batch/rows (M)
     int outputSize = outputVectorLength;
-    int gridX = (outputSize + tileN - 1) / tileN;
-    int gridY = (batchSize + tileM - 1) / tileM;
 
-    // 2. Prepare Parameter Data
+    // 2. Prepare Parameter Data (same for both algorithms)
     List<uint8_t> paramData;
     ParameterWriter writer{paramData};
-
-    // --- PACKING ACCORDING TO LinearParams<TIn, TSink, FOut> ---
 
     // A. Pack inputProgram (TIn)
     inputProgram.pack(writer, ctx);
@@ -170,11 +171,7 @@ void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const 
     // B. Pack outputProgram (FOut)
     outputProgram.pack(writer, ctx);
 
-
     // C. Pack Sink (TSink)
-    // Since SinkExpr isn't a ProgramNode member, we pack it using the node logic.
-    // Note: You should ideally store SinkExpr in your header or use a sinkProgram.
-    // Assuming you have access to the sink node used in the constructor:
     SinkExprEvalContext sinkCtx;
     sinkCtx.outputBuffer = output;
     sinkCtx.logicalShape = Shape{batchSize, outputSize};
@@ -192,14 +189,43 @@ void LinearKernel::queueExecute(InferencingTask& task, TensorView output, const 
     writer.write((uint32_t)(biasesBuffer ? 1 : 0));
     writer.finish();
 
-    // 3. Dispatch
-    task.dispatchKernel(pipeline, (uint32_t)gridX, (uint32_t)gridY, 1, paramData);
+    // Determine effective algorithm
+    LinearAlgorithm effectiveAlgorithm = algorithm;
+    if (algorithm == LinearAlgorithm::Auto)
+    {
+        // Use GEMV for small batch sizes (<=8), tiled GEMM for larger
+        static const int GEMV_MAX_BATCH = 8;
+        effectiveAlgorithm = (batchSize <= GEMV_MAX_BATCH)
+            ? LinearAlgorithm::Gemv
+            : LinearAlgorithm::Tiled;
+    }
+
+    // Dispatch based on algorithm
+    if (effectiveAlgorithm == LinearAlgorithm::Gemv)
+    {
+        // Warp-cooperative GEMV dispatch:
+        // - Block has 8 warps (256 threads)
+        // - Each warp handles 4 output columns
+        // - Each block handles 32 output columns total
+        // - Dispatch: x = ceil(N / 32), y = batchSize, z = 1
+        static const int GEMV_COLS_PER_BLOCK = 32;  // Must match slang constants
+        int gridX = (outputSize + GEMV_COLS_PER_BLOCK - 1) / GEMV_COLS_PER_BLOCK;
+        task.dispatchKernel(gemvPipeline, (uint32_t)gridX, (uint32_t)batchSize, 1, paramData);
+    }
+    else
+    {
+        // Tiled GEMM
+        int gridX = (outputSize + tileN - 1) / tileN;
+        int gridY = (batchSize + tileM - 1) / tileM;
+        task.dispatchKernel(tiledPipeline, (uint32_t)gridX, (uint32_t)gridY, 1, paramData);
+    }
 }
 
 void LinearKernel::queueExecute(
     InferencingTask& task,
     TensorView output,
-    const std::initializer_list<InputInfo>& inputs)
+    const std::initializer_list<InputInfo>& inputs,
+    LinearAlgorithm algorithm)
 {
     EvalContext ctx;
     auto iter = inputs.begin();
@@ -213,5 +239,5 @@ void LinearKernel::queueExecute(
         ctx.inputs.add(bufferNode, consume());
     for (auto bufferNode : outputProgram.bufferNodes)
         ctx.inputs.add(bufferNode, consume());
-    return queueExecute(task, output, ctx);
+    return queueExecute(task, output, ctx, algorithm);
 }

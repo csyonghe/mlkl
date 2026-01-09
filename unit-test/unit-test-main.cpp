@@ -76,6 +76,14 @@ struct UnitTestProgram : public TestBase
 
         SLANG_RETURN_ON_FAIL(testLinear(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testLinearPartitioned(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearGemvBatch1(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearGemvBatch4(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearGemvBatch8(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearTiledBatch1(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearTiledBatch4(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearTiledBatch16(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearAutoSelection(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testLinearGemvLargeK(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testTranspose(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testLeakyReluComposite(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testMaterialize(gInferencingCtx));

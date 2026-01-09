@@ -143,6 +143,14 @@ SlangResult testLinear(InferencingContext* ctx);
 SlangResult testLinearPartitioned(InferencingContext* ctx);
 SlangResult testLinearHalf(InferencingContext* ctx);
 SlangResult testLinearInt(InferencingContext* ctx);
+SlangResult testLinearGemvBatch1(InferencingContext* ctx);
+SlangResult testLinearGemvBatch4(InferencingContext* ctx);
+SlangResult testLinearGemvBatch8(InferencingContext* ctx);
+SlangResult testLinearTiledBatch1(InferencingContext* ctx);
+SlangResult testLinearTiledBatch4(InferencingContext* ctx);
+SlangResult testLinearTiledBatch16(InferencingContext* ctx);
+SlangResult testLinearAutoSelection(InferencingContext* ctx);
+SlangResult testLinearGemvLargeK(InferencingContext* ctx);
 
 // Defined in test-reduce.cpp
 SlangResult testReduceLastDim(InferencingContext* ctx);
@@ -150,9 +158,7 @@ SlangResult testReduceGroupNorm(InferencingContext* ctx);
 SlangResult testReduceAxis(InferencingContext* ctx);
 SlangResult testReduceAxis4D(InferencingContext* ctx);
 SlangResult testReduceLarge(InferencingContext* ctx);
-SlangResult testReduceHalf(InferencingContext* ctx);
-
-// Defined in test-group-norm.cpp
+SlangResult testReduceHalf(InferencingContext* ctx);// Defined in test-group-norm.cpp
 SlangResult testGroupNorm(InferencingContext* ctx);
 SlangResult testGroupNormSingleGroup(InferencingContext* ctx);
 SlangResult testGroupNormPerChannel(InferencingContext* ctx);

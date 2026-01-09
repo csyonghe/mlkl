@@ -135,7 +135,8 @@ SlangResult testLinearHalf(InferencingContext* context)
         hWeights[i] = (float)i * 0.01f;
     // Convert weights to half precision
     auto weightsHalf = convertFloatData(hWeights, ElementType::Float16);
-    kernel.weightsBuffer = context->createPersistentBuffer(weightsHalf.getBuffer(), weightsHalf.getCount());
+    kernel.weightsBuffer =
+        context->createPersistentBuffer(weightsHalf.getBuffer(), weightsHalf.getCount());
 
     List<float> hBias;
     hBias.setCount(outDim);
@@ -143,7 +144,8 @@ SlangResult testLinearHalf(InferencingContext* context)
         hBias[i] = (float)i * 0.5f;
     // Convert bias to half precision
     auto biasHalf = convertFloatData(hBias, ElementType::Float16);
-    kernel.biasesBuffer = context->createPersistentBuffer(biasHalf.getBuffer(), biasHalf.getCount());
+    kernel.biasesBuffer =
+        context->createPersistentBuffer(biasHalf.getBuffer(), biasHalf.getCount());
 
     // Prepare Input Data [Batch, In] in float, then convert to half
     List<float> hInput;
@@ -231,22 +233,22 @@ SlangResult testLinearInt(InferencingContext* context)
     List<float> hWeights;
     hWeights.setCount(outDim * inDim);
     for (Index i = 0; i < hWeights.getCount(); ++i)
-        hWeights[i] = (float)(i % 5);  // Small integers 0-4
-    kernel.weightsBuffer = context->createPersistentBuffer(
-        convertFloatData(hWeights, ElementType::Int32));
+        hWeights[i] = (float)(i % 5); // Small integers 0-4
+    kernel.weightsBuffer =
+        context->createPersistentBuffer(convertFloatData(hWeights, ElementType::Int32));
 
     List<float> hBias;
     hBias.setCount(outDim);
     for (Index i = 0; i < outDim; ++i)
-        hBias[i] = (float)(i * 10);  // 0, 10, 20, ...
-    kernel.biasesBuffer = context->createPersistentBuffer(
-        convertFloatData(hBias, ElementType::Int32));
+        hBias[i] = (float)(i * 10); // 0, 10, 20, ...
+    kernel.biasesBuffer =
+        context->createPersistentBuffer(convertFloatData(hBias, ElementType::Int32));
 
     // Prepare Input Data [Batch, In] - using small integer values
     List<float> hInput;
     hInput.setCount(batchSize * inDim);
     for (Index i = 0; i < hInput.getCount(); ++i)
-        hInput[i] = (float)(i % 3);  // Small integers 0-2
+        hInput[i] = (float)(i % 3); // Small integers 0-2
 
     List<int32_t> hInputInt;
     floatToInt(hInput, hInputInt);
@@ -391,5 +393,216 @@ SlangResult testLinearPartitioned(InferencingContext* context)
         return SLANG_FAIL;
     }
 
+    MLKL_TEST_OK();
+}
+
+// =============================================================================
+// Tests for Gemv vs Tiled algorithm selection
+// =============================================================================
+
+// Helper to test linear with a specific algorithm
+SlangResult testLinearWithAlgorithm(
+    InferencingContext* context,
+    int batchSize,
+    LinearAlgorithm algorithm,
+    const char* testName)
+{
+    const int inDim = 256; // Large enough to exercise the kernel
+    const int outDim = 128;
+
+    // Small tiles to force multiple iterations
+    const int tM = 8;
+    const int tN = 32;
+    const int tK = 16;
+
+    Expr input = buffer();
+    Expr valueTransform = kernelOutput();
+    SinkExpr outputSink = bufferSink();
+
+    LinearKernel kernel(context, input, valueTransform, outputSink, inDim, outDim, tM, tN, tK);
+
+    // Prepare weights
+    List<float> hWeights;
+    hWeights.setCount(outDim * inDim);
+    for (Index i = 0; i < hWeights.getCount(); ++i)
+        hWeights[i] = ((i * 17 + 13) % 200 - 100) * 0.001f; // Pseudo-random small values
+    kernel.weightsBuffer = context->createPersistentBuffer(hWeights);
+
+    // Prepare bias
+    List<float> hBias;
+    hBias.setCount(outDim);
+    for (Index i = 0; i < outDim; ++i)
+        hBias[i] = (float)i * 0.01f;
+    kernel.biasesBuffer = context->createPersistentBuffer(hBias);
+
+    // Prepare input
+    List<float> hInput;
+    hInput.setCount(batchSize * inDim);
+    for (Index i = 0; i < hInput.getCount(); ++i)
+        hInput[i] = ((i * 23 + 7) % 100 - 50) * 0.01f;
+    auto inputBuffer = context->createTensor(ElementType::Float32, Shape(batchSize, inDim), hInput);
+
+    // Allocate output
+    auto outputBuffer = context->allocScratchTensor(ElementType::Float32, Shape(batchSize, outDim));
+
+    // Execute with specified algorithm
+    auto task = context->createTask();
+    kernel.queueExecute(task, outputBuffer, inputBuffer->getView(), algorithm);
+    task.execute();
+
+    // CPU reference
+    List<float> hExpected;
+    hExpected.setCount(batchSize * outDim);
+
+    for (int b = 0; b < batchSize; ++b)
+    {
+        for (int o = 0; o < outDim; ++o)
+        {
+            float sum = 0.0f;
+            for (int i = 0; i < inDim; ++i)
+                sum += hInput[b * inDim + i] * hWeights[o * inDim + i];
+            sum += hBias[o];
+            hExpected[b * outDim + o] = sum;
+        }
+    }
+
+    // Verify
+    auto gpuResult = context->readBuffer<float>(outputBuffer);
+    float maxDiff = 0.0f;
+    int mismatchCount = 0;
+    for (Index i = 0; i < hExpected.getCount(); i++)
+    {
+        float diff = std::abs(gpuResult[i] - hExpected[i]);
+        maxDiff = std::max(maxDiff, diff);
+        if (diff > 1e-3f)
+            mismatchCount++;
+    }
+
+    TEST_CHECK(testName, maxDiff < 1e-3f);
+    return SLANG_OK;
+}
+
+SlangResult testLinearGemvBatch1(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(testLinearWithAlgorithm(context, 1, LinearAlgorithm::Gemv, "gemv_batch1"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearGemvBatch4(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(testLinearWithAlgorithm(context, 4, LinearAlgorithm::Gemv, "gemv_batch4"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearGemvBatch8(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(testLinearWithAlgorithm(context, 8, LinearAlgorithm::Gemv, "gemv_batch8"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearTiledBatch1(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(
+        testLinearWithAlgorithm(context, 1, LinearAlgorithm::Tiled, "tiled_batch1"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearTiledBatch4(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(
+        testLinearWithAlgorithm(context, 4, LinearAlgorithm::Tiled, "tiled_batch4"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearTiledBatch16(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+    SLANG_RETURN_ON_FAIL(
+        testLinearWithAlgorithm(context, 16, LinearAlgorithm::Tiled, "tiled_batch16"));
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearAutoSelection(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+
+    // Test Auto algorithm - should select Gemv for batch<=8, Tiled for batch>8
+    SLANG_RETURN_ON_FAIL(testLinearWithAlgorithm(context, 1, LinearAlgorithm::Auto, "auto_batch1"));
+    SLANG_RETURN_ON_FAIL(testLinearWithAlgorithm(context, 8, LinearAlgorithm::Auto, "auto_batch8"));
+    SLANG_RETURN_ON_FAIL(
+        testLinearWithAlgorithm(context, 16, LinearAlgorithm::Auto, "auto_batch16"));
+
+    MLKL_TEST_OK();
+}
+
+SlangResult testLinearGemvLargeK(InferencingContext* context)
+{
+    MLKL_TEST_BEGIN();
+
+    // Test with large K dimension (SD linear layers have K up to 5120)
+    const int batchSize = 2;
+    const int inDim = 2048;
+    const int outDim = 768;
+
+    Expr input = buffer();
+    LinearKernel kernel(context, input, kernelOutput(), bufferSink(), inDim, outDim);
+
+    // Prepare weights
+    List<float> hWeights;
+    hWeights.setCount(outDim * inDim);
+    for (Index i = 0; i < hWeights.getCount(); ++i)
+        hWeights[i] = ((i * 17 + 13) % 200 - 100) * 0.0001f;
+    kernel.weightsBuffer = context->createPersistentBuffer(hWeights);
+
+    // Prepare bias
+    List<float> hBias;
+    hBias.setCount(outDim);
+    for (Index i = 0; i < outDim; ++i)
+        hBias[i] = (float)i * 0.001f;
+    kernel.biasesBuffer = context->createPersistentBuffer(hBias);
+
+    // Prepare input
+    List<float> hInput;
+    hInput.setCount(batchSize * inDim);
+    for (Index i = 0; i < hInput.getCount(); ++i)
+        hInput[i] = ((i * 23 + 7) % 100 - 50) * 0.01f;
+    auto inputBuffer = context->createTensor(ElementType::Float32, Shape(batchSize, inDim), hInput);
+
+    // Allocate output
+    auto outputBuffer = context->allocScratchTensor(ElementType::Float32, Shape(batchSize, outDim));
+
+    // Execute with Gemv
+    auto task = context->createTask();
+    kernel.queueExecute(task, outputBuffer, inputBuffer->getView(), LinearAlgorithm::Gemv);
+    task.execute();
+
+    // CPU reference
+    List<float> hExpected;
+    hExpected.setCount(batchSize * outDim);
+
+    for (int b = 0; b < batchSize; ++b)
+    {
+        for (int o = 0; o < outDim; ++o)
+        {
+            float sum = 0.0f;
+            for (int i = 0; i < inDim; ++i)
+                sum += hInput[b * inDim + i] * hWeights[o * inDim + i];
+            sum += hBias[o];
+            hExpected[b * outDim + o] = sum;
+        }
+    }
+
+    // Verify
+    auto gpuResult = context->readBuffer<float>(outputBuffer);
+    float maxDiff = 0.0f;
+    for (Index i = 0; i < hExpected.getCount(); i++)
+        maxDiff = std::max(maxDiff, std::abs(gpuResult[i] - hExpected[i]));
+
+    TEST_CHECK(__func__, maxDiff < 1e-2f); // Larger tolerance for large K
     MLKL_TEST_OK();
 }

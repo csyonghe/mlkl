@@ -4,6 +4,13 @@
 
 class SafeTensorsReader;
 
+enum class LinearAlgorithm
+{
+    Auto,   // Automatically select based on batch size (Gemv for <=8, Tiled for >8)
+    Tiled,  // Tiled GEMM (good for large batch sizes)
+    Gemv,   // Batched GEMV (optimized for batch size 1-8)
+};
+
 // Linear Kernel: Out = In @ W^T + Bias (Weights expected in [In, Out] layout)
 // W is of shape [outputVectorLength, inputVectorLength]
 // In is of shape [batchSize, inputVectorLength]
@@ -21,7 +28,8 @@ class SafeTensorsReader;
 class LinearKernel : public RefObject
 {
 private:
-    ComPtr<rhi::IComputePipeline> pipeline;
+    ComPtr<rhi::IComputePipeline> tiledPipeline;
+    ComPtr<rhi::IComputePipeline> gemvPipeline;
     InferencingContext* context;
     ElementType elementType;
     int tileM, tileN, tileK;
@@ -47,9 +55,9 @@ public:
         SinkExpr sinkExpr,
         int inputVectorLength,
         int outputVectorLength,
-        int tileM = 8,
-        int tileN = 32,
-        int tileK = 16);
+        int tileM = 64,
+        int tileN = 64,
+        int tileK = 8);
 
     // Convenience constructor defaulting to Float32.
     LinearKernel(
@@ -59,9 +67,9 @@ public:
         SinkExpr sinkExpr,
         int inputVectorLength,
         int outputVectorLength,
-        int tileM = 8,
-        int tileN = 32,
-        int tileK = 16)
+        int tileM = 64,
+        int tileN = 64,
+        int tileK = 8)
         : LinearKernel(
               context,
               ElementType::Float32,
@@ -80,9 +88,9 @@ public:
         InferencingContext* context,
         int inputVectorLength,
         int outputVectorLength,
-        int tileM = 2,
-        int tileN = 8,
-        int tileK = 16)
+        int tileM = 64,
+        int tileN = 64,
+        int tileK = 8)
         : LinearKernel(
               context,
               ElementType::Float32,
@@ -109,23 +117,33 @@ public:
 
     TensorView allocateResultBuffer(ElementType elementType, int batchSize);
 
-    void queueExecute(InferencingTask& task, TensorView output, const EvalContext& ctx);
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
+        const EvalContext& ctx,
+        LinearAlgorithm algorithm = LinearAlgorithm::Auto);
 
     void queueExecute(
         InferencingTask& task,
         TensorView output,
-        const Dictionary<Expr, InputInfo>& inputs)
+        const Dictionary<Expr, InputInfo>& inputs,
+        LinearAlgorithm algorithm = LinearAlgorithm::Auto)
     {
-        return queueExecute(task, output, makeEvalContext(inputs));
+        return queueExecute(task, output, makeEvalContext(inputs), algorithm);
     }
 
     void queueExecute(
         InferencingTask& task,
         TensorView output,
-        const std::initializer_list<InputInfo>& inputs);
+        const std::initializer_list<InputInfo>& inputs,
+        LinearAlgorithm algorithm = LinearAlgorithm::Auto);
 
-    void queueExecute(InferencingTask& task, TensorView output, TensorView inputVector)
+    void queueExecute(
+        InferencingTask& task,
+        TensorView output,
+        TensorView inputVector,
+        LinearAlgorithm algorithm = LinearAlgorithm::Auto)
     {
-        return queueExecute(task, output, std::initializer_list<InputInfo>{inputVector});
+        return queueExecute(task, output, std::initializer_list<InputInfo>{inputVector}, algorithm);
     }
 };
