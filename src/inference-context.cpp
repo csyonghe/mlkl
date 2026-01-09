@@ -6,6 +6,9 @@
 
 InferencingContext::InferencingContext(size_t defaultPageSize)
 {
+    // Create persistent shader/pipeline cache
+    shaderCache = new FileShaderCache();
+    
     rhi::DeviceDesc deviceDesc;
     deviceDesc.slang.targetProfile = "spirv_1_6";
     List<slang::CompilerOptionEntry> compilerOptionsEntries;
@@ -23,6 +26,11 @@ InferencingContext::InferencingContext(size_t defaultPageSize)
     deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
     deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
     deviceDesc.deviceType = rhi::DeviceType::Vulkan;
+    
+    // Enable persistent caching for both shaders and pipelines
+    deviceDesc.persistentShaderCache = shaderCache;
+    deviceDesc.persistentPipelineCache = shaderCache;
+    
     // rhi::getRHI()->enableDebugLayers();
     device = rhi::getRHI()->createDevice(deviceDesc);
     if (!device)

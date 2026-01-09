@@ -3,6 +3,7 @@
 #include "concat.h"
 #include "safetensors-reader.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 
@@ -43,15 +44,10 @@ void SDImageGenerator::initializeKernels()
     const float vaeScalingFactor = 0.18215f;
     vaeScaleKernel = new ElementwiseKernel(ctx, buffer() * constant(1.0f / vaeScalingFactor));
 
-    // CFG combination kernel: output = uncond + scale * (cond - uncond)
-    // Store expressions so we can map them to inputs later
-    cfgUncondExpr = buffer();
-    cfgCondExpr = buffer();
-    cfgScaleExpr = uniformConstant();
-    cfgKernel = new ElementwiseKernel(ctx, cfgUncondExpr + cfgScaleExpr * (cfgCondExpr - cfgUncondExpr));
-
     // Duplicate kernel: [1, H, W, C] → [2, H, W, C] (duplicates batch dim for CFG)
     latentDuplicateKernel = new ElementwiseKernel(ctx, duplicate(buffer(), 0, 2));
+    
+    // Note: CFG combination is now fused into DDIMSampler::stepWithCFG()
 }
 
 void SDImageGenerator::allocateBuffers()
@@ -68,20 +64,13 @@ void SDImageGenerator::allocateBuffers()
         nullptr,
         "LatentNext");
 
-    // Noise prediction buffers for batched CFG
+    // Noise prediction buffer for batched CFG [2, H, W, C] = [uncond, cond]
     noisePredBatched = ctx->createTensor(
         ElementType::Float32,
         Shape{2, kLatentHeight, kLatentWidth, kLatentChannels},
         2 * latentSize * sizeof(float),
         nullptr,
         "NoisePredBatched");
-
-    noisePredCombined = ctx->createTensor(
-        ElementType::Float32,
-        Shape{1, kLatentHeight, kLatentWidth, kLatentChannels},
-        latentSize * sizeof(float),
-        nullptr,
-        "NoisePredCombined");
 
     // Batched latent for CFG (holds [uncond_latent, cond_latent])
     latentBatched = ctx->createTensor(
@@ -129,7 +118,16 @@ SlangResult SDImageGenerator::loadModels(const String& modelsDir)
         String clipPath = dir + "clip.safetensors";
         SafeTensorsReader reader;
         SLANG_RETURN_ON_FAIL(reader.load(clipPath));
-        SLANG_RETURN_ON_FAIL(clipEncoder->loadParams(reader));
+        
+        // Auto-detect weight prefix
+        List<String> tensorNames;
+        reader.getTensorNames(tensorNames);
+        String clipPrefix = "";
+        if (tensorNames.getCount() > 0 && tensorNames[0].startsWith("text_model."))
+        {
+            clipPrefix = "text_model.";
+        }
+        SLANG_RETURN_ON_FAIL(clipEncoder->loadParams(reader, clipPrefix));
     }
 
     // Load UNet
@@ -196,6 +194,11 @@ TensorView SDImageGenerator::generateImage(
 
     bool useCFG = guidanceScale > 1.0f;
 
+    // Performance timing
+    using Clock = std::chrono::high_resolution_clock;
+    auto totalStart = Clock::now();
+    double clipTimeMs = 0.0, diffusionTimeMs = 0.0, vaeTimeMs = 0.0;
+
     // ========================================================================
     // Step 1: Tokenize prompt (and empty prompt for CFG)
     // ========================================================================
@@ -236,6 +239,8 @@ TensorView SDImageGenerator::generateImage(
     // ========================================================================
     // Step 2: CLIP text encoding
     // ========================================================================
+    auto clipStart = Clock::now();
+    
     // For CFG, we create batched embeddings [2, 77, 768] = [uncond, cond]
     // For non-CFG, just [1, 77, 768]
     TensorView textEmbeddings;
@@ -282,6 +287,8 @@ TensorView SDImageGenerator::generateImage(
         clipEncoder->queueExecute(task, textEmbeddings, tokenIds->getView(), kMaxTokenLength, 1);
         task.execute();
     }
+    
+    clipTimeMs = std::chrono::duration<double, std::milli>(Clock::now() - clipStart).count();
 
     // ========================================================================
     // Step 3: Initialize random latent
@@ -299,6 +306,8 @@ TensorView SDImageGenerator::generateImage(
     // ========================================================================
     // Step 4: DDIM sampling loop with CFG
     // ========================================================================
+    auto diffusionStart = Clock::now();
+    
     // Use RefPtr for swapping
     RefPtr<Tensor> currentLatent = latent;
     RefPtr<Tensor> nextLatent = latentNext;
@@ -307,12 +316,9 @@ TensorView SDImageGenerator::generateImage(
     {
         int t = sampler->timesteps[i];
 
-        TensorView noisePredForDDIM;
-
         if (useCFG)
         {
             // Duplicate latent to batch dimension: [1, H, W, C] → [2, H, W, C]
-            // Single kernel launch instead of two copies
             {
                 auto task = ctx->createTask();
                 latentDuplicateKernel->queueExecute(task, latentBatched->getView(), currentLatent->getView());
@@ -327,53 +333,45 @@ TensorView SDImageGenerator::generateImage(
                 task.execute();
             }
 
-            // Slice output into uncond [0] and cond [1], then apply CFG
-            TensorView noiseUncond = noisePredBatched->getView();
-            noiseUncond.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
-
-            TensorView noiseCond = noisePredBatched->getView();
-            noiseCond.bufferView.offset += kLatentHeight * kLatentWidth * kLatentChannels * sizeof(float);
-            noiseCond.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
-
-            // Combine: output = uncond + scale * (cond - uncond)
+            // Fused CFG + DDIM step: applies CFG combination and DDIM update in one kernel
             {
                 auto task = ctx->createTask();
-                Dictionary<Expr, InputInfo> cfgInputs;
-                cfgInputs.add(cfgUncondExpr, noiseUncond);
-                cfgInputs.add(cfgCondExpr, noiseCond);
-                cfgInputs.add(cfgScaleExpr, InputInfo(guidanceScale));
-                cfgKernel->queueExecute(task, noisePredCombined->getView(), cfgInputs);
+                sampler->stepWithCFG(
+                    task, nextLatent->getView(), currentLatent->getView(),
+                    noisePredBatched->getView(), guidanceScale, i);
                 task.execute();
             }
-
-            noisePredForDDIM = noisePredCombined->getView();
         }
         else
         {
             // No CFG - single UNet pass
-            auto task = ctx->createTask();
-            // Use first slot of batched buffer for output
             TensorView noisePred = noisePredBatched->getView();
             noisePred.shape = Shape{1, kLatentHeight, kLatentWidth, kLatentChannels};
-            unet->queueExecute(task, noisePred, currentLatent->getView(), t, textEmbeddings);
-            task.execute();
-            noisePredForDDIM = noisePred;
-        }
+            {
+                auto task = ctx->createTask();
+                unet->queueExecute(task, noisePred, currentLatent->getView(), t, textEmbeddings);
+                task.execute();
+            }
 
-        // DDIM update step
-        {
-            auto task = ctx->createTask();
-            sampler->step(task, nextLatent->getView(), currentLatent->getView(), noisePredForDDIM, i);
-            task.execute();
+            // DDIM update step
+            {
+                auto task = ctx->createTask();
+                sampler->step(task, nextLatent->getView(), currentLatent->getView(), noisePred, i);
+                task.execute();
+            }
         }
 
         // Swap latent buffers
         std::swap(currentLatent, nextLatent);
     }
+    
+    diffusionTimeMs = std::chrono::duration<double, std::milli>(Clock::now() - diffusionStart).count();
 
     // ========================================================================
     // Step 5: Scale latent for VAE
     // ========================================================================
+    auto vaeStart = Clock::now();
+    
     {
         auto task = ctx->createTask();
         vaeScaleKernel->queueExecute(task, scaledLatent->getView(), currentLatent->getView());
@@ -388,6 +386,15 @@ TensorView SDImageGenerator::generateImage(
         vaeDecoder->queueExecute(task, outputImage->getView(), scaledLatent->getView());
         task.execute();
     }
+    
+    vaeTimeMs = std::chrono::duration<double, std::milli>(Clock::now() - vaeStart).count();
+    
+    // Store performance stats
+    lastPerfStats.clipTimeMs = clipTimeMs;
+    lastPerfStats.diffusionTimeMs = diffusionTimeMs;
+    lastPerfStats.vaeTimeMs = vaeTimeMs;
+    lastPerfStats.totalTimeMs = std::chrono::duration<double, std::milli>(Clock::now() - totalStart).count();
+    lastPerfStats.inferenceSteps = inferenceSteps;
 
     return outputImage->getView();
 }

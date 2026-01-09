@@ -4,6 +4,7 @@
 #include "core/slang-crypto.h"
 #include "external/slang-rhi/include/slang-rhi.h"
 #include "half.h"
+#include "shader-cache.h"
 #include "slang-com-ptr.h"
 #include "slang.h"
 #include "stack-allocator.h"
@@ -83,6 +84,7 @@ private:
     ComPtr<slang::IModule> slangModule;
     Dictionary<MD5::Digest, ComPtr<rhi::IComputePipeline>> pipelineCache;
     RefPtr<StackAllocator> allocator;
+    RefPtr<FileShaderCache> shaderCache;
     void initWithDevice(size_t defaultPageSize);
 
 public:

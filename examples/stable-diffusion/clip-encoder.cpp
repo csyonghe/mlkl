@@ -298,14 +298,14 @@ CLIPTextEncoder::CLIPTextEncoder(
     , maxSeqLen(maxSeqLen)
     , intermediateSize(intermediateSize)
 {
-    // Embeddings (separate kernels for now)
-    tokenEmbedding = new GatherKernel(ctx, vocabSize, hiddenSize);
-    positionEmbedding = new GatherKernel(ctx, maxSeqLen, hiddenSize);
-
-    // Embedding addition
-    auto a = buffer();
-    auto b = buffer();
-    embeddingAdd = new ElementwiseKernel(ctx, a + b);
+    // Fused embedding kernel: gather(tokenTable, tokenIds) + gather(posTable, posIds)
+    // This fuses 3 kernel launches (2 gathers + 1 add) into a single kernel
+    tokenTableExpr = buffer();
+    tokenIndicesExpr = buffer();
+    posTableExpr = buffer();
+    posIndicesExpr = buffer();
+    fusedEmbedKernel = new ElementwiseKernel(ctx,
+        gather(tokenTableExpr, tokenIndicesExpr) + gather(posTableExpr, posIndicesExpr));
 
     // Transformer layers
     for (int i = 0; i < numLayers; i++)
@@ -328,14 +328,37 @@ CLIPTextEncoder::CLIPTextEncoder(
 
 SlangResult CLIPTextEncoder::loadParams(SafeTensorsReader& reader, const String& prefix)
 {
-    // Embeddings
-    SLANG_RETURN_ON_FAIL(tokenEmbedding->loadParams(
-        reader,
-        (prefix + "embeddings.token_embedding.weight").getUnownedSlice()));
-
-    SLANG_RETURN_ON_FAIL(positionEmbedding->loadParams(
-        reader,
-        (prefix + "embeddings.position_embedding.weight").getUnownedSlice()));
+    // Embeddings - load weights into tensors for fused gather
+    {
+        String weightNameStr = prefix + "embeddings.token_embedding.weight";
+        auto weightName = weightNameStr.getUnownedSlice();
+        const SafeTensorInfo* info = reader.getTensorInfo(weightName);
+        if (!info)
+            return SLANG_FAIL;
+        List<uint8_t> rawData;
+        SLANG_RETURN_ON_FAIL(reader.readTensor(weightName, ElementType::Float32, rawData));
+        tokenEmbeddingWeights = ctx->createTensor(
+            ElementType::Float32,
+            info->shape,
+            rawData.getCount(),
+            rawData.getBuffer(),
+            "TokenEmbeddingWeights");
+    }
+    {
+        String weightNameStr = prefix + "embeddings.position_embedding.weight";
+        auto weightName = weightNameStr.getUnownedSlice();
+        const SafeTensorInfo* info = reader.getTensorInfo(weightName);
+        if (!info)
+            return SLANG_FAIL;
+        List<uint8_t> rawData;
+        SLANG_RETURN_ON_FAIL(reader.readTensor(weightName, ElementType::Float32, rawData));
+        positionEmbeddingWeights = ctx->createTensor(
+            ElementType::Float32,
+            info->shape,
+            rawData.getCount(),
+            rawData.getBuffer(),
+            "PositionEmbeddingWeights");
+    }
 
     // Transformer layers
     for (Index i = 0; i < layers.getCount(); i++)
@@ -374,9 +397,7 @@ void CLIPTextEncoder::queueExecute(
     // (required for async execution - allocating during queuing can cause issues)
     // ========================================================================
     
-    // Embedding buffers
-    auto tokEmb = ctx->allocScratchTensor(ElementType::Float32, Shape(totalTokens, hiddenSize));
-    auto posEmb = ctx->allocScratchTensor(ElementType::Float32, Shape(totalTokens, hiddenSize));
+    // Hidden state buffer (fused embedding kernel writes directly here)
     auto hidden = ctx->allocScratchTensor(ElementType::Float32, Shape(totalTokens, hiddenSize));
     
     // Layer output buffers
@@ -392,23 +413,25 @@ void CLIPTextEncoder::queueExecute(
     // ========================================================================
     
     // Token embeddings
-    TensorView tokenIdsFlat = tokenIds;
-    tokenIdsFlat.shape = Shape(totalTokens);
-    tokenEmbedding->queueExecute(task, tokEmb, tokenIdsFlat);
-
-    // Position embeddings
+    // Fused token + position embeddings in a single kernel
     // For batchSize=1: use pre-created position IDs directly
     // For batchSize>1: would need to tile position IDs (not currently supported)
     if (batchSize != 1)
     {
         throw std::runtime_error("CLIPTextEncoder: batchSize > 1 not yet supported");
     }
+    
+    TensorView tokenIdsFlat = tokenIds;
+    tokenIdsFlat.shape = Shape(totalTokens);
     TensorView posIdsView = positionIdsTensor->getView();
     posIdsView.shape = Shape(seqLen);
-    positionEmbedding->queueExecute(task, posEmb, posIdsView);
-
-    // Add token + position embeddings
-    embeddingAdd->queueExecute(task, hidden, tokEmb, posEmb);
+    
+    Dictionary<Expr, InputInfo> embedInputs;
+    embedInputs.add(tokenTableExpr, tokenEmbeddingWeights->getView());
+    embedInputs.add(tokenIndicesExpr, tokenIdsFlat);
+    embedInputs.add(posTableExpr, positionEmbeddingWeights->getView());
+    embedInputs.add(posIndicesExpr, posIdsView);
+    fusedEmbedKernel->queueExecute(task, hidden, embedInputs);
 
     // Transformer layers
     TensorView current = hidden;

@@ -24,6 +24,18 @@ using namespace Slang;
 //   auto imageData = ctx->readBuffer<float>(imageView);
 //   writeImagePNG("output.png", 512, 512, 3, imageData);
 //
+// Performance statistics from image generation
+struct SDPerformanceStats
+{
+    double clipTimeMs = 0.0;       // CLIP text encoding time
+    double diffusionTimeMs = 0.0;  // DDIM sampling loop time
+    double vaeTimeMs = 0.0;        // VAE decoding time
+    double totalTimeMs = 0.0;      // Total generation time
+    int inferenceSteps = 0;        // Number of diffusion steps
+    
+    double msPerStep() const { return inferenceSteps > 0 ? diffusionTimeMs / inferenceSteps : 0.0; }
+};
+
 class SDImageGenerator : public RefObject
 {
 public:
@@ -49,17 +61,10 @@ private:
     // Scaling kernel for VAE input
     RefPtr<ElementwiseKernel> vaeScaleKernel;
 
-    // CFG combination kernel: output = uncond + scale * (cond - uncond)
-    // Takes sliced views of batched noise prediction
-    RefPtr<ElementwiseKernel> cfgKernel;
-    Expr cfgUncondExpr;
-    Expr cfgCondExpr;
-    Expr cfgScaleExpr;
-
     // Latent duplicate kernel: duplicates [1,H,W,C] → [2,H,W,C] for batched CFG
     RefPtr<ElementwiseKernel> latentDuplicateKernel;
 
-    // DDIM sampler
+    // DDIM sampler (includes fused CFG+step kernel)
     RefPtr<DDIMSampler> sampler;
 
     // Pre-allocated persistent buffers
@@ -67,12 +72,14 @@ private:
     RefPtr<Tensor> latent;
     RefPtr<Tensor> latentNext;
     RefPtr<Tensor> noisePredBatched;   // [2, H, W, C] for batched CFG
-    RefPtr<Tensor> noisePredCombined;  // [1, H, W, C] Combined noise after CFG
     RefPtr<Tensor> latentBatched;      // [2, H, W, C] duplicated latent for batched UNet
     RefPtr<Tensor> scaledLatent;
     RefPtr<Tensor> outputImage;
 
     bool modelsLoaded = false;
+    
+    // Performance stats from last generation
+    SDPerformanceStats lastPerfStats;
 
 public:
     SDImageGenerator(InferencingContext* context);
@@ -93,6 +100,9 @@ public:
     // Get image dimensions
     int getImageWidth() const { return kImageWidth; }
     int getImageHeight() const { return kImageHeight; }
+    
+    // Get performance stats from last generation
+    const SDPerformanceStats& getLastPerfStats() const { return lastPerfStats; }
 
 private:
     void initializeKernels();

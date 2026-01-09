@@ -126,10 +126,16 @@ class CLIPTextEncoder : public RefObject
 public:
     RefPtr<InferencingContext> ctx;
     
-    // Embeddings (using separate kernels for now - simpler and safer)
-    RefPtr<GatherKernel> tokenEmbedding;     // [vocab_size, hidden_size]
-    RefPtr<GatherKernel> positionEmbedding;  // [max_seq_len, hidden_size]
-    RefPtr<ElementwiseKernel> embeddingAdd;  // token + position
+    // Fused embedding kernel: gather(tokenTable, tokenIds) + gather(posTable, posIds)
+    RefPtr<ElementwiseKernel> fusedEmbedKernel;
+    Expr tokenTableExpr;      // Token embedding table
+    Expr tokenIndicesExpr;    // Token indices
+    Expr posTableExpr;        // Position embedding table
+    Expr posIndicesExpr;      // Position indices
+    
+    // Embedding weight tensors (for fused gather)
+    RefPtr<Tensor> tokenEmbeddingWeights;   // [vocab_size, hidden_size]
+    RefPtr<Tensor> positionEmbeddingWeights; // [max_seq_len, hidden_size]
     
     // Transformer layers
     List<RefPtr<CLIPTransformerBlock>> layers;

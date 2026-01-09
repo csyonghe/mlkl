@@ -54,12 +54,22 @@ struct DiffusionSchedule
 class DDIMSampler : public RefObject
 {
     InferencingContext* ctx;
+    
+    // Standard DDIM step kernel: x_prev = c1 * x_t + c2 * eps
     RefPtr<ElementwiseKernel> updateKernel;
-
-    Expr x_t; // Input Image
-    Expr eps; // Predicted Noise
-    Expr c1;  // Coeff for x_t
-    Expr c2;  // Coeff for eps
+    Expr x_t;   // Input latent
+    Expr eps;   // Predicted noise
+    Expr c1;    // Coeff for x_t
+    Expr c2;    // Coeff for eps
+    
+    // CFG-fused step kernel: x_prev = c1 * x_t + c2 * (eps_uncond + cfg * (eps_cond - eps_uncond))
+    RefPtr<ElementwiseKernel> cfgStepKernel;
+    Expr cfg_x_t;        // Input latent
+    Expr cfg_eps_uncond; // Unconditional noise prediction
+    Expr cfg_eps_cond;   // Conditional noise prediction
+    Expr cfg_c1;         // Coeff for x_t
+    Expr cfg_c2;         // Coeff for combined eps
+    Expr cfg_scale;      // CFG guidance scale
 
 public:
     DiffusionSchedule schedule;
@@ -82,15 +92,25 @@ public:
             timesteps.add(i * step_ratio);
         }
 
-        // 2. Build Kernel with x0
-        // x_{t-1} = c1 * x_t + c2 * eps
+        // Standard DDIM step kernel: x_{t-1} = c1 * x_t + c2 * eps
         x_t = buffer();
         eps = buffer();
         c1 = uniformConstant();
         c2 = uniformConstant();
-
         Expr next_x = x_t * c1 + eps * c2;
         updateKernel = new ElementwiseKernel(ctx, next_x);
+        
+        // CFG-fused step kernel:
+        // x_prev = c1 * x_t + c2 * (eps_uncond + cfg_scale * (eps_cond - eps_uncond))
+        cfg_x_t = buffer();
+        cfg_eps_uncond = buffer();
+        cfg_eps_cond = buffer();
+        cfg_c1 = uniformConstant();
+        cfg_c2 = uniformConstant();
+        cfg_scale = uniformConstant();
+        Expr cfg_combined = cfg_eps_uncond + cfg_scale * (cfg_eps_cond - cfg_eps_uncond);
+        Expr cfg_next_x = cfg_x_t * cfg_c1 + cfg_combined * cfg_c2;
+        cfgStepKernel = new ElementwiseKernel(ctx, cfg_next_x);
     }
 
     // Takes the Loop Index 'i' (from 0 to inference_steps-1)
@@ -146,5 +166,60 @@ public:
         updateKernel->queueExecute(task, out_x_prev, inputs);
 
         return t; // Return actual training time for debug/logging
+    }
+    
+    // CFG-fused step: takes batched noise prediction [2, H, W, C] with [uncond, cond]
+    // and applies CFG combination + DDIM step in a single kernel launch.
+    // noise_pred_batched: [2, H, W, C] where [0] = uncond, [1] = cond
+    // guidance_scale: CFG scale (typically 7.5)
+    int stepWithCFG(
+        InferencingTask& task,
+        TensorView out_x_prev,
+        TensorView in_x_t,
+        TensorView noise_pred_batched,
+        float guidance_scale,
+        int index)
+    {
+        // 1. Map Index -> Training Timestep
+        int t = timesteps[index];
+        int t_prev = (index < inference_steps - 1) ? timesteps[index + 1] : -1;
+
+        // 2. Get Alphas
+        float alpha_bar_t = schedule.alphas_cumprod[t];
+        float alpha_bar_prev = (t_prev >= 0) ? schedule.alphas_cumprod[t_prev] : 1.0f;
+
+        float sqrt_alpha_bar_t = std::sqrt(alpha_bar_t);
+        float sqrt_alpha_bar_prev = std::sqrt(alpha_bar_prev);
+        float sqrt_one_minus_alpha_bar_t = std::sqrt(1.0f - alpha_bar_t);
+        float sqrt_one_minus_alpha_bar_prev = std::sqrt(1.0f - alpha_bar_prev);
+
+        // 3. Compute DDIM Coefficients
+        float val_c1 = sqrt_alpha_bar_prev / sqrt_alpha_bar_t;
+        float val_c2 = sqrt_one_minus_alpha_bar_prev -
+                       (sqrt_alpha_bar_prev * sqrt_one_minus_alpha_bar_t / sqrt_alpha_bar_t);
+
+        // 4. Slice batched noise prediction into uncond [0] and cond [1]
+        Shape singleShape = out_x_prev.shape;
+        int elementCount = singleShape.getElementCount();
+        
+        TensorView eps_uncond = noise_pred_batched;
+        eps_uncond.shape = singleShape;
+        
+        TensorView eps_cond = noise_pred_batched;
+        eps_cond.bufferView.offset += elementCount * sizeof(float);
+        eps_cond.shape = singleShape;
+
+        // 5. Execute fused CFG + DDIM step
+        Dictionary<Expr, InputInfo> inputs;
+        inputs.add(cfg_x_t, in_x_t);
+        inputs.add(cfg_eps_uncond, eps_uncond);
+        inputs.add(cfg_eps_cond, eps_cond);
+        inputs.add(cfg_c1, InputInfo(val_c1));
+        inputs.add(cfg_c2, InputInfo(val_c2));
+        inputs.add(cfg_scale, InputInfo(guidance_scale));
+
+        cfgStepKernel->queueExecute(task, out_x_prev, inputs);
+
+        return t;
     }
 };

@@ -53,8 +53,8 @@ static SlangResult generateImage(InferencingContext* ctx)
 {
     // Configuration
     const char* prompt = "a beautiful sunset over mountains, digital art, highly detailed";
-    const unsigned int seed = 42;
-    const int inferenceSteps = 20;
+    const unsigned int seed = 1377;
+    const int inferenceSteps = 30;
     const float guidanceScale = 7.5f; // CFG: 1.0 = no guidance, 7.5 = typical, higher = stronger
     const char* outputPath = "result.png";
 
@@ -88,10 +88,22 @@ static SlangResult generateImage(InferencingContext* ctx)
         return SLANG_FAIL;
     }
 
+    // Print performance stats
+    const auto& perf = generator->getLastPerfStats();
+    printf("\n=== Performance ===\n");
+    printf("  CLIP encoding:        %7.1f ms\n", perf.clipTimeMs);
+    printf(
+        "  Diffusion (%2d steps): %7.1f ms (%.1f ms/step)\n",
+        perf.inferenceSteps,
+        perf.diffusionTimeMs,
+        perf.msPerStep());
+    printf("  VAE decoding:         %7.1f ms\n", perf.vaeTimeMs);
+    printf("  Total:                %7.1f ms\n", perf.totalTimeMs);
+
     // ========================================================================
     // Save image
     // ========================================================================
-    printf("Saving image to %s...\n", outputPath);
+    printf("\nSaving image to %s...\n", outputPath);
     auto imageData = ctx->readBuffer<float>(imageView);
     writeImagePNG(
         outputPath,
@@ -100,7 +112,7 @@ static SlangResult generateImage(InferencingContext* ctx)
         3,
         imageData);
 
-    printf("\nDone! Image saved to %s\n", outputPath);
+    printf("Done! Image saved to %s\n", outputPath);
     return SLANG_OK;
 }
 
