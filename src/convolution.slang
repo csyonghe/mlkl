@@ -574,7 +574,7 @@ void flatTransposedConvolution<int kernelSize, int stride, int inChannels, int o
 
 static const int GEMM_TILE_OH = 16;   // Output spatial tile height
 static const int GEMM_TILE_OW = 16;   // Output spatial tile width
-static const int GEMM_TILE_OC = 8;    // Output channels per block (reduced for lower register pressure)
+static const int GEMM_TILE_OC = 16;   // Output channels per block (32 causes register spilling)
 static const int GEMM_TILE_IC = 8;    // Input channels per K-iteration
 
 // Dispatch: x = (outputW + GEMM_TILE_OW - 1) / GEMM_TILE_OW

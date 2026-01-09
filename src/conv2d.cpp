@@ -521,7 +521,7 @@ void Conv2DKernel::executeGemmConv(
     // Dispatch: tile sizes from convolution.slang
     static const int GEMM_TILE_OH = 16;
     static const int GEMM_TILE_OW = 16;
-    static const int GEMM_TILE_OC = 8;
+    static const int GEMM_TILE_OC = 16;
 
     int numOCTiles = (outChannels + GEMM_TILE_OC - 1) / GEMM_TILE_OC;
 
