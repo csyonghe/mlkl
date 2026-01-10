@@ -9,10 +9,37 @@ class SafeTensorsReader;
 // Convolution algorithm selection
 enum class ConvolutionAlgorithm
 {
-    Auto,   // Automatically select based on input size (uses Gemm)
-    Flat,   // Flat kernel (good for small spatial sizes)
-    Tiled,  // Tiled kernel (good for large spatial sizes)
-    Gemm,   // GEMM-style tiled conv (caches both weights and input in shared mem)
+    Auto,           // Automatically select based on input size (uses Gemm)
+    Flat,           // Flat kernel (good for small spatial sizes)
+    Tiled,          // Tiled kernel (good for large spatial sizes)
+    Gemm,           // GEMM-style tiled conv (caches both weights and input in shared mem)
+    GemmWaveShuffle,// GEMM with wave shuffle (weights via warp shuffle, less shared mem)
+    Winograd,       // Winograd F(4x4, 3x3) for 3x3 stride=1 convolutions
+};
+
+// GEMM convolution tile configuration for tuning/experimentation
+struct GemmTileConfig
+{
+    int tileOH = 16;      // Output spatial tile height
+    int tileOW = 16;      // Output spatial tile width
+    int tileOC = 16;      // Output channels per block
+    int tileIC = 8;       // Input channels per K-iteration
+    int threadOH = 1;     // Spatial rows per thread (register blocking)
+    int threadOW = 1;     // Spatial cols per thread (register blocking)
+
+    // Default configuration (current best for general case)
+    static GemmTileConfig defaultConfig() { return GemmTileConfig{}; }
+
+    // Configuration name for logging
+    String getName() const
+    {
+        StringBuilder sb;
+        sb << "OH" << tileOH << "_OW" << tileOW << "_OC" << tileOC << "_IC" << tileIC;
+        return sb.produceString();
+    }
+
+    // Compute thread block size
+    int getBlockSize() const { return (tileOW / threadOW) * (tileOH / threadOH); }
 };
 
 // 2D Convolution Kernel
@@ -54,14 +81,26 @@ private:
     ComPtr<rhi::IComputePipeline> flatPipeline;
     ComPtr<rhi::IComputePipeline> flatWaveReducePipeline;
     ComPtr<rhi::IComputePipeline> gemmPipeline;
+    ComPtr<rhi::IComputePipeline> gemmSmallSpatialPipeline; // For small outputs (<=8x8)
+    ComPtr<rhi::IComputePipeline> gemmWaveShufflePipeline;  // Wave shuffle version (no weight shared mem)
+    ComPtr<rhi::IComputePipeline> winogradPipeline;         // Winograd F(4x4, 3x3)
 
     InferencingContext* context;
     ElementType elementType;
     ProgramNode inputProgram;
     ProgramNode outputProgram;
     SinkExpr sinkExpr;
+    GemmTileConfig gemmConfig;              // Tile configuration used for gemmPipeline
+    GemmTileConfig gemmSmallSpatialConfig;  // Config for small spatial outputs
+
+    // Winograd-transformed weights buffer [OC, IC, 6, 6] for F(4x4, 3x3)
+    ComPtr<rhi::IBuffer> winogradWeightsBuffer;
 
     void validateTensorElementType(const TensorView& tv, const char* name) const;
+    ComPtr<rhi::IComputePipeline> createGemmPipelineWithConfig(const GemmTileConfig& config);
+    ComPtr<rhi::IComputePipeline> createGemmWaveShufflePipeline(const GemmTileConfig& config);
+    void createWinogradPipeline();
+    void transformWeightsToWinograd();
 
 public:
     int tileSize;
@@ -127,7 +166,19 @@ public:
         Expr outputExpr = kernelOutput(),
         String name = "conv2d");
 
+    // Constructor with custom GEMM tile configuration (for benchmarking/tuning)
+    Conv2DKernel(
+        InferencingContext* context,
+        int tileSize,
+        int kernelSize,
+        int stride,
+        int inChannels,
+        int outChannels,
+        const GemmTileConfig& gemmTileConfig,
+        String name = "conv2d");
+
     ElementType getElementType() const { return elementType; }
+    const GemmTileConfig& getGemmConfig() const { return gemmConfig; }
 
     SlangResult loadParams(TorchParamReader& reader, bool loadAndFuseBNorm);
 
@@ -185,6 +236,20 @@ public:
 private:
     // GEMM-style tiled convolution (called when algorithm == Gemm)
     void executeGemmConv(
+        InferencingTask& task,
+        EvalContext& ctx,
+        TensorView output,
+        int padding);
+
+    // GEMM with wave shuffle (called when algorithm == GemmWaveShuffle)
+    void executeGemmWaveShuffleConv(
+        InferencingTask& task,
+        EvalContext& ctx,
+        TensorView output,
+        int padding);
+
+    // Winograd F(4x4, 3x3) convolution (called when algorithm == Winograd)
+    void executeWinogradConv(
         InferencingTask& task,
         EvalContext& ctx,
         TensorView output,

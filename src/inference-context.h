@@ -14,7 +14,7 @@ using namespace Slang;
 
 // Define this to 1 to enable intermediate mode that runs kernels synchronously
 // at each queueExecute for easier debugging.
-#define IMMEDIATE_MODE 1
+#define IMMEDIATE_MODE 0
 
 class InferencingContext;
 

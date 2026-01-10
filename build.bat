@@ -21,7 +21,7 @@ if %ERRORLEVEL% neq 0 (
 
 REM Build the project
 echo Building project...
-cmake --build %BUILD_DIR% --config Release
+cmake --build %BUILD_DIR% --config Release --parallel
 
 if %ERRORLEVEL% neq 0 (
     echo Build failed!

@@ -52,6 +52,7 @@ interface IUnpackedElement
     
     // Wave intrinsics
     This waveActiveSum();
+    This waveReadLaneAt(int lane);
 }
 
 /// Interface for tensor storage element types.
@@ -149,6 +150,7 @@ extension float : IUnpackedElement
     [ForceInline] static This min(This x, This y) { return ::min(x, y); }
     
     [ForceInline] This waveActiveSum() { return WaveActiveSum(this); }
+    [ForceInline] This waveReadLaneAt(int lane) { return WaveReadLaneAt(this, lane); }
 }
 
 extension float : ITensorElement
@@ -202,6 +204,7 @@ extension half : IUnpackedElement
     [ForceInline] static This min(This x, This y) { return half(::min(float(x), float(y))); }
     
     [ForceInline] This waveActiveSum() { return WaveActiveSum(this); }
+    [ForceInline] This waveReadLaneAt(int lane) { return WaveReadLaneAt(this, lane); }
 }
 
 extension half : ITensorElement
@@ -255,6 +258,7 @@ extension int : IUnpackedElement
     [ForceInline] static This min(This x, This y) { return ::min(x, y); }
     
     [ForceInline] This waveActiveSum() { return WaveActiveSum(this); }
+    [ForceInline] This waveReadLaneAt(int lane) { return WaveReadLaneAt(this, lane); }
 }
 
 extension int : ITensorElement

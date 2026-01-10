@@ -127,6 +127,7 @@ SlangResult testConv2DWithPermuteSink(InferencingContext* ctx);
 SlangResult testConv2DWithFusedResidual(InferencingContext* ctx);
 SlangResult testConv2DGemm(InferencingContext* ctx);
 SlangResult testConv2DGemmBatched(InferencingContext* ctx);
+SlangResult testConv2DWinograd(InferencingContext* ctx);
 
 // Defined in test-transposed-conv2d.cpp
 SlangResult testTransposedConv2D(InferencingContext* ctx);
@@ -150,9 +151,7 @@ SlangResult testLinearTiledBatch1(InferencingContext* ctx);
 SlangResult testLinearTiledBatch4(InferencingContext* ctx);
 SlangResult testLinearTiledBatch16(InferencingContext* ctx);
 SlangResult testLinearAutoSelection(InferencingContext* ctx);
-SlangResult testLinearGemvLargeK(InferencingContext* ctx);
-
-// Defined in test-reduce.cpp
+SlangResult testLinearGemvLargeK(InferencingContext* ctx);// Defined in test-reduce.cpp
 SlangResult testReduceLastDim(InferencingContext* ctx);
 SlangResult testReduceGroupNorm(InferencingContext* ctx);
 SlangResult testReduceAxis(InferencingContext* ctx);

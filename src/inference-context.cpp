@@ -23,6 +23,11 @@ InferencingContext::InferencingContext(size_t defaultPageSize)
         entry.value = value;
         compilerOptionsEntries.add(entry);
     }
+    String exePath = Path::getParentDirectory(Path::getExecutablePath()).getBuffer();
+    const char* exePathStr = exePath.getBuffer();
+    deviceDesc.slang.searchPaths = &exePathStr;
+    deviceDesc.slang.searchPathCount = 1;
+
     deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
     deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
     deviceDesc.deviceType = rhi::DeviceType::Vulkan;
@@ -74,7 +79,13 @@ ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(
         return pipeline;
     }
     ComPtr<slang::IEntryPoint> entryPoint;
-    slangModule->findEntryPointByName(entryPointName, entryPoint.writeRef());
+    ComPtr<ISlangBlob> diagnosticBlob;
+
+    slangModule->findAndCheckEntryPoint(
+        entryPointName,
+        SLANG_STAGE_COMPUTE,
+        entryPoint.writeRef(),
+        diagnosticBlob.writeRef());
     if (!entryPoint)
     {
         reportError("Failed to find entry point '%s'\n", entryPointName);
@@ -86,7 +97,6 @@ ComPtr<rhi::IComputePipeline> InferencingContext::createComputePipeline(
     {
         args.add(slang::SpecializationArg::fromExpr(arg.getBuffer()));
     }
-    ComPtr<ISlangBlob> diagnosticBlob;
     entryPoint->specialize(
         args.getBuffer(),
         (SlangInt)args.getCount(),

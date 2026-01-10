@@ -775,7 +775,6 @@ void materialize<T : ITensorElement, P : IExpr<T>>(
 {
     uint tid = id.x;
     if (tid >= params.count) return;
-
     // Decompose linear index to N-D coordinate (row-major order)
     Coord coord;
     coord.baseOffset = 0;

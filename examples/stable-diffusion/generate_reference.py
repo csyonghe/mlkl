@@ -134,8 +134,20 @@ def main():
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup runs")
     parser.add_argument("--fp16", action="store_true", help="Use FP16 precision")
     parser.add_argument("--no-xformers", action="store_true", help="Disable xformers")
+    parser.add_argument("--no-tf32", action="store_true", help="Disable TF32 (use true FP32)")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile (PyTorch 2.0+)")
     args = parser.parse_args()
+    
+    # Configure TF32 mode
+    if args.no_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        print("[TF32] Disabled - using true FP32 (no tensor cores)")
+    else:
+        # Show current TF32 status
+        tf32_matmul = torch.backends.cuda.matmul.allow_tf32
+        tf32_cudnn = torch.backends.cudnn.allow_tf32
+        print(f"[TF32] matmul={tf32_matmul}, cudnn={tf32_cudnn} (tensor cores active for FP32)")
     
     # Check dependencies
     try:
@@ -160,7 +172,9 @@ def main():
     print(f"Steps: {num_inference_steps}")
     print(f"Size: {width}x{height}")
     print(f"Guidance scale: {guidance_scale}")
-    print(f"Precision: {'FP16' if args.fp16 else 'FP32'}")
+    precision_str = 'FP16' if args.fp16 else ('FP32 (true)' if args.no_tf32 else 'FP32 (TF32)')
+    print(f"Precision: {precision_str}")
+    print(f"xformers: {'disabled' if args.no_xformers else 'enabled'}")
     print()
     
     # Check CUDA

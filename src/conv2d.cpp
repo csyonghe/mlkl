@@ -58,12 +58,223 @@ Conv2DKernel::Conv2DKernel(
         context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
 
     // ========================================================================
-    // Create GEMM-style tiled convolution (for ConvolutionAlgorithm::Gemm)
+    // GEMM Convolution Tile Configuration - Tuning Summary
+    // ========================================================================
+    // Extensive benchmarking (batchSize=2, SD 1.5 configs) explored:
+    //   - TILE_OH/OW: 8, 16
+    //   - TILE_OC: 2, 4, 8, 16, 32
+    //   - TILE_IC: 4, 8, 16, 32
+    //
+    // Key findings:
+    //   1. TILE_IC=8 is optimal for all configs. Larger values (16, 32) cause
+    //      ~2x slowdown due to register pressure and reduced occupancy.
+    //      Smaller (IC=4) also slower.
+    //
+    //   2. For outputs <= 8x8:
+    //      - 8x8 spatial tiles are better than 16x16 (100% vs 25% thread utilization)
+    //      - TILE_OC=8 is 12-24% faster than TILE_OC=16
+    //      - Combined improvement: ~4% over baseline
+    //
+    //   3. For outputs > 8x8:
+    //      - 16x16 spatial tiles are optimal (thread waste not an issue)
+    //      - TILE_OC=16 is slightly better than TILE_OC=8
+    //
+    //   4. Further gains require algorithmic changes (double buffering, Winograd)
+    //      or FP16/Tensor Cores.
+    // ========================================================================
+
+    // Default pipeline: 16x16 spatial, TILE_OC=16, TILE_IC=8
+    gemmConfig = GemmTileConfig::defaultConfig();
+    gemmPipeline = createGemmPipelineWithConfig(gemmConfig);
+
+    // Small-spatial pipeline for outputs <= 8x8: 8x8 spatial, TILE_OC=8, TILE_IC=8
+    gemmSmallSpatialConfig = GemmTileConfig::defaultConfig();
+    gemmSmallSpatialConfig.tileOH = 8;
+    gemmSmallSpatialConfig.tileOW = 8;
+    gemmSmallSpatialConfig.tileOC = 8;
+    gemmSmallSpatialPipeline = createGemmPipelineWithConfig(gemmSmallSpatialConfig);
+
+    // Wave shuffle pipeline: same config but uses wave intrinsics instead of weight shared memory
+    gemmWaveShufflePipeline = createGemmWaveShufflePipeline(gemmConfig);
+
+    // Winograd pipeline for 3x3 stride=1 convolutions
+    if (kernelSize == 3 && stride == 1)
+    {
+        createWinogradPipeline();
+    }
+}
+
+ComPtr<rhi::IComputePipeline> Conv2DKernel::createGemmPipelineWithConfig(const GemmTileConfig& config)
+{
+    String elemTypeName = getSlangElementTypeName(elementType);
+
+    // ========================================================================
+    // Create GEMM-style tiled convolution pipeline
     // ========================================================================
     // This kernel caches both weights AND input in shared memory for maximum reuse.
-    // Uses the same ConvolutionParams struct as tiledConvolution/flatConvolution.
-    // Note: tileSize is included for API consistency but not used by gemmConvolution.
-    gemmPipeline = context->createComputePipeline("gemmConvolution", makeArrayView(specArgs));
+    // Each thread computes THREAD_OH x THREAD_OW x TILE_OC outputs.
+    //
+    // Shared memory constraint for stride=2, kernelSize=3:
+    //   INPUT_TILE_H = (TILE_OH-1)*stride + kernelSize
+    //   s_input = TILE_IC * INPUT_TILE_H * INPUT_TILE_W * 4 bytes
+    //   Must fit in ~48KB along with s_weight
+    String gemmArgs[] = {
+        String(config.tileOH),
+        String(config.tileOW),
+        String(config.tileOC),
+        String(config.tileIC),
+        String(config.threadOH),
+        String(config.threadOW),
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
+    return context->createComputePipeline("gemmConvolution", makeArrayView(gemmArgs));
+}
+
+ComPtr<rhi::IComputePipeline> Conv2DKernel::createGemmWaveShufflePipeline(const GemmTileConfig& config)
+{
+    String elemTypeName = getSlangElementTypeName(elementType);
+
+    // Same arguments as gemmConvolution, but calls wave shuffle version
+    String gemmArgs[] = {
+        String(config.tileOH),
+        String(config.tileOW),
+        String(config.tileOC),
+        String(config.tileIC),
+        String(config.threadOH),
+        String(config.threadOW),
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
+    return context->createComputePipeline("gemmConvolutionWaveShuffle", makeArrayView(gemmArgs));
+}
+
+void Conv2DKernel::createWinogradPipeline()
+{
+    String elemTypeName = getSlangElementTypeName(elementType);
+
+    // Winograd F(4x4, 3x3) pipeline
+    // TILE_OC and TILE_IC are tunable parameters
+    const int TILE_OC = 16;  // Output channels per block
+    const int TILE_IC = 8;   // Input channels per K-iteration
+
+    String winogradArgs[] = {
+        String(TILE_OC),
+        String(TILE_IC),
+        String(inChannels),
+        String(outChannels),
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
+    winogradPipeline = context->createComputePipeline("winogradConvolution", makeArrayView(winogradArgs));
+}
+
+void Conv2DKernel::transformWeightsToWinograd()
+{
+    // Transform 3x3 weights to Winograd domain using G transform
+    // G matrix for F(4,3):
+    // [ 1/4     0       0    ]
+    // [-1/6   -1/6    -1/6   ]
+    // [-1/6    1/6    -1/6   ]
+    // [1/24   1/12    1/6    ]
+    // [1/24  -1/12    1/6    ]
+    // [ 0      0       1     ]
+    //
+    // For each filter: U = G * g * GT  (where g is 3x3 filter, U is 6x6 transformed)
+
+    if (!weightsTransposedBuffer)
+        return;
+
+    // Read weights from GPU
+    int weightsSize = outChannels * inChannels * 9;  // 3x3 = 9
+    List<float> weights;
+    weights.setCount(weightsSize);
+
+    // weightsTransposedBuffer is a raw IBuffer, read directly
+    context->getDevice()->readBuffer(
+        weightsTransposedBuffer, 
+        0,  // offset
+        weightsSize * sizeof(float), 
+        weights.getBuffer());
+
+    // G matrix for F(4,3) - transforms 3x3 to 6x6
+    const float G[6][3] = {
+        { 1.0f/4,       0,       0},
+        {-1.0f/6, -1.0f/6, -1.0f/6},
+        {-1.0f/6,  1.0f/6, -1.0f/6},
+        {1.0f/24, 1.0f/12,  1.0f/6},
+        {1.0f/24,-1.0f/12,  1.0f/6},
+        {      0,       0,       1}
+    };
+
+    // Allocate transformed weights: [outChannels, inChannels, 6, 6]
+    int transformedSize = outChannels * inChannels * 36;
+    List<float> transformedWeights;
+    transformedWeights.setCount(transformedSize);
+
+    // Transform each 3x3 filter to 6x6
+    for (int oc = 0; oc < outChannels; oc++)
+    {
+        for (int ic = 0; ic < inChannels; ic++)
+        {
+            // Get 3x3 filter (layout: [OC, KH, KW, IC] for weightsTransposed)
+            // Actually need to check the exact layout...
+            // weightsTransposed is [OC, KH, KW, IC] based on the GEMM kernel
+            float g[3][3];
+            for (int ky = 0; ky < 3; ky++)
+            {
+                for (int kx = 0; kx < 3; kx++)
+                {
+                    int idx = oc * (3 * 3 * inChannels) + ky * (3 * inChannels) + kx * inChannels + ic;
+                    g[ky][kx] = weights[idx];
+                }
+            }
+
+            // Compute G * g (6x3 result)
+            float temp[6][3];
+            for (int i = 0; i < 6; i++)
+            {
+                for (int j = 0; j < 3; j++)
+                {
+                    temp[i][j] = G[i][0] * g[0][j] + G[i][1] * g[1][j] + G[i][2] * g[2][j];
+                }
+            }
+
+            // Compute (G * g) * GT = temp * GT (6x6 result)
+            float U[6][6];
+            for (int i = 0; i < 6; i++)
+            {
+                for (int j = 0; j < 6; j++)
+                {
+                    U[i][j] = temp[i][0] * G[j][0] + temp[i][1] * G[j][1] + temp[i][2] * G[j][2];
+                }
+            }
+
+            // Store transformed weights: [OC, IC, 6, 6]
+            for (int ky = 0; ky < 6; ky++)
+            {
+                for (int kx = 0; kx < 6; kx++)
+                {
+                    int idx = oc * (inChannels * 36) + ic * 36 + ky * 6 + kx;
+                    transformedWeights[idx] = U[ky][kx];
+                }
+            }
+        }
+    }
+
+    // Upload to GPU
+    winogradWeightsBuffer = context->createPersistentBuffer(transformedWeights, "winograd_weights");
 }
 
 void Conv2DKernel::validateTensorElementType(const TensorView& tv, const char* name) const
@@ -111,6 +322,66 @@ Conv2DKernel::Conv2DKernel(
             "  Conv2DKernel(ctx, elemType, tileSize, kernelSize, stride, inCh, outCh, "
             "inputExpr, outputExpr, sinkExpr)");
     }
+}
+
+Conv2DKernel::Conv2DKernel(
+    InferencingContext* context,
+    int tileSize,
+    int kernelSize,
+    int stride,
+    int inChannels,
+    int outChannels,
+    const GemmTileConfig& gemmTileConfig,
+    String name)
+    : context(context)
+    , elementType(ElementType::Float32)
+    , tileSize(tileSize)
+    , kernelSize(kernelSize)
+    , stride(stride)
+    , inChannels(inChannels)
+    , outChannels(outChannels)
+    , sinkExpr(bufferSink())
+    , name(name)
+{
+    // Simplified constructor for benchmarking with custom tile config
+    // Uses default buffer() input and kernelOutput() output expressions
+    int globalRegCounter = 0;
+    inputProgram = compileExprToProgram(buffer(), &globalRegCounter);
+    outputProgram = compileExprToProgram(kernelOutput(), &globalRegCounter);
+
+    String elemTypeName = getSlangElementTypeName(elementType);
+    String specArgs[] = {
+        String(tileSize),
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
+
+    tilePipeline = context->createComputePipeline("tiledConvolution", makeArrayView(specArgs));
+
+    String flatArgs[] = {
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+        elemTypeName,
+        inputProgram.getSlangTypeName(elementType),
+        outputProgram.getSlangTypeName(elementType),
+        sinkExpr.node->getSlangTypeName(elementType)};
+    flatPipeline = context->createComputePipeline("flatConvolution", makeArrayView(flatArgs));
+    flatWaveReducePipeline =
+        context->createComputePipeline("flatConvolutionWaveReduce", makeArrayView(flatArgs));
+
+    // Create GEMM pipeline with custom configuration
+    gemmConfig = gemmTileConfig;
+    gemmPipeline = createGemmPipelineWithConfig(gemmTileConfig);
+    // For custom config, use same config for small-spatial (no auto-selection)
+    gemmSmallSpatialConfig = gemmTileConfig;
+    gemmSmallSpatialPipeline = gemmPipeline;
 }
 
 SlangResult Conv2DKernel::loadParams(TorchParamReader& reader, bool loadAndFuseBNorm)
@@ -267,6 +538,12 @@ SlangResult Conv2DKernel::loadParams(
             transposedConverted.getBuffer(), transposedConverted.getCount());
         if (!weightsTransposedBuffer)
             return SLANG_FAIL;
+
+        // Transform weights to Winograd domain if applicable (3x3 stride=1)
+        if (winogradPipeline && kernelSize == 3 && stride == 1)
+        {
+            transformWeightsToWinograd();
+        }
     }
     return SLANG_OK;
 }
@@ -346,10 +623,28 @@ void Conv2DKernel::queueExecute(
         effectiveAlgorithm = ConvolutionAlgorithm::Gemm;
     }
 
+    // Winograd convolution for 3x3 stride=1
+    if (effectiveAlgorithm == ConvolutionAlgorithm::Winograd)
+    {
+        if (!winogradPipeline || kernelSize != 3 || stride != 1)
+        {
+            throw std::runtime_error("Winograd algorithm requires 3x3 kernel with stride=1");
+        }
+        executeWinogradConv(task, ctx, output, padding);
+        return;
+    }
+
     // GEMM-style tiled convolution (caches both weights and input)
     if (effectiveAlgorithm == ConvolutionAlgorithm::Gemm)
     {
         executeGemmConv(task, ctx, output, padding);
+        return;
+    }
+
+    // GEMM with wave shuffle (uses warp shuffle instead of weight shared memory)
+    if (effectiveAlgorithm == ConvolutionAlgorithm::GemmWaveShuffle)
+    {
+        executeGemmWaveShuffleConv(task, ctx, output, padding);
         return;
     }
 
@@ -456,11 +751,11 @@ void Conv2DKernel::queueExecute(
 }
 
 // ============================================================================
-// GEMM-style tiled convolution
+// GEMM-style tiled convolution with register blocking
 // ============================================================================
 // Uses shared memory for both weights and input for maximum data reuse.
-// Tile sizes defined in convolution.slang:
-//   GEMM_TILE_OH = 8, GEMM_TILE_OW = 8, GEMM_TILE_OC = 32, GEMM_TILE_IC = 8
+// Register blocking: each thread computes THREAD_OH x THREAD_OW x TILE_OC outputs.
+// Tile parameters are stored in gemmConfig and used at dispatch time.
 
 void Conv2DKernel::executeGemmConv(
     InferencingTask& task,
@@ -518,17 +813,136 @@ void Conv2DKernel::executeGemmConv(
     writer.write<int>(batchSize);
     writer.finish();
 
-    // Dispatch: tile sizes from convolution.slang
-    static const int GEMM_TILE_OH = 16;
-    static const int GEMM_TILE_OW = 16;
-    static const int GEMM_TILE_OC = 16;
+    // Use small-spatial pipeline for outputs <= 8x8
+    // This uses TILE_OH=8, TILE_OW=8, TILE_OC=8 which:
+    // 1. Avoids thread waste (16x16 tile with 8x8 output = 75% idle threads)
+    // 2. Uses TILE_OC=8 which benchmark showed is 12-24% faster for small spatial
+    bool useSmallSpatialPipeline = 
+        (outputWidth <= 8 && outputHeight <= 8);
 
-    int numOCTiles = (outChannels + GEMM_TILE_OC - 1) / GEMM_TILE_OC;
+    const GemmTileConfig& config = useSmallSpatialPipeline ? gemmSmallSpatialConfig : gemmConfig;
+
+    // Dispatch: tile sizes from selected config
+    int numOCTiles = (outChannels + config.tileOC - 1) / config.tileOC;
+
+    auto& pipeline = useSmallSpatialPipeline ? gemmSmallSpatialPipeline : gemmPipeline;
 
     task.dispatchKernel(
-        gemmPipeline,
-        (outputWidth + GEMM_TILE_OW - 1) / GEMM_TILE_OW,
-        (outputHeight + GEMM_TILE_OH - 1) / GEMM_TILE_OH,
+        pipeline,
+        (outputWidth + config.tileOW - 1) / config.tileOW,
+        (outputHeight + config.tileOH - 1) / config.tileOH,
+        batchSize * numOCTiles,
+        paramData);
+}
+
+void Conv2DKernel::executeGemmWaveShuffleConv(
+    InferencingTask& task,
+    EvalContext& ctx,
+    TensorView output,
+    int padding)
+{
+    // Same as executeGemmConv but uses wave shuffle pipeline
+    auto inputShape = inputProgram.resolveShape(ctx);
+    int batchSize = inputShape[0];
+    int inputHeight = inputShape[1];
+    int inputWidth = inputShape[2];
+
+    if (inputShape[3] != inChannels)
+        throw std::runtime_error("Conv2DKernel: Input channel count mismatch.");
+
+    int outputHeight = (inputHeight + padding * 2 - kernelSize) / stride + 1;
+    int outputWidth = (inputWidth + padding * 2 - kernelSize) / stride + 1;
+
+    List<uint8_t> paramData;
+    ParameterWriter writer{paramData};
+
+    ctx.kernelOutputShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+    inputProgram.pack(writer, ctx);
+    outputProgram.pack(writer, ctx);
+
+    SinkExprEvalContext sinkContext;
+    sinkContext.outputBuffer = output;
+    sinkContext.logicalShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+    sinkExpr.node->pack(writer, sinkContext);
+
+    writer.align(8);
+    writer.write(weightsBuffer->getDeviceAddress());
+    writer.write(biasesBuffer->getDeviceAddress());
+    writer.write(weightsTransposedBuffer->getDeviceAddress());
+
+    writer.write<int>(inputWidth);
+    writer.write<int>(inputHeight);
+    writer.write<int>(outputWidth);
+    writer.write<int>(outputHeight);
+    writer.write<int>(padding);
+    writer.write<int>(batchSize);
+    writer.finish();
+
+    const GemmTileConfig& config = gemmConfig;
+    int numOCTiles = (outChannels + config.tileOC - 1) / config.tileOC;
+
+    task.dispatchKernel(
+        gemmWaveShufflePipeline,
+        (outputWidth + config.tileOW - 1) / config.tileOW,
+        (outputHeight + config.tileOH - 1) / config.tileOH,
+        batchSize * numOCTiles,
+        paramData);
+}
+
+// ============================================================================
+// Winograd F(4x4, 3x3) Convolution
+// ============================================================================
+// Reduces multiplications from 9 to ~2.25 per output for 3x3 stride=1 convs.
+// Requires pre-transformed weights (computed in transformWeightsToWinograd).
+
+void Conv2DKernel::executeWinogradConv(
+    InferencingTask& task,
+    EvalContext& ctx,
+    TensorView output,
+    int padding)
+{
+    auto inputShape = inputProgram.resolveShape(ctx);
+    int batchSize = inputShape[0];
+    int inputHeight = inputShape[1];
+    int inputWidth = inputShape[2];
+    int outputWidth = (inputWidth + padding * 2 - 3) / 1 + 1;  // kernelSize=3, stride=1
+    int outputHeight = (inputHeight + padding * 2 - 3) / 1 + 1;
+
+    // Set kernelOutputShape for outputExpr
+    ctx.kernelOutputShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+
+    // Build parameter data for WinogradParams struct
+    List<uint8_t> paramData;
+    ParameterWriter writer{paramData};
+
+    inputProgram.pack(writer, ctx);
+    outputProgram.pack(writer, ctx);
+
+    SinkExprEvalContext sinkContext;
+    sinkContext.outputBuffer = output;
+    sinkContext.logicalShape = Shape(batchSize, outputHeight, outputWidth, outChannels);
+    sinkExpr.node->pack(writer, sinkContext);
+
+    writer.align(8);
+    writer.write(biasesBuffer->getDeviceAddress());
+    writer.write(winogradWeightsBuffer->getDeviceAddress());
+    writer.write<int>(inputWidth);
+    writer.write<int>(inputHeight);
+    writer.write<int>(outputWidth);
+    writer.write<int>(outputHeight);
+    writer.write<int>(padding);
+    writer.write<int>(batchSize);
+    writer.finish();
+
+    // Dispatch: each tile produces 4x4 outputs
+    const int TILE_SIZE = 4;
+    const int TILE_OC = 16;  // Must match pipeline creation
+    int numOCTiles = (outChannels + TILE_OC - 1) / TILE_OC;
+
+    task.dispatchKernel(
+        winogradPipeline,
+        (outputWidth + TILE_SIZE - 1) / TILE_SIZE,
+        (outputHeight + TILE_SIZE - 1) / TILE_SIZE,
         batchSize * numOCTiles,
         paramData);
 }

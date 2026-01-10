@@ -8,7 +8,12 @@
 #include "torch-reader.h"
 
 #include <chrono>
+#include <cstring>
 #include <random>
+
+// Forward declarations for conv2d benchmark
+int runConvBenchmark(int argc, char* argv[]);
+int runConvProfile(int argc, char* argv[]);
 
 static const ExampleResources resourceBase("unit-test");
 
@@ -55,6 +60,15 @@ struct UnitTestProgram : public TestBase
         deviceDesc.slang.compilerOptionEntries = compilerOptionsEntries.getBuffer();
         deviceDesc.slang.compilerOptionEntryCount = (uint32_t)compilerOptionsEntries.getCount();
         deviceDesc.deviceType = rhi::DeviceType::Vulkan;
+
+        String exePath = Path::getParentDirectory(Path::getExecutablePath()).getBuffer();
+        const char* exePathStr = exePath.getBuffer();
+        deviceDesc.slang.searchPaths = &exePathStr;
+        deviceDesc.slang.searchPathCount = 1;
+
+        ComPtr<rhi::IPersistentCache> shaderCache =
+            ComPtr<rhi::IPersistentCache>(new FileShaderCache());
+        deviceDesc.persistentShaderCache = shaderCache.get();
         // rhi::getRHI()->enableDebugLayers();
         gDevice = rhi::getRHI()->createDevice(deviceDesc);
         if (!gDevice)
@@ -73,6 +87,7 @@ struct UnitTestProgram : public TestBase
         SLANG_RETURN_ON_FAIL(testConv2DWithFusedResidual(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2DGemm(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testConv2DGemmBatched(gInferencingCtx));
+        SLANG_RETURN_ON_FAIL(testConv2DWinograd(gInferencingCtx));
 
         SLANG_RETURN_ON_FAIL(testLinear(gInferencingCtx));
         SLANG_RETURN_ON_FAIL(testLinearPartitioned(gInferencingCtx));
@@ -150,8 +165,32 @@ struct UnitTestProgram : public TestBase
     }
 };
 
+// Check if a specific flag is present in command line arguments
+static bool hasFlag(int argc, char** argv, const char* flag)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], flag) == 0)
+            return true;
+    }
+    return false;
+}
+
 int main(int argc, char** argv)
 {
+    // Check for benchmark mode
+    if (hasFlag(argc, argv, "--bench-conv2d"))
+    {
+        return runConvBenchmark(argc, argv);
+    }
+
+    // Check for convolution profiling mode (for Nsight)
+    if (hasFlag(argc, argv, "--profile-conv"))
+    {
+        return runConvProfile(argc, argv);
+    }
+
+    // Default: run unit tests
     UnitTestProgram app;
     if (SLANG_FAILED(app.execute(argc, argv)))
     {

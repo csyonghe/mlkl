@@ -4,6 +4,11 @@ project(mlkl)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Enable parallel compilation for MSVC
+if(MSVC)
+    add_compile_options(/MP)
+endif()
+
 # Include necessary CMake modules
 include(FetchContent)
 include(ExternalProject)
@@ -216,10 +221,15 @@ function(add_library_target TARGET_NAME SOURCE_DIR)
         ${SLANG_RHI_INCLUDE_DIR}
     )
     
-    # Copy .slang files to output directory
+    # Copy .slang files to output directory at build time
     foreach(SLANG_FILE ${SLANG_FILES})
         get_filename_component(SLANG_FILENAME ${SLANG_FILE} NAME)
-        configure_file(${SLANG_FILE} ${CMAKE_BINARY_DIR}/${SLANG_FILENAME} COPYONLY)
+        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SLANG_FILE}"
+                "$<TARGET_FILE_DIR:${TARGET_NAME}>/${SLANG_FILENAME}"
+            COMMENT "Copying ${SLANG_FILENAME} to output directory"
+        )
     endforeach()
     
     # Set target properties
@@ -269,10 +279,15 @@ function(add_executable_target TARGET_NAME SOURCE_DIR)
         ${SLANG_RHI_INCLUDE_DIR}
     )
     
-    # Copy .slang files to output directory
+    # Copy .slang files to output directory at build time
     foreach(SLANG_FILE ${SLANG_FILES})
         get_filename_component(SLANG_FILENAME ${SLANG_FILE} NAME)
-        configure_file(${SLANG_FILE} ${CMAKE_BINARY_DIR}/${SLANG_FILENAME} COPYONLY)
+        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SLANG_FILE}"
+                "$<TARGET_FILE_DIR:${TARGET_NAME}>/${SLANG_FILENAME}"
+            COMMENT "Copying ${SLANG_FILENAME} to output directory"
+        )
     endforeach()
     
     # Set target properties
@@ -311,8 +326,6 @@ add_executable_target(unit-test unit-test)
 add_executable_target(simple-unet examples/simple-unet)
 add_executable_target(conditioned-unet examples/conditioned-unet)
 add_executable_target(stable-diffusion examples/stable-diffusion)
-
-
 
 # Install targets
 install(TARGETS unit-test example-base

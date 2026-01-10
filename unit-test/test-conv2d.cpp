@@ -59,11 +59,11 @@ SlangResult testConv2DHalf(InferencingContext* ctx)
     Conv2DKernel convKernel = Conv2DKernel(
         ctx,
         ElementType::Float16,
-        4,   // tileSize
-        3,   // kernelSize
-        1,   // stride
-        1,   // inChannels
-        1,   // outChannels
+        4, // tileSize
+        3, // kernelSize
+        1, // stride
+        1, // inChannels
+        1, // outChannels
         buffer(),
         kernelOutput(),
         bufferSink(),
@@ -124,11 +124,11 @@ SlangResult testConv2DInt(InferencingContext* ctx)
     Conv2DKernel convKernel = Conv2DKernel(
         ctx,
         ElementType::Int32,
-        4,   // tileSize
-        3,   // kernelSize
-        1,   // stride
-        1,   // inChannels
-        1,   // outChannels
+        4, // tileSize
+        3, // kernelSize
+        1, // stride
+        1, // inChannels
+        1, // outChannels
         buffer(),
         kernelOutput(),
         bufferSink(),
@@ -207,11 +207,11 @@ SlangResult testConv2DGemmWithOutputExpr(InferencingContext* ctx)
     List<float> outputScaleData;
     outputScaleData.setCount(outChannels);
     for (int oc = 0; oc < outChannels; oc++)
-        outputScaleData[oc] = (float)(oc + 1) * 0.5f;  // 0.5, 1.0, 1.5, ...
+        outputScaleData[oc] = (float)(oc + 1) * 0.5f; // 0.5, 1.0, 1.5, ...
 
     auto outputScaleBuffer = ctx->createTensor(
         ElementType::Float32,
-        Shape(1, 1, 1, outChannels),  // Shape [1,1,1,OC] broadcasts over NHWC output
+        Shape(1, 1, 1, outChannels), // Shape [1,1,1,OC] broadcasts over NHWC output
         outputScaleData);
 
     // Create Conv2D kernel WITHOUT output expression (for reference)
@@ -224,8 +224,17 @@ SlangResult testConv2DGemmWithOutputExpr(InferencingContext* ctx)
     Expr inputExpr = buffer();
     Expr scaleExpr = buffer();
     Expr outputExpr = kernelOutput() + broadcast(scaleExpr, kernelOutput());
-    Conv2DKernel convKernelFused(ctx, ElementType::Float32, 4, kernelSize, stride, inChannels, outChannels,
-                                  inputExpr, outputExpr, bufferSink());
+    Conv2DKernel convKernelFused(
+        ctx,
+        ElementType::Float32,
+        4,
+        kernelSize,
+        stride,
+        inChannels,
+        outChannels,
+        inputExpr,
+        outputExpr,
+        bufferSink());
     convKernelFused.loadParams(kernelSize, outChannels, weights.getBuffer(), biases.getBuffer());
 
     // Allocate outputs
@@ -241,7 +250,12 @@ SlangResult testConv2DGemmWithOutputExpr(InferencingContext* ctx)
     // Run reference (flat, no output expr)
     {
         auto task = ctx->createTask();
-        convKernelRef.queueExecute(task, outputRef, inputBuffer->getView(), padding, ConvolutionAlgorithm::Flat);
+        convKernelRef.queueExecute(
+            task,
+            outputRef,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Flat);
         task.execute();
     }
 
@@ -270,7 +284,8 @@ SlangResult testConv2DGemmWithOutputExpr(InferencingContext* ctx)
         Dictionary<Expr, InputInfo> inputs;
         inputs.add(inputExpr, inputBuffer->getView());
         inputs.add(scaleExpr, outputScaleBuffer->getView());
-        convKernelFused.queueExecute(task, outputFused, inputs, padding, ConvolutionAlgorithm::Gemm);
+        convKernelFused
+            .queueExecute(task, outputFused, inputs, padding, ConvolutionAlgorithm::Gemm);
         task.execute();
     }
 
@@ -348,12 +363,12 @@ SlangResult testConv2DGemmBatchedHalfFused(InferencingContext* ctx)
     Conv2DKernel convKernel(
         ctx,
         ElementType::Float16,
-        4,            // tileSize
+        4, // tileSize
         kernelSize,
         stride,
         inChannels,
         outChannels,
-        inputExpr,    // Fused input: buffer() + 1.0
+        inputExpr, // Fused input: buffer() + 1.0
         kernelOutput(),
         bufferSink(),
         "conv2d_im2col_batched_half_fused");
@@ -374,14 +389,24 @@ SlangResult testConv2DGemmBatchedHalfFused(InferencingContext* ctx)
     // Run with Flat algorithm (reference)
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputFlat, inputBuffer->getView(), padding, ConvolutionAlgorithm::Flat);
+        convKernel.queueExecute(
+            task,
+            outputFlat,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Flat);
         task.execute();
     }
 
     // Run with Gemm algorithm
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputIm2Col, inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
+        convKernel.queueExecute(
+            task,
+            outputIm2Col,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Gemm);
         task.execute();
     }
 
@@ -477,12 +502,22 @@ SlangResult testConv2DGemmMultipleSizes(InferencingContext* ctx)
         // Run both algorithms
         {
             auto task = ctx->createTask();
-            convKernel.queueExecute(task, outputFlat, inputBuffer->getView(), padding, ConvolutionAlgorithm::Flat);
+            convKernel.queueExecute(
+                task,
+                outputFlat,
+                inputBuffer->getView(),
+                padding,
+                ConvolutionAlgorithm::Flat);
             task.execute();
         }
         {
             auto task = ctx->createTask();
-            convKernel.queueExecute(task, outputIm2Col, inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
+            convKernel.queueExecute(
+                task,
+                outputIm2Col,
+                inputBuffer->getView(),
+                padding,
+                ConvolutionAlgorithm::Gemm);
             task.execute();
         }
 
@@ -536,7 +571,9 @@ SlangResult testConv2DGemm(InferencingContext* ctx)
         inputData[i] = (float)(i % 17) * 0.1f - 0.8f;
 
     auto inputBuffer = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, inputH, inputW, inChannels), inputData);
+        ElementType::Float32,
+        Shape(batchSize, inputH, inputW, inChannels),
+        inputData);
 
     // Generate weights and biases
     List<float> weights;
@@ -555,21 +592,35 @@ SlangResult testConv2DGemm(InferencingContext* ctx)
 
     // Allocate output buffers
     auto outputFlat = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "flat_output");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "flat_output");
     auto outputGemm = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "gemm_output");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "gemm_output");
 
     // Run with Flat algorithm (reference)
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputFlat, inputBuffer->getView(), padding, ConvolutionAlgorithm::Flat);
+        convKernel.queueExecute(
+            task,
+            outputFlat,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Flat);
         task.execute();
     }
 
     // Run with Gemm algorithm
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputGemm, inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
+        convKernel.queueExecute(
+            task,
+            outputGemm,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Gemm);
         task.execute();
     }
 
@@ -617,7 +668,9 @@ SlangResult testConv2DGemmBatched(InferencingContext* ctx)
         inputData[i] = (float)(i % 23) * 0.1f - 1.1f;
 
     auto inputBuffer = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, inputH, inputW, inChannels), inputData);
+        ElementType::Float32,
+        Shape(batchSize, inputH, inputW, inChannels),
+        inputData);
 
     // Generate weights and biases
     List<float> weights;
@@ -636,19 +689,33 @@ SlangResult testConv2DGemmBatched(InferencingContext* ctx)
 
     // Allocate output buffers
     auto outputFlat = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "flat_batched");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "flat_batched");
     auto outputGemm = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "gemm_batched");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "gemm_batched");
 
     // Run both algorithms
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputFlat, inputBuffer->getView(), padding, ConvolutionAlgorithm::Flat);
+        convKernel.queueExecute(
+            task,
+            outputFlat,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Flat);
         task.execute();
     }
     {
         auto task = ctx->createTask();
-        convKernel.queueExecute(task, outputGemm, inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
+        convKernel.queueExecute(
+            task,
+            outputGemm,
+            inputBuffer->getView(),
+            padding,
+            ConvolutionAlgorithm::Gemm);
         task.execute();
     }
 
@@ -688,8 +755,8 @@ SlangResult testIm2ColExpressionOnly(InferencingContext* ctx)
     const int strideW = 1;
     const int padH = 1;
     const int padW = 1;
-    const int outputH = (inputH + 2 * padH - kernelH) / strideH + 1;  // 4
-    const int outputW = (inputW + 2 * padW - kernelW) / strideW + 1;  // 4
+    const int outputH = (inputH + 2 * padH - kernelH) / strideH + 1; // 4
+    const int outputW = (inputW + 2 * padW - kernelW) / strideW + 1; // 4
 
     // Generate input: value = n*1000 + h*100 + w*10 + c for easy debugging
     List<float> inputData;
@@ -707,16 +774,26 @@ SlangResult testIm2ColExpressionOnly(InferencingContext* ctx)
         inputData);
 
     // im2col output shape: [1, IC*KH*KW, N*OH*OW]
-    const int K = inputC * kernelH * kernelW;  // 2 * 3 * 3 = 18
-    const int N = batchSize * outputH * outputW;  // 1 * 4 * 4 = 16
+    const int K = inputC * kernelH * kernelW;    // 2 * 3 * 3 = 18
+    const int N = batchSize * outputH * outputW; // 1 * 4 * 4 = 16
     Shape im2colShape(1, K, N);
 
     auto outputBuffer = ctx->allocScratchTensor(ElementType::Float32, im2colShape, "im2col_output");
 
     // Create im2col expression and materialize it
     Expr inputExpr = buffer();
-    Expr im2colExpr = im2col(inputExpr, kernelH, kernelW, strideH, strideW, padH, padW,
-                              inputH, inputW, inputC, batchSize);
+    Expr im2colExpr = im2col(
+        inputExpr,
+        kernelH,
+        kernelW,
+        strideH,
+        strideW,
+        padH,
+        padW,
+        inputH,
+        inputW,
+        inputC,
+        batchSize);
 
     ElementwiseKernel im2colKernel(ctx, ElementType::Float32, im2colExpr);
 
@@ -732,9 +809,10 @@ SlangResult testIm2ColExpressionOnly(InferencingContext* ctx)
     List<float> cpuRef;
     cpuRef.setCount(K * N);
 
-    auto getInput = [&](int n, int h, int w, int c) -> float {
+    auto getInput = [&](int n, int h, int w, int c) -> float
+    {
         if (h < 0 || h >= inputH || w < 0 || w >= inputW)
-            return 0.0f;  // Zero padding
+            return 0.0f; // Zero padding
         return inputData[((n * inputH + h) * inputW + w) * inputC + c];
     };
 
@@ -798,21 +876,21 @@ SlangResult testConv2DOutputSink(InferencingContext* ctx)
     const int outChannels = 5;
 
     const int M = outChannels;
-    const int spatialSize = outputH * outputW;  // 12
-    const int N = batchSize * spatialSize;      // 24
+    const int spatialSize = outputH * outputW; // 12
+    const int N = batchSize * spatialSize;     // 24
     const int K = 1;
 
     // A: [1, M, K] = [1, 5, 1] - each row (output channel) has value oc
     List<float> aData;
     aData.setCount(M * K);
     for (int oc = 0; oc < M; oc++)
-        aData[oc] = (float)(oc * 100);  // Value encodes output channel
+        aData[oc] = (float)(oc * 100); // Value encodes output channel
 
     // B: [1, K, N] = [1, 1, 24] - each column has value col
     List<float> bData;
     bData.setCount(K * N);
     for (int col = 0; col < N; col++)
-        bData[col] = (float)(col);  // Value encodes spatial position
+        bData[col] = (float)(col); // Value encodes spatial position
 
     // C: zeros
     List<float> cData;
@@ -836,7 +914,8 @@ SlangResult testConv2DOutputSink(InferencingContext* ctx)
     Expr owExpr = uniformConstant();
     SinkExpr sink = conv2DOutputSink(bufferSink(), ohExpr, owExpr);
 
-    BatchGemmKernel gemmKernel(ctx, ElementType::Float32, aExpr, bExpr, cExpr, sink, kernelOutput());
+    BatchGemmKernel
+        gemmKernel(ctx, ElementType::Float32, aExpr, bExpr, cExpr, sink, kernelOutput());
 
     {
         auto task = ctx->createTask();
@@ -900,7 +979,7 @@ SlangResult testConv2DWithPermuteSink(InferencingContext* ctx)
     const int stride = 1;
     const int padding = 1;
 
-    const int outputH = inputH;  // Same padding
+    const int outputH = inputH; // Same padding
     const int outputW = inputW;
 
     // Create input [N, H, W, C] in NHWC format
@@ -910,7 +989,9 @@ SlangResult testConv2DWithPermuteSink(InferencingContext* ctx)
         inputData[i] = (float)(i % 17) * 0.1f - 0.8f;
 
     auto inputBuffer = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, inputH, inputW, inChannels), inputData);
+        ElementType::Float32,
+        Shape(batchSize, inputH, inputW, inChannels),
+        inputData);
 
     // Weights and bias
     List<float> weights;
@@ -924,11 +1005,15 @@ SlangResult testConv2DWithPermuteSink(InferencingContext* ctx)
 
     // Output in NCHW format [N, C, H, W] due to permute sink
     auto outputNCHW = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outChannels, outputH, outputW), "output_nchw");
+        ElementType::Float32,
+        Shape(batchSize, outChannels, outputH, outputW),
+        "output_nchw");
 
     // Reference output in NHWC format (using default bufferSink)
     auto outputNHWC = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "output_nhwc");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "output_nhwc");
 
     // Create kernel with permute sink: NHWC [N,H,W,C] -> NCHW [N,C,H,W]
     // Sink permute: newCoords[i] = logicalCoords[pMap[i]]
@@ -938,10 +1023,18 @@ SlangResult testConv2DWithPermuteSink(InferencingContext* ctx)
     // newCoords[2] = h = logical[1] → pMap[2] = 1
     // newCoords[3] = w = logical[2] → pMap[3] = 2
     SinkExpr permutedSink = permute(bufferSink(), {0, 3, 1, 2});
-    
+
     Conv2DKernel kernelWithPermute(
-        ctx, ElementType::Float32, 16, kernelSize, stride, inChannels, outChannels,
-        buffer(), kernelOutput(), permutedSink);
+        ctx,
+        ElementType::Float32,
+        16,
+        kernelSize,
+        stride,
+        inChannels,
+        outChannels,
+        buffer(),
+        kernelOutput(),
+        permutedSink);
     kernelWithPermute.loadParams(kernelSize, outChannels, weights.getBuffer(), biases.getBuffer());
 
     // Reference kernel with default sink
@@ -1003,7 +1096,7 @@ SlangResult testConv2DWithFusedResidual(InferencingContext* ctx)
     const int stride = 1;
     const int padding = 1;
 
-    const int outputH = inputH;  // Same padding
+    const int outputH = inputH; // Same padding
     const int outputW = inputW;
 
     // Create input [N, H, W, C]
@@ -1013,16 +1106,20 @@ SlangResult testConv2DWithFusedResidual(InferencingContext* ctx)
         inputData[i] = (float)(i % 17) * 0.1f - 0.8f;
 
     auto inputBuffer = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, inputH, inputW, inChannels), inputData);
+        ElementType::Float32,
+        Shape(batchSize, inputH, inputW, inChannels),
+        inputData);
 
     // Create residual buffer [N, H, W, outChannels] - same shape as output
     List<float> residualData;
     residualData.setCount(batchSize * outputH * outputW * outChannels);
     for (Index i = 0; i < residualData.getCount(); i++)
-        residualData[i] = (float)(i % 11) * 0.05f;  // Different pattern from input
+        residualData[i] = (float)(i % 11) * 0.05f; // Different pattern from input
 
     auto residualBuffer = ctx->createTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), residualData);
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        residualData);
 
     // Weights and bias
     List<float> weights;
@@ -1036,15 +1133,27 @@ SlangResult testConv2DWithFusedResidual(InferencingContext* ctx)
 
     // Output buffers
     auto outputFused = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "output_fused");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "output_fused");
     auto outputSeparate = ctx->allocScratchTensor(
-        ElementType::Float32, Shape(batchSize, outputH, outputW, outChannels), "output_separate");
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        "output_separate");
 
     // Kernel with fused residual: output = conv(input) + residual
     // outputExpr = kernelOutput() + buffer(), where buffer() is the residual
     Conv2DKernel kernelFused(
-        ctx, ElementType::Float32, 16, kernelSize, stride, inChannels, outChannels,
-        buffer(), kernelOutput() + buffer(), bufferSink());
+        ctx,
+        ElementType::Float32,
+        16,
+        kernelSize,
+        stride,
+        inChannels,
+        outChannels,
+        buffer(),
+        kernelOutput() + buffer(),
+        bufferSink());
     kernelFused.loadParams(kernelSize, outChannels, weights.getBuffer(), biases.getBuffer());
 
     // Reference kernel without fusion
@@ -1054,7 +1163,11 @@ SlangResult testConv2DWithFusedResidual(InferencingContext* ctx)
     // Run fused kernel: takes {input, residual} because outputExpr has a buffer()
     {
         auto task = ctx->createTask();
-        kernelFused.queueExecute(task, outputFused, {inputBuffer->getView(), residualBuffer->getView()}, padding);
+        kernelFused.queueExecute(
+            task,
+            outputFused,
+            {inputBuffer->getView(), residualBuffer->getView()},
+            padding);
         task.execute();
     }
 
@@ -1080,6 +1193,113 @@ SlangResult testConv2DWithFusedResidual(InferencingContext* ctx)
     }
 
     TEST_CHECK("conv2d_fused_residual_correct", maxDiff < 1e-5f);
+
+    MLKL_TEST_OK();
+}
+
+// ============================================================================
+// Winograd Convolution Test
+// ============================================================================
+// Tests Winograd F(4x4, 3x3) convolution against reference GEMM implementation
+
+SlangResult testConv2DWinograd(InferencingContext* ctx)
+{
+    MLKL_TEST_BEGIN();
+
+    // Test configuration: 8x8 input, 16 channels in/out (typical bottleneck size)
+    const int inputH = 8;
+    const int inputW = 8;
+    const int inChannels = 16;
+    const int outChannels = 16;
+    const int kernelSize = 3;
+    const int stride = 1;
+    const int padding = 1;
+    const int batchSize = 1;
+
+    // Output dimensions (unused but kept for reference)
+    (void)((inputH + 2 * padding - kernelSize) / stride + 1);
+    (void)((inputW + 2 * padding - kernelSize) / stride + 1);
+
+    // Create random input data using the existing helper
+    List<float> inputData;
+    initRandom(inputData, batchSize * inputH * inputW * inChannels);
+
+    auto inputBuffer = ctx->createTensor(
+        ElementType::Float32,
+        Shape(batchSize, inputH, inputW, inChannels),
+        inputData);
+
+    // Create random weights and biases
+    List<float> weights;
+    initRandom(weights, inChannels * kernelSize * kernelSize * outChannels);
+    // Scale weights down
+    for (Index i = 0; i < weights.getCount(); i++)
+        weights[i] *= 0.1f;
+
+    List<float> biases;
+    initRandom(biases, outChannels);
+    // Scale biases down
+    for (Index i = 0; i < biases.getCount(); i++)
+        biases[i] *= 0.01f;
+
+    // Create GEMM kernel (reference)
+    Conv2DKernel gemmKernel(ctx, 16, kernelSize, stride, inChannels, outChannels);
+    gemmKernel.loadParams(kernelSize, outChannels, weights.getBuffer(), biases.getBuffer());
+
+    // Create Winograd kernel
+    Conv2DKernel winogradKernel(ctx, 16, kernelSize, stride, inChannels, outChannels);
+    winogradKernel.loadParams(kernelSize, outChannels, weights.getBuffer(), biases.getBuffer());
+
+    // Allocate outputs
+    auto outputGemm = gemmKernel.allocateResultBuffer(
+        ElementType::Float32, inputW, inputH, padding, batchSize);
+    auto outputWinograd = winogradKernel.allocateResultBuffer(
+        ElementType::Float32, inputW, inputH, padding, batchSize);
+
+    // Run GEMM convolution
+    {
+        auto task = ctx->createTask();
+        gemmKernel.queueExecute(task, outputGemm, inputBuffer->getView(), padding,
+                                ConvolutionAlgorithm::Gemm);
+        task.execute();
+    }
+
+    // Run Winograd convolution
+    {
+        auto task = ctx->createTask();
+        winogradKernel.queueExecute(task, outputWinograd, inputBuffer->getView(), padding,
+                                    ConvolutionAlgorithm::Winograd);
+        task.execute();
+    }
+
+    // Compare results
+    auto gemmData = ctx->readBuffer<float>(outputGemm);
+    auto winogradData = ctx->readBuffer<float>(outputWinograd);
+
+    float maxDiff = 0.0f;
+    float maxRelDiff = 0.0f;
+    int numDiffs = 0;
+
+    for (Index i = 0; i < gemmData.getCount(); i++)
+    {
+        float expected = gemmData[i];
+        float actual = winogradData[i];
+        float diff = fabs(actual - expected);
+        float relDiff = diff / (fabs(expected) + 1e-6f);
+
+        if (diff > maxDiff)
+            maxDiff = diff;
+        if (relDiff > maxRelDiff)
+            maxRelDiff = relDiff;
+        if (diff > 1e-3f)
+            numDiffs++;
+    }
+
+    printf("Winograd vs GEMM: maxDiff=%.6f, maxRelDiff=%.4f%%, diffs>1e-3: %d/%lld\n",
+           maxDiff, maxRelDiff * 100.0f, numDiffs, (long long)gemmData.getCount());
+
+    // Winograd has some numerical error due to transforms, allow 1e-3 tolerance
+    TEST_CHECK("winograd_matches_gemm", maxDiff < 1e-2f);
 
     MLKL_TEST_OK();
 }
