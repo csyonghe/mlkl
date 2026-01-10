@@ -1036,6 +1036,212 @@ void winogradDomainGemmF43(
 }
 
 // ---------------------------------------------------------------------------
+// Kernel 2 (v2): Winograd-domain GEMM (produce M = U (*) V), weights packed with icVec-major
+//
+// v1 weight packing (legacy):
+//   idx = (((pos * ocVecCount + ocVec) * icVecCount + icVec) * 4 + o)
+//
+// v2 weight packing (improves coalescing for TILE_OCV blocks):
+//   idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+//
+// Everything else (V/M layouts, grid, threads) matches v1.
+// ---------------------------------------------------------------------------
+[numthreads(256, 1, 1)]
+void winogradDomainGemmF43_v2(
+    ConstantBuffer<WinogradNonFusedParams, CDataLayout> params,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    static const int TILE_TILES = 32; // compute 32 tiles per block
+    static const int TILE_OCV = 16;   // compute 16 ocVec per block (each thread computes 2 ocVec)
+    static const int IC_STEP = 16;    // number of icVec values staged per iteration
+
+    int ocVecCount = params.outChannels / 4;
+    int icVecCount = params.inChannels / 4;
+
+    int tid = int(groupThreadId.x); // 0..255
+    int laneTile = tid & 31;        // 0..31 (tile lane within the block)
+    int laneOCV = tid >> 5;         // 0..7 (each lane handles ocVec0 and ocVec1=ocVec0+8)
+
+    int tileBlockBase = int(groupId.x) * TILE_TILES;
+    int ocBlockBase = int(groupId.y) * TILE_OCV;
+
+    int tileIdx0 = tileBlockBase + laneTile;
+    int ocVec0 = ocBlockBase + laneOCV;
+    int ocVec1 = ocVec0 + 8;
+    int pos = int(groupId.z);
+
+    if (pos >= 36) return;
+    if ((uint)ocVec0 >= (uint)ocVecCount) return;
+
+    bool fullTileBlock = (tileBlockBase + TILE_TILES) <= params.numTiles;
+    bool fullOcBlock = (ocBlockBase + TILE_OCV) <= ocVecCount;
+
+    // Shared staged V for IC_STEP consecutive icVec values for this tile-block.
+    // Only laneOCV==0 loads V; other oc lanes reuse it (cuts V loads by 8x).
+    static groupshared float4 s_Vblk0[IC_STEP][32 + 4];
+    // Shared staged weights for IC_STEP consecutive icVec values for this oc-block.
+    // v2 packing makes these loads coalesced across threads.
+    static groupshared float4 s_Wblk[IC_STEP][TILE_OCV][4];
+
+    float4 acc00 = float4(0.0);
+    float4 acc01 = float4(0.0);
+
+    for (int icBase = 0; icBase < icVecCount; icBase += IC_STEP)
+    {
+        bool fullIcStep = (icBase + IC_STEP) <= icVecCount;
+
+        // ------------------------------------------------------------
+        // Load V for this tile-block (only laneOCV==0)
+        // ------------------------------------------------------------
+        if (laneOCV == 0)
+        {
+            if (fullTileBlock && fullIcStep)
+            {
+                [unroll]
+                for (int s = 0; s < IC_STEP; ++s)
+                {
+                    int vIndex0 = (pos * icVecCount + (icBase + s)) * params.numTiles + tileIdx0;
+                    s_Vblk0[s][laneTile] = loadAligned<16>(params.V + vIndex0);
+                }
+            }
+            else
+            {
+                for (int s = 0; s < IC_STEP; ++s)
+                {
+                    int icVec = icBase + s;
+                    float4 v0 = float4(0.0);
+                    if ((uint)icVec < (uint)icVecCount && (uint)tileIdx0 < (uint)params.numTiles)
+                    {
+                        int vIndex0 = (pos * icVecCount + icVec) * params.numTiles + tileIdx0;
+                        v0 = loadAligned<16>(params.V + vIndex0);
+                    }
+                    s_Vblk0[s][laneTile] = v0;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Load weights for this oc-block (all threads participate)
+        // ------------------------------------------------------------
+        // Linearize [s][ocvLocal][o] into a 1D index for good coalescing.
+        // total = IC_STEP * TILE_OCV * 4 = 1024 float4s, so each thread loads 4 entries.
+        if (fullOcBlock && fullIcStep)
+        {
+            for (int i = tid; i < (IC_STEP * TILE_OCV * 4); i += 256)
+            {
+                int t = i;
+                int o = t & 3;
+                t >>= 2;
+                int ocvLocal = t % TILE_OCV;
+                int s = t / TILE_OCV;
+
+                int icVec = icBase + s;
+                int ocVec = ocBlockBase + ocvLocal;
+
+                // v2 packing: idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+                int wIdx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o);
+                s_Wblk[s][ocvLocal][o] = loadAligned<16>(params.weightsU + wIdx);
+            }
+        }
+        else
+        {
+            for (int i = tid; i < (IC_STEP * TILE_OCV * 4); i += 256)
+            {
+                int t = i;
+                int o = t & 3;
+                t >>= 2;
+                int ocvLocal = t % TILE_OCV;
+                int s = t / TILE_OCV;
+
+                int icVec = icBase + s;
+                int ocVec = ocBlockBase + ocvLocal;
+
+                float4 w = float4(0.0);
+                if ((uint)icVec < (uint)icVecCount && (uint)ocVec < (uint)ocVecCount)
+                {
+                    int wIdx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o);
+                    w = loadAligned<16>(params.weightsU + wIdx);
+                }
+                s_Wblk[s][ocvLocal][o] = w;
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        // ------------------------------------------------------------
+        // Compute for IC_STEP values.
+        // ------------------------------------------------------------
+        if (fullIcStep)
+        {
+            [unroll]
+            for (int s = 0; s < IC_STEP; ++s)
+            {
+                float4 v0 = s_Vblk0[s][laneTile];
+
+                // ocVec0
+                float4 w00 = s_Wblk[s][laneOCV][0];
+                float4 w01 = s_Wblk[s][laneOCV][1];
+                float4 w02 = s_Wblk[s][laneOCV][2];
+                float4 w03 = s_Wblk[s][laneOCV][3];
+                acc00 += dot4_to_float4(v0, w00, w01, w02, w03);
+
+                // ocVec1
+                if (ocVec1 < ocVecCount)
+                {
+                    float4 w10 = s_Wblk[s][laneOCV + 8][0];
+                    float4 w11 = s_Wblk[s][laneOCV + 8][1];
+                    float4 w12 = s_Wblk[s][laneOCV + 8][2];
+                    float4 w13 = s_Wblk[s][laneOCV + 8][3];
+                    acc01 += dot4_to_float4(v0, w10, w11, w12, w13);
+                }
+            }
+        }
+        else
+        {
+            for (int s = 0; s < IC_STEP; ++s)
+            {
+                int icVec = icBase + s;
+                if (icVec >= icVecCount) continue;
+
+                float4 v0 = s_Vblk0[s][laneTile];
+
+                // ocVec0
+                float4 w00 = s_Wblk[s][laneOCV][0];
+                float4 w01 = s_Wblk[s][laneOCV][1];
+                float4 w02 = s_Wblk[s][laneOCV][2];
+                float4 w03 = s_Wblk[s][laneOCV][3];
+                acc00 += dot4_to_float4(v0, w00, w01, w02, w03);
+
+                // ocVec1
+                if (ocVec1 < ocVecCount)
+                {
+                    float4 w10 = s_Wblk[s][laneOCV + 8][0];
+                    float4 w11 = s_Wblk[s][laneOCV + 8][1];
+                    float4 w12 = s_Wblk[s][laneOCV + 8][2];
+                    float4 w13 = s_Wblk[s][laneOCV + 8][3];
+                    acc01 += dot4_to_float4(v0, w10, w11, w12, w13);
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Store M: [(pos * ocVecCount + ocVec) * numTiles + tileIdx]
+    if (fullTileBlock || (uint)tileIdx0 < (uint)params.numTiles)
+    {
+        int outIndex00 = (pos * ocVecCount + ocVec0) * params.numTiles + tileIdx0;
+        storeAligned<16>(params.M + outIndex00, acc00);
+        if (ocVec1 < ocVecCount)
+        {
+            int outIndex01 = (pos * ocVecCount + ocVec1) * params.numTiles + tileIdx0;
+            storeAligned<16>(params.M + outIndex01, acc01);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kernel 3: Output transform (consume M, write output)
 // Grid:
 //   x = ceil(numTilesW / 4)  (one CTA per 16x16 output block)

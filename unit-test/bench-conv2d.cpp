@@ -935,8 +935,9 @@ int runConvProfile(int argc, char* argv[])
     // Create nonfused Winograd pipelines (cuDNN-style: input transform -> GEMM -> output transform)
     auto winogradInputPipeline = ctx->createComputePipeline("winogradInputTransformBlock16", emptyArgs.getArrayView());
     auto winogradGemmPipeline = ctx->createComputePipeline("winogradDomainGemmF43", emptyArgs.getArrayView());
+    auto winogradGemmPipelineV2 = ctx->createComputePipeline("winogradDomainGemmF43_v2", emptyArgs.getArrayView());
     auto winogradOutputPipeline = ctx->createComputePipeline("winogradOutputTransformBlock16", emptyArgs.getArrayView());
-    if (!winogradInputPipeline || !winogradGemmPipeline || !winogradOutputPipeline)
+    if (!winogradInputPipeline || !winogradGemmPipeline || !winogradGemmPipelineV2 || !winogradOutputPipeline)
     {
         printf("ERROR: Failed to create one or more nonfused Winograd pipelines\n");
         return -1;
@@ -1036,6 +1037,46 @@ int runConvProfile(int argc, char* argv[])
     {
         printf("ERROR: Failed to create winograd prototype weights buffer\n");
         return -1;
+    }
+
+    // Repack weights for winogradDomainGemmF43_v2:
+    // v1 layout: idx = (((pos * ocVecCount + ocVec) * icVecCount + icVec) * 4 + o)
+    // v2 layout: idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+    ComPtr<rhi::IBuffer> winogradWeightsBufferV2;
+    {
+        List<Float4> winogradWeightsPackedV2;
+        winogradWeightsPackedV2.setCount(winogradWeightsPacked.getCount());
+
+        const int ocVecCountLocal = outChannels / 4;
+        const int icVecCountLocal = inChannels / 4;
+
+        for (int pos = 0; pos < 36; ++pos)
+        {
+            for (int ocVec = 0; ocVec < ocVecCountLocal; ++ocVec)
+            {
+                for (int icVec = 0; icVec < icVecCountLocal; ++icVec)
+                {
+                    for (int o = 0; o < 4; ++o)
+                    {
+                        int srcIdx = (((pos * ocVecCountLocal + ocVec) * icVecCountLocal + icVec) * 4 + o);
+                        int dstIdx = (((pos * icVecCountLocal + icVec) * ocVecCountLocal + ocVec) * 4 + o);
+                        winogradWeightsPackedV2[(Index)dstIdx] = winogradWeightsPacked[(Index)srcIdx];
+                    }
+                }
+            }
+        }
+
+        auto winogradWeightsBufferV2Local = ctx->createPersistentBuffer(
+            winogradWeightsPackedV2.getBuffer(),
+            (size_t)winogradWeightsPackedV2.getCount() * sizeof(Float4),
+            "winograd_proto_weights_v2");
+        if (!winogradWeightsBufferV2Local)
+        {
+            printf("ERROR: Failed to create winograd prototype weights buffer (v2)\n");
+            return -1;
+        }
+        // Keep it alive for the rest of this function.
+        winogradWeightsBufferV2 = winogradWeightsBufferV2Local;
     }
     
     // Create input buffer
@@ -1211,6 +1252,12 @@ int runConvProfile(int argc, char* argv[])
     nonfusedParams.numTilesW = numTilesW;
     nonfusedParams.numTiles = numTiles;
 
+    // v2 params only differ by weights packing
+    WinogradNonFusedParams nonfusedParamsV2 = nonfusedParams;
+    {
+        nonfusedParamsV2.weightsU = winogradWeightsBufferV2->getDeviceAddress();
+    }
+
     printf("\n=== Winograd Prototype (standalone, float4 IO/weights) ===\n");
     for (int i = 0; i < 10; i++)
     {
@@ -1309,15 +1356,101 @@ int runConvProfile(int argc, char* argv[])
     ctx->resetPerfMeasurements();
     ctx->setCollectPerfMeasurements(false);
 
+    // ------------------------------------------------------------------------
+    // Warmup + benchmark Winograd nonfused (v2 GEMM kernel, v2 weight packing)
+    // ------------------------------------------------------------------------
+    printf("\n=== Winograd Nonfused (v2 GEMM + v2 packed weights) ===\n");
+
+    ctx->setCollectPerfMeasurements(true);
+    ctx->resetPerfMeasurements();
+
+    for (int i = 0; i < 10; i++)
+    {
+        auto task = ctx->createTask();
+        task.dispatchKernel(
+            winogradInputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)icVecCount,
+            nonfusedParamsV2);
+        task.dispatchKernel(
+            winogradGemmPipelineV2,
+            (uint32_t)((numTiles + 31) / 32),
+            (uint32_t)((ocVecCount + 15) / 16),
+            36,
+            nonfusedParamsV2);
+        task.dispatchKernel(
+            winogradOutputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)ocVecCount,
+            nonfusedParamsV2);
+        task.execute();
+    }
+
+    startTime = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++)
+    {
+        auto task = ctx->createTask();
+        task.dispatchKernel(
+            winogradInputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)icVecCount,
+            nonfusedParamsV2);
+        task.dispatchKernel(
+            winogradGemmPipelineV2,
+            (uint32_t)((numTiles + 31) / 32),
+            (uint32_t)((ocVecCount + 15) / 16),
+            36,
+            nonfusedParamsV2);
+        task.dispatchKernel(
+            winogradOutputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)ocVecCount,
+            nonfusedParamsV2);
+        task.execute();
+    }
+    endTime = std::chrono::high_resolution_clock::now();
+    double winoNonFusedV2Ms = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+    printf("Average per iteration: %.3f ms\n", winoNonFusedV2Ms / iterations);
+
+    ctx->printPerfMeasurements();
+    ctx->resetPerfMeasurements();
+    ctx->setCollectPerfMeasurements(false);
+
     // Correctness: compare one GEMM vs one Winograd nonfused run
     {
-        // Run GEMM once
+        size_t outSizeBytes = (size_t)batchSize * outputH * outputW * outChannels * sizeof(float);
+        List<float> gemmOut;
+        gemmOut.setCount((Index)(outSizeBytes / sizeof(float)));
+
+        // Run GEMM once and read it back
         {
             auto task = ctx->createTask();
             kernel.queueExecute(task, outputGemm->getView(), inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
             task.execute();
+            ctx->getDevice()->readBuffer(outputGemm->buffer, 0, outSizeBytes, gemmOut.getBuffer());
         }
-        // Run nonfused once
+
+        auto printMaxErr = [&](const char* label, const List<float>& other)
+        {
+            double maxAbs = 0.0;
+            double maxRel = 0.0;
+            for (Index i = 0; i < gemmOut.getCount(); i++)
+            {
+                double a = (double)gemmOut[i];
+                double b = (double)other[i];
+                double absErr = fabs(a - b);
+                double relErr = absErr / (fabs(a) + 1e-6);
+                if (absErr > maxAbs) maxAbs = absErr;
+                if (relErr > maxRel) maxRel = relErr;
+            }
+            printf("%s: maxAbs=%.6g  maxRel=%.6g\n", label, maxAbs, maxRel);
+        };
+
+        // Run nonfused v1 once
         {
             auto task = ctx->createTask();
             task.dispatchKernel(
@@ -1340,28 +1473,42 @@ int runConvProfile(int argc, char* argv[])
                 nonfusedParams);
             task.execute();
         }
-
-        size_t outSizeBytes = (size_t)batchSize * outputH * outputW * outChannels * sizeof(float);
-        List<float> gemmOut;
-        List<float> nfOut;
-        gemmOut.setCount((Index)(outSizeBytes / sizeof(float)));
-        nfOut.setCount((Index)(outSizeBytes / sizeof(float)));
-
-        ctx->getDevice()->readBuffer(outputGemm->buffer, 0, outSizeBytes, gemmOut.getBuffer());
-        ctx->getDevice()->readBuffer(outputNonFused->buffer, 0, outSizeBytes, nfOut.getBuffer());
-
-        double maxAbs = 0.0;
-        double maxRel = 0.0;
-        for (Index i = 0; i < gemmOut.getCount(); i++)
         {
-            double a = (double)gemmOut[i];
-            double b = (double)nfOut[i];
-            double absErr = fabs(a - b);
-            double relErr = absErr / (fabs(a) + 1e-6);
-            if (absErr > maxAbs) maxAbs = absErr;
-            if (relErr > maxRel) maxRel = relErr;
+            List<float> nfOut;
+            nfOut.setCount((Index)(outSizeBytes / sizeof(float)));
+            ctx->getDevice()->readBuffer(outputNonFused->buffer, 0, outSizeBytes, nfOut.getBuffer());
+            printMaxErr("Correctness nonfused(v1) vs GEMM", nfOut);
         }
-        printf("Correctness vs GEMM: maxAbs=%.6g  maxRel=%.6g\n", maxAbs, maxRel);
+
+        // Run nonfused v2 once
+        {
+            auto task = ctx->createTask();
+            task.dispatchKernel(
+                winogradInputPipeline,
+                (uint32_t)((numTilesW + 3) / 4),
+                (uint32_t)((numTilesH + 3) / 4),
+                (uint32_t)batchSize * (uint32_t)icVecCount,
+                nonfusedParamsV2);
+            task.dispatchKernel(
+                winogradGemmPipelineV2,
+                (uint32_t)((numTiles + 31) / 32),
+                (uint32_t)((ocVecCount + 15) / 16),
+                36,
+                nonfusedParamsV2);
+            task.dispatchKernel(
+                winogradOutputPipeline,
+                (uint32_t)((numTilesW + 3) / 4),
+                (uint32_t)((numTilesH + 3) / 4),
+                (uint32_t)batchSize * (uint32_t)ocVecCount,
+                nonfusedParamsV2);
+            task.execute();
+        }
+        {
+            List<float> nfOutV2;
+            nfOutV2.setCount((Index)(outSizeBytes / sizeof(float)));
+            ctx->getDevice()->readBuffer(outputNonFused->buffer, 0, outSizeBytes, nfOutV2.getBuffer());
+            printMaxErr("Correctness nonfused(v2) vs GEMM", nfOutV2);
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -1416,9 +1563,11 @@ int runConvProfile(int argc, char* argv[])
     printf("Wave Shuffle: %.3f ms\n", waveMs / iterations);
     printf("WinogradProto:%.3f ms\n", winoProtoMs / iterations);
     printf("WinoNonFused: %.3f ms\n", winoNonFusedMs / iterations);
+    printf("WinoNonFusedV2: %.3f ms\n", winoNonFusedV2Ms / iterations);
     printf("Wave speedup: %.2fx\n", gemmMs / waveMs);
     printf("Wino speedup: %.2fx\n", gemmMs / winoProtoMs);
     printf("WinoNF speedup: %.2fx\n", gemmMs / winoNonFusedMs);
+    printf("WinoNFv2 speedup: %.2fx\n", gemmMs / winoNonFusedV2Ms);
     
     return 0;
 }
