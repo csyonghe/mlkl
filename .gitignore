@@ -48,3 +48,4 @@ __pycache__/
 *.pth
 /models
 /test_data/
+/.shadercache
