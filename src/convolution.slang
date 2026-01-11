@@ -1091,6 +1091,15 @@ static float4 loadInputNHWC_float4(ConstantBuffer<GemmConvV2Params, CDataLayout>
     return loadAligned<16>(in4 + idx);
 }
 
+[ForceInline]
+static float4 loadInputNHWC_float4_inBounds(ConstantBuffer<GemmConvV2Params, CDataLayout> params, int batch, int y, int x, int icVec, int icVecCount)
+{
+    // Caller guarantees (y,x) in bounds.
+    float4* in4 = (float4*)params.input;
+    int idx = ((batch * (params.H * params.W) + y * params.W + x) * icVecCount + icVec);
+    return loadAligned<16>(in4 + idx);
+}
+
 [numthreads(TILE_OW / THREAD_OW, TILE_OH / THREAD_OH, 1)]
 void gemmConvolution_v2<
     let TILE_OH : int,
@@ -1141,12 +1150,21 @@ void gemmConvolution_v2<
 
     // Stage weights as float4[4] per ocVec lane (o=0..3), per icVec, per (kh,kw)
     static const int WEIGHT_KV = kernelSize * kernelSize * TILE_ICV;
-    static groupshared float4 s_weight[TILE_OCV][WEIGHT_KV][4];
+    // Pad the middle dimension to reduce shared-memory bank conflict patterns when many threads
+    // read the same kv across different ocv/lanes.
+    static groupshared float4 s_weight[TILE_OCV][WEIGHT_KV + 4][4];
 
     int ihBase = int(ohBase * stride) - params.padding;
     int iwBase = int(owBase * stride) - params.padding;
 
     int threadLinear = int(groupThreadId.y) * BLOCK_X + int(groupThreadId.x);
+
+    // Fast-path conditions (uniform across CTA)
+    bool fullOutputTile = (ohBase + TILE_OH) <= uint(params.H) && (owBase + TILE_OW) <= uint(params.W);
+    bool fullInputTile = (ihBase >= 0) && (iwBase >= 0) &&
+                         ((ihBase + INPUT_TILE_H) <= params.H) &&
+                         ((iwBase + INPUT_TILE_W) <= params.W);
+    bool fullOcTile = (ocVecBase + TILE_OCV) <= uint(ocVecCount);
 
     // Accumulators: THREAD_OH x THREAD_OW x TILE_OCV (each is float4 -> 4 output channels)
     float4 accum[THREAD_OH][THREAD_OW][TILE_OCV];
@@ -1171,6 +1189,8 @@ void gemmConvolution_v2<
     // Main loop over icVec tiles
     for (int icBase = 0; icBase < icVecCount; icBase += TILE_ICV)
     {
+        bool fullIcTile = (icBase + TILE_ICV) <= icVecCount;
+
         // ------------------------------------------------------------
         // Cooperative load: input tile (float4)
         // ------------------------------------------------------------
@@ -1186,9 +1206,16 @@ void gemmConvolution_v2<
             {
                 int icVec = icBase + icvLocal;
                 float4 v = float4(0.0);
-                if ((uint)icVec < (uint)icVecCount)
+                if (fullInputTile)
                 {
-                    v = loadInputNHWC_float4(params, int(batchIdx), ih, iw, icVec, icVecCount);
+                    // In-bounds fast path (still need icVec bounds unless fullIcTile is true).
+                    if (fullIcTile || ((uint)icVec < (uint)icVecCount))
+                        v = loadInputNHWC_float4_inBounds(params, int(batchIdx), ih, iw, icVec, icVecCount);
+                }
+                else
+                {
+                    if ((uint)icVec < (uint)icVecCount)
+                        v = loadInputNHWC_float4(params, int(batchIdx), ih, iw, icVec, icVecCount);
                 }
                 s_input[icvLocal][i] = v;
             }
@@ -1216,11 +1243,18 @@ void gemmConvolution_v2<
             int ocVec = int(ocVecBase) + ocv;
 
             float4 w = float4(0.0);
-            if ((uint)icVec < (uint)icVecCount && (uint)ocVec < (uint)ocVecCount)
+            if (fullIcTile && fullOcTile)
             {
-                // v2 packed weights: (((kh,kw,icVec,ocVec)*4)+o)
                 int wIdx = (((((kh * kernelSize + kw) * icVecCount + icVec) * ocVecCount + ocVec) * 4) + o);
                 w = loadAligned<16>(params.weightsP + wIdx);
+            }
+            else
+            {
+                if ((uint)icVec < (uint)icVecCount && (uint)ocVec < (uint)ocVecCount)
+                {
+                    int wIdx = (((((kh * kernelSize + kw) * icVecCount + icVec) * ocVecCount + ocVec) * 4) + o);
+                    w = loadAligned<16>(params.weightsP + wIdx);
+                }
             }
             s_weight[ocv][kv][o] = w;
         }
@@ -1289,13 +1323,13 @@ void gemmConvolution_v2<
     for (int th = 0; th < THREAD_OH; ++th)
     {
         uint oh = ohThreadBase + th;
-        if (oh >= uint(params.H)) continue;
+        if (!fullOutputTile && oh >= uint(params.H)) continue;
 
         [unroll]
         for (int tw = 0; tw < THREAD_OW; ++tw)
         {
             uint ow = owThreadBase + tw;
-            if (ow >= uint(params.W)) continue;
+            if (!fullOutputTile && ow >= uint(params.W)) continue;
 
             int outBase = ((int(batchIdx) * (params.H * params.W) + int(oh) * params.W + int(ow)) * ocVecCount);
             [unroll]
