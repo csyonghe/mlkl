@@ -761,7 +761,6 @@ void gemmConvolution<
                             regInput[th][tw] = s_input[ic_local][sharedIdx];
                         }
                     }
-
                     int wK = (kh * kernelSize + kw) * TILE_IC + ic_local;
                     static const int OC_CHUNK = 4;
                     [loop]
@@ -1044,6 +1043,267 @@ void gemmConvolutionWaveShuffle<
                 Input<T> outInput = {};
                 outInput.value = accum[th][tw][oc_local];
                 params.outputImage.store(outCoord, params.outputTransform.eval(outCoord, outInput));
+            }
+        }
+    }
+}
+
+// ============================================================================
+// GEMM-Style Convolution v2 (NHWC FP32, channel-packed float4 fast path)
+// ============================================================================
+// This is a *verification* kernel that assumes:
+// - input/output are NHWC float*
+// - inChannels % 4 == 0 and outChannels % 4 == 0
+//
+// It keeps the same tiling concept as `gemmConvolution` but changes the inner math:
+// - Pack channels by 4 (icVec = ic/4, ocVec = oc/4)
+// - Stage input tile as float4 (4 input channels at once)
+// - Stage weights as float4 vectors and compute 4 output channels at once using dot4_to_float4
+// - Accumulate in float4 per ocVec and store with storeAligned<16>
+//
+// Weight packing expected (v2, chosen for coalescing):
+//   weightsP[(kh,kw,icVec,ocVec,o)] where each entry is float4 containing 4 scalar IC weights
+//   and `o` selects which scalar output lane inside ocVec (0..3).
+//
+// Flattened index:
+//   idx = (((((kh * kernelSize + kw) * icVecCount + icVec) * ocVecCount + ocVec) * 4) + o)
+//
+// This makes ocVec contiguous for fixed (kh,kw,icVec,o), which cooperates well with staging.
+struct GemmConvV2Params
+{
+    float* input;      // [B,H,W,Cin] NHWC
+    float* output;     // [B,H,W,Cout] NHWC
+    float* bias;       // [Cout]
+    float4* weightsP;  // packed weights (see above)
+
+    int H;
+    int W;
+    int padding;
+    int batchSize;
+};
+
+[ForceInline]
+static float4 loadInputNHWC_float4(ConstantBuffer<GemmConvV2Params, CDataLayout> params, int batch, int y, int x, int icVec, int icVecCount)
+{
+    if ((uint)y >= (uint)params.H || (uint)x >= (uint)params.W) return float4(0.0);
+    float4* in4 = (float4*)params.input;
+    int idx = ((batch * (params.H * params.W) + y * params.W + x) * icVecCount + icVec);
+    return loadAligned<16>(in4 + idx);
+}
+
+[numthreads(TILE_OW / THREAD_OW, TILE_OH / THREAD_OH, 1)]
+void gemmConvolution_v2<
+    let TILE_OH : int,
+    let TILE_OW : int,
+    let TILE_OC : int,
+    let TILE_IC : int,
+    let THREAD_OH : int,
+    let THREAD_OW : int,
+    int kernelSize,
+    int stride,
+    int inChannels,
+    int outChannels
+>(
+    ConstantBuffer<GemmConvV2Params, CDataLayout> params,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    static const int BLOCK_X = TILE_OW / THREAD_OW;
+    static const int BLOCK_Y = TILE_OH / THREAD_OH;
+    static const int NUM_THREADS = BLOCK_X * BLOCK_Y;
+
+    static const int TILE_OCV = TILE_OC / 4;
+    static const int TILE_ICV = TILE_IC / 4;
+
+    int ocVecCount = outChannels / 4;
+    int icVecCount = inChannels / 4;
+
+    // Decode batch and output-channel tile (ocVec tiles)
+    uint numOcVecTiles = (uint(ocVecCount) + TILE_OCV - 1) / TILE_OCV;
+    uint batchIdx = groupId.z / numOcVecTiles;
+    uint ocVecTileIdx = groupId.z - batchIdx * numOcVecTiles;
+    if (batchIdx >= uint(params.batchSize)) return;
+
+    uint ohBase = groupId.y * TILE_OH;
+    uint owBase = groupId.x * TILE_OW;
+    uint ocVecBase = ocVecTileIdx * TILE_OCV;
+
+    uint ohThreadBase = ohBase + groupThreadId.y * THREAD_OH;
+    uint owThreadBase = owBase + groupThreadId.x * THREAD_OW;
+
+    static const int INPUT_TILE_H = (TILE_OH - 1) * stride + kernelSize;
+    static const int INPUT_TILE_W = (TILE_OW - 1) * stride + kernelSize;
+    static const int INPUT_TILE_SIZE = INPUT_TILE_H * INPUT_TILE_W;
+
+    // Stage input as float4 per icVec
+    // +4 padding to reduce bank conflicts when 32 threads hit the same row/col patterns
+    static groupshared float4 s_input[TILE_ICV][INPUT_TILE_SIZE + 4];
+
+    // Stage weights as float4[4] per ocVec lane (o=0..3), per icVec, per (kh,kw)
+    static const int WEIGHT_KV = kernelSize * kernelSize * TILE_ICV;
+    static groupshared float4 s_weight[TILE_OCV][WEIGHT_KV][4];
+
+    int ihBase = int(ohBase * stride) - params.padding;
+    int iwBase = int(owBase * stride) - params.padding;
+
+    int threadLinear = int(groupThreadId.y) * BLOCK_X + int(groupThreadId.x);
+
+    // Accumulators: THREAD_OH x THREAD_OW x TILE_OCV (each is float4 -> 4 output channels)
+    float4 accum[THREAD_OH][THREAD_OW][TILE_OCV];
+
+    // Initialize with bias (packed)
+    float4* bias4 = (float4*)params.bias;
+    [unroll]
+    for (int th = 0; th < THREAD_OH; ++th)
+    {
+        [unroll]
+        for (int tw = 0; tw < THREAD_OW; ++tw)
+        {
+            [unroll]
+            for (int ocv = 0; ocv < TILE_OCV; ++ocv)
+            {
+                int ocVec = int(ocVecBase) + ocv;
+                accum[th][tw][ocv] = (ocVec < ocVecCount) ? loadAligned<16>(bias4 + ocVec) : float4(0.0);
+            }
+        }
+    }
+
+    // Main loop over icVec tiles
+    for (int icBase = 0; icBase < icVecCount; icBase += TILE_ICV)
+    {
+        // ------------------------------------------------------------
+        // Cooperative load: input tile (float4)
+        // ------------------------------------------------------------
+        for (int i = threadLinear; i < INPUT_TILE_SIZE; i += NUM_THREADS)
+        {
+            int sY = i / INPUT_TILE_W;
+            int sX = i - sY * INPUT_TILE_W;
+            int ih = ihBase + sY;
+            int iw = iwBase + sX;
+
+            [unroll]
+            for (int icvLocal = 0; icvLocal < TILE_ICV; ++icvLocal)
+            {
+                int icVec = icBase + icvLocal;
+                float4 v = float4(0.0);
+                if ((uint)icVec < (uint)icVecCount)
+                {
+                    v = loadInputNHWC_float4(params, int(batchIdx), ih, iw, icVec, icVecCount);
+                }
+                s_input[icvLocal][i] = v;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Cooperative load: weights (float4 x4 lanes)
+        // Each thread loads contiguous entries in the packed layout.
+        // ------------------------------------------------------------
+        static const int NUM_W = TILE_OCV * WEIGHT_KV * 4;
+        for (int i = threadLinear; i < NUM_W; i += NUM_THREADS)
+        {
+            int t = i;
+            int o = t & 3;
+            t >>= 2;
+            int kv = t % WEIGHT_KV;
+            int ocv = t / WEIGHT_KV;
+
+            int icvLocal = kv % TILE_ICV;
+            int spatial = kv / TILE_ICV;
+            int kh = spatial / kernelSize;
+            int kw = spatial - kh * kernelSize;
+
+            int icVec = icBase + icvLocal;
+            int ocVec = int(ocVecBase) + ocv;
+
+            float4 w = float4(0.0);
+            if ((uint)icVec < (uint)icVecCount && (uint)ocVec < (uint)ocVecCount)
+            {
+                // v2 packed weights: (((kh,kw,icVec,ocVec)*4)+o)
+                int wIdx = (((((kh * kernelSize + kw) * icVecCount + icVec) * ocVecCount + ocVec) * 4) + o);
+                w = loadAligned<16>(params.weightsP + wIdx);
+            }
+            s_weight[ocv][kv][o] = w;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        // ------------------------------------------------------------
+        // Compute
+        // ------------------------------------------------------------
+        [loop]
+        for (int kh = 0; kh < kernelSize; ++kh)
+        {
+            [loop]
+            for (int kw = 0; kw < kernelSize; ++kw)
+            {
+                [unroll]
+                for (int icvLocal = 0; icvLocal < TILE_ICV; ++icvLocal)
+                {
+                    int kvBase = (kh * kernelSize + kw) * TILE_ICV + icvLocal;
+
+                    // Load input float4 for each spatial output this thread computes
+                    float4 regIn[THREAD_OH][THREAD_OW];
+                    [unroll]
+                    for (int th = 0; th < THREAD_OH; ++th)
+                    {
+                        [unroll]
+                        for (int tw = 0; tw < THREAD_OW; ++tw)
+                        {
+                            int sY = int(groupThreadId.y * THREAD_OH + th) * stride + kh;
+                            int sX = int(groupThreadId.x * THREAD_OW + tw) * stride + kw;
+                            int sharedIdx = sY * INPUT_TILE_W + sX;
+                            regIn[th][tw] = s_input[icvLocal][sharedIdx];
+                        }
+                    }
+
+                    // Accumulate for each ocVec in this CTA
+                    [unroll]
+                    for (int ocv = 0; ocv < TILE_OCV; ++ocv)
+                    {
+                        float4 w0 = s_weight[ocv][kvBase][0];
+                        float4 w1 = s_weight[ocv][kvBase][1];
+                        float4 w2 = s_weight[ocv][kvBase][2];
+                        float4 w3 = s_weight[ocv][kvBase][3];
+
+                        [unroll]
+                        for (int th = 0; th < THREAD_OH; ++th)
+                        {
+                            [unroll]
+                            for (int tw = 0; tw < THREAD_OW; ++tw)
+                            {
+                                accum[th][tw][ocv] += dot4_to_float4(regIn[th][tw], w0, w1, w2, w3);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Store output (NHWC float4)
+    float4* out4 = (float4*)params.output;
+
+    [unroll]
+    for (int th = 0; th < THREAD_OH; ++th)
+    {
+        uint oh = ohThreadBase + th;
+        if (oh >= uint(params.H)) continue;
+
+        [unroll]
+        for (int tw = 0; tw < THREAD_OW; ++tw)
+        {
+            uint ow = owThreadBase + tw;
+            if (ow >= uint(params.W)) continue;
+
+            int outBase = ((int(batchIdx) * (params.H * params.W) + int(oh) * params.W + int(ow)) * ocVecCount);
+            [unroll]
+            for (int ocv = 0; ocv < TILE_OCV; ++ocv)
+            {
+                int ocVec = int(ocVecBase) + ocv;
+                if (ocVec >= ocVecCount) continue;
+                storeAligned<16>(out4 + outBase + ocVec, accum[th][tw][ocv]);
             }
         }
     }

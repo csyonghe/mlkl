@@ -936,10 +936,42 @@ int runConvProfile(int argc, char* argv[])
     auto winogradInputPipeline = ctx->createComputePipeline("winogradInputTransformBlock16", emptyArgs.getArrayView());
     auto winogradGemmPipeline = ctx->createComputePipeline("winogradDomainGemmF43", emptyArgs.getArrayView());
     auto winogradGemmPipelineV2 = ctx->createComputePipeline("winogradDomainGemmF43_v2", emptyArgs.getArrayView());
+    auto winogradFused23PipelineV2 = ctx->createComputePipeline("winogradDomainGemmOutputFusedF43_v2", emptyArgs.getArrayView());
     auto winogradOutputPipeline = ctx->createComputePipeline("winogradOutputTransformBlock16", emptyArgs.getArrayView());
-    if (!winogradInputPipeline || !winogradGemmPipeline || !winogradGemmPipelineV2 || !winogradOutputPipeline)
+    if (!winogradInputPipeline || !winogradGemmPipeline || !winogradGemmPipelineV2 || !winogradFused23PipelineV2 || !winogradOutputPipeline)
     {
         printf("ERROR: Failed to create one or more nonfused Winograd pipelines\n");
+        return -1;
+    }
+
+    // ------------------------------------------------------------------------
+    // GEMM conv v2 prototype (NHWC float4 packed fast path)
+    // ------------------------------------------------------------------------
+    // gemmConvolution_v2 is a specialized entrypoint (like gemmConvolution): we must pass its specialization args.
+    // Keep it aligned with the default GEMM tile config used in this profile (16x16 tile, tileOC=16, tileIC=8, 1x1 per thread).
+    static const int kGemmV2TileOH = 16;
+    static const int kGemmV2TileOW = 16;
+    static const int kGemmV2TileOC = 16;
+    static const int kGemmV2TileIC = 8;
+    static const int kGemmV2ThreadOH = 1;
+    static const int kGemmV2ThreadOW = 1;
+
+    String gemmV2Args[] = {
+        String(kGemmV2TileOH),
+        String(kGemmV2TileOW),
+        String(kGemmV2TileOC),
+        String(kGemmV2TileIC),
+        String(kGemmV2ThreadOH),
+        String(kGemmV2ThreadOW),
+        String(kernelSize),
+        String(stride),
+        String(inChannels),
+        String(outChannels),
+    };
+    auto gemmConvV2Pipeline = ctx->createComputePipeline("gemmConvolution_v2", makeArrayView(gemmV2Args));
+    if (!gemmConvV2Pipeline)
+    {
+        printf("ERROR: Failed to create gemmConvolution_v2 pipeline\n");
         return -1;
     }
 
@@ -1039,6 +1071,67 @@ int runConvProfile(int argc, char* argv[])
         return -1;
     }
 
+    // Pack weights for gemmConvolution_v2:
+    // Expected weightsP index:
+    //   idx = (((((kh * K + kw) * icVecCount + icVec) * ocVecCount + ocVec) * 4) + o)
+    // where each entry is float4 of 4 scalar IC weights, and o selects the output lane within ocVec.
+    ComPtr<rhi::IBuffer> gemmConvV2WeightsBuffer;
+    {
+        if ((inChannels % 4) != 0 || (outChannels % 4) != 0)
+        {
+            printf("ERROR: gemmConvolution_v2 requires inChannels%%4==0 and outChannels%%4==0\n");
+            return -1;
+        }
+
+        const int K = kernelSize;
+        const int icVecCountLocal = inChannels / 4;
+        const int ocVecCountLocal = outChannels / 4;
+
+        List<Float4> weightsP;
+        weightsP.setCount((Index)K * K * icVecCountLocal * ocVecCountLocal * 4);
+
+        auto getW = [&](int ic, int ky, int kx, int oc) -> float
+        {
+            // weights input layout here is [inC, K, K, outC] (IKKO)
+            int idx = ((ic * K + ky) * K + kx) * outChannels + oc;
+            return weights[idx];
+        };
+
+        for (int ky = 0; ky < K; ++ky)
+        {
+            for (int kx = 0; kx < K; ++kx)
+            {
+                for (int icVec = 0; icVec < icVecCountLocal; ++icVec)
+                {
+                    for (int ocVec = 0; ocVec < ocVecCountLocal; ++ocVec)
+                    {
+                        for (int o = 0; o < 4; ++o)
+                        {
+                            int oc = ocVec * 4 + o;
+                            float w0 = getW(icVec * 4 + 0, ky, kx, oc);
+                            float w1 = getW(icVec * 4 + 1, ky, kx, oc);
+                            float w2 = getW(icVec * 4 + 2, ky, kx, oc);
+                            float w3 = getW(icVec * 4 + 3, ky, kx, oc);
+
+                            int outIdx = (((((ky * K + kx) * icVecCountLocal + icVec) * ocVecCountLocal + ocVec) * 4) + o);
+                            weightsP[(Index)outIdx] = {w0, w1, w2, w3};
+                        }
+                    }
+                }
+            }
+        }
+
+        gemmConvV2WeightsBuffer = ctx->createPersistentBuffer(
+            weightsP.getBuffer(),
+            (size_t)weightsP.getCount() * sizeof(Float4),
+            "gemm_conv_v2_weightsP");
+        if (!gemmConvV2WeightsBuffer)
+        {
+            printf("ERROR: Failed to create gemmConvolution_v2 weights buffer\n");
+            return -1;
+        }
+    }
+
     // Repack weights for winogradDomainGemmF43_v2:
     // v1 layout: idx = (((pos * ocVecCount + ocVec) * icVecCount + icVec) * 4 + o)
     // v2 layout: idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
@@ -1111,6 +1204,40 @@ int runConvProfile(int argc, char* argv[])
         return -1;
     }
 
+    auto outputGemmV2 = ctx->createTensor(
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        0,
+        nullptr,
+        "conv_output_gemm_v2");
+    if (!outputGemmV2)
+    {
+        printf("ERROR: Failed to allocate output tensor for gemmConvolution_v2\n");
+        return -1;
+    }
+
+    struct GemmConvV2Params
+    {
+        rhi::DeviceAddress input;
+        rhi::DeviceAddress output;
+        rhi::DeviceAddress bias;
+        rhi::DeviceAddress weightsP;
+        int H;
+        int W;
+        int padding;
+        int batchSize;
+    };
+
+    GemmConvV2Params gemmV2Params = {};
+    gemmV2Params.input = inputBuffer->getView().getDeviceAddress();
+    gemmV2Params.output = outputGemmV2->getView().getDeviceAddress();
+    gemmV2Params.bias = kernel.biasesBuffer->getDeviceAddress();
+    gemmV2Params.weightsP = gemmConvV2WeightsBuffer->getDeviceAddress();
+    gemmV2Params.H = outputH; // output H==inputH for pad=1, stride=1 in this profile config
+    gemmV2Params.W = outputW;
+    gemmV2Params.padding = padding;
+    gemmV2Params.batchSize = batchSize;
+
     // Nonfused Winograd intermediate buffers (A/V and C/M), plus output
     int numTilesH = (outputH + 3) / 4;
     int numTilesW = (outputW + 3) / 4;
@@ -1136,9 +1263,20 @@ int runConvProfile(int argc, char* argv[])
         0,
         nullptr,
         "conv_output_winograd_nonfused");
+    auto outputFused23 = ctx->createTensor(
+        ElementType::Float32,
+        Shape(batchSize, outputH, outputW, outChannels),
+        0,
+        nullptr,
+        "conv_output_winograd_fused23");
     if (!winogradV || !winogradM || !outputNonFused)
     {
         printf("ERROR: Failed to allocate Winograd nonfused intermediate tensors\n");
+        return -1;
+    }
+    if (!outputFused23)
+    {
+        printf("ERROR: Failed to allocate Winograd fused(2+3) output tensor\n");
         return -1;
     }
     
@@ -1165,29 +1303,39 @@ int runConvProfile(int argc, char* argv[])
     auto endTime = std::chrono::high_resolution_clock::now();
     double gemmMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
     printf("Average per iteration: %.3f ms\n", gemmMs / iterations);
-    
-    // Warmup wave shuffle
+
+    // Benchmark GEMM v2 (float4 packed)
+    printf("\n=== GEMM v2 (float4 packed, channels%%4==0) ===\n");
+    // Warmup
     for (int i = 0; i < 10; i++)
     {
         auto task = ctx->createTask();
-        kernel.queueExecute(task, outputGemm->getView(), inputBuffer->getView(), padding, ConvolutionAlgorithm::GemmWaveShuffle);
+        task.dispatchKernel(
+            gemmConvV2Pipeline,
+            (uint32_t)((outputW + kGemmV2TileOW - 1) / kGemmV2TileOW),
+            (uint32_t)((outputH + kGemmV2TileOH - 1) / kGemmV2TileOH),
+            (uint32_t)batchSize * (uint32_t)(((outChannels / 4) + (kGemmV2TileOC / 4) - 1) / (kGemmV2TileOC / 4)),
+            gemmV2Params);
         task.execute();
     }
-    
-    // Benchmark Wave Shuffle
-    printf("\n=== GEMM Wave Shuffle (no weight shared mem) ===\n");
     startTime = std::chrono::high_resolution_clock::now();
-    
     for (int i = 0; i < iterations; i++)
     {
         auto task = ctx->createTask();
-        kernel.queueExecute(task, outputGemm->getView(), inputBuffer->getView(), padding, ConvolutionAlgorithm::GemmWaveShuffle);
+        task.dispatchKernel(
+            gemmConvV2Pipeline,
+            (uint32_t)((outputW + kGemmV2TileOW - 1) / kGemmV2TileOW),
+            (uint32_t)((outputH + kGemmV2TileOH - 1) / kGemmV2TileOH),
+            (uint32_t)batchSize * (uint32_t)(((outChannels / 4) + (kGemmV2TileOC / 4) - 1) / (kGemmV2TileOC / 4)),
+            gemmV2Params);
         task.execute();
     }
-    
     endTime = std::chrono::high_resolution_clock::now();
-    double waveMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
-    printf("Average per iteration: %.3f ms\n", waveMs / iterations);
+    double gemmV2Ms = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+    printf("Average per iteration: %.3f ms\n", gemmV2Ms / iterations);
+    
+    // NOTE: gemmConvolutionWaveShuffle was a failed experiment; intentionally not benchmarked.
+    double waveMs = 0.0;
 
     // ------------------------------------------------------------------------
     // Warmup + benchmark Winograd prototype
@@ -1420,6 +1568,66 @@ int runConvProfile(int argc, char* argv[])
     ctx->resetPerfMeasurements();
     ctx->setCollectPerfMeasurements(false);
 
+    // ------------------------------------------------------------------------
+    // Warmup + benchmark Winograd fused (2+3) using v2 packed weights
+    // Pipeline: input transform -> fused(2+3)
+    // ------------------------------------------------------------------------
+    printf("\n=== Winograd Fused(2+3) (v2 packed weights, no global M) ===\n");
+
+    // Use the fused output buffer
+    WinogradNonFusedParams fused23ParamsV2 = nonfusedParamsV2;
+    fused23ParamsV2.output = outputFused23->getView().getDeviceAddress();
+
+    ctx->setCollectPerfMeasurements(true);
+    ctx->resetPerfMeasurements();
+
+    // Warmup
+    for (int i = 0; i < 10; i++)
+    {
+        auto task = ctx->createTask();
+        task.dispatchKernel(
+            winogradInputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)icVecCount,
+            fused23ParamsV2);
+        static const int kWinogradFused23OcVecPerCta = 4; // must match OCV_PER_CTA in src/winograd.slang
+        task.dispatchKernel(
+            winogradFused23PipelineV2,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)((ocVecCount + kWinogradFused23OcVecPerCta - 1) / kWinogradFused23OcVecPerCta),
+            fused23ParamsV2);
+        task.execute();
+    }
+
+    startTime = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++)
+    {
+        auto task = ctx->createTask();
+        task.dispatchKernel(
+            winogradInputPipeline,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)icVecCount,
+            fused23ParamsV2);
+        static const int kWinogradFused23OcVecPerCta = 4; // must match OCV_PER_CTA in src/winograd.slang
+        task.dispatchKernel(
+            winogradFused23PipelineV2,
+            (uint32_t)((numTilesW + 3) / 4),
+            (uint32_t)((numTilesH + 3) / 4),
+            (uint32_t)batchSize * (uint32_t)((ocVecCount + kWinogradFused23OcVecPerCta - 1) / kWinogradFused23OcVecPerCta),
+            fused23ParamsV2);
+        task.execute();
+    }
+    endTime = std::chrono::high_resolution_clock::now();
+    double winoFused23V2Ms = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+    printf("Average per iteration: %.3f ms\n", winoFused23V2Ms / iterations);
+
+    ctx->printPerfMeasurements();
+    ctx->resetPerfMeasurements();
+    ctx->setCollectPerfMeasurements(false);
+
     // Correctness: compare one GEMM vs one Winograd nonfused run
     {
         size_t outSizeBytes = (size_t)batchSize * outputH * outputW * outChannels * sizeof(float);
@@ -1509,6 +1717,74 @@ int runConvProfile(int argc, char* argv[])
             ctx->getDevice()->readBuffer(outputNonFused->buffer, 0, outSizeBytes, nfOutV2.getBuffer());
             printMaxErr("Correctness nonfused(v2) vs GEMM", nfOutV2);
         }
+
+        // Run fused(2+3) v2 once (input transform -> fused kernel)
+        {
+            auto task = ctx->createTask();
+            task.dispatchKernel(
+                winogradInputPipeline,
+                (uint32_t)((numTilesW + 3) / 4),
+                (uint32_t)((numTilesH + 3) / 4),
+                (uint32_t)batchSize * (uint32_t)icVecCount,
+                fused23ParamsV2);
+            static const int kWinogradFused23OcVecPerCta = 4; // must match OCV_PER_CTA in src/winograd.slang
+            task.dispatchKernel(
+                winogradFused23PipelineV2,
+                (uint32_t)((numTilesW + 3) / 4),
+                (uint32_t)((numTilesH + 3) / 4),
+                (uint32_t)batchSize * (uint32_t)((ocVecCount + kWinogradFused23OcVecPerCta - 1) / kWinogradFused23OcVecPerCta),
+                fused23ParamsV2);
+            task.execute();
+        }
+        {
+            List<float> fusedOut;
+            fusedOut.setCount((Index)(outSizeBytes / sizeof(float)));
+            ctx->getDevice()->readBuffer(outputFused23->buffer, 0, outSizeBytes, fusedOut.getBuffer());
+            printMaxErr("Correctness fused(2+3,v2) vs GEMM", fusedOut);
+        }
+    }
+
+    // Correctness: compare one GEMM vs one GEMM v2 run
+    {
+        size_t outSizeBytes = (size_t)batchSize * outputH * outputW * outChannels * sizeof(float);
+        List<float> gemmOut;
+        List<float> gemmV2Out;
+        gemmOut.setCount((Index)(outSizeBytes / sizeof(float)));
+        gemmV2Out.setCount((Index)(outSizeBytes / sizeof(float)));
+
+        // GEMM baseline
+        {
+            auto task = ctx->createTask();
+            kernel.queueExecute(task, outputGemm->getView(), inputBuffer->getView(), padding, ConvolutionAlgorithm::Gemm);
+            task.execute();
+            ctx->getDevice()->readBuffer(outputGemm->buffer, 0, outSizeBytes, gemmOut.getBuffer());
+        }
+
+        // GEMM v2
+        {
+            auto task = ctx->createTask();
+            task.dispatchKernel(
+                gemmConvV2Pipeline,
+                (uint32_t)((outputW + kGemmV2TileOW - 1) / kGemmV2TileOW),
+                (uint32_t)((outputH + kGemmV2TileOH - 1) / kGemmV2TileOH),
+                (uint32_t)batchSize * (uint32_t)(((outChannels / 4) + (kGemmV2TileOC / 4) - 1) / (kGemmV2TileOC / 4)),
+                gemmV2Params);
+            task.execute();
+            ctx->getDevice()->readBuffer(outputGemmV2->buffer, 0, outSizeBytes, gemmV2Out.getBuffer());
+        }
+
+        double maxAbs = 0.0;
+        double maxRel = 0.0;
+        for (Index i = 0; i < gemmOut.getCount(); i++)
+        {
+            double a = (double)gemmOut[i];
+            double b = (double)gemmV2Out[i];
+            double absErr = fabs(a - b);
+            double relErr = absErr / (fabs(a) + 1e-6);
+            if (absErr > maxAbs) maxAbs = absErr;
+            if (relErr > maxRel) maxRel = relErr;
+        }
+        printf("Correctness gemm(v2) vs gemm: maxAbs=%.6g  maxRel=%.6g\n", maxAbs, maxRel);
     }
 
     // ------------------------------------------------------------------------
@@ -1560,14 +1836,19 @@ int runConvProfile(int argc, char* argv[])
     // Summary
     printf("\n=== Summary ===\n");
     printf("GEMM:         %.3f ms\n", gemmMs / iterations);
-    printf("Wave Shuffle: %.3f ms\n", waveMs / iterations);
+    printf("GEMM v2:      %.3f ms\n", gemmV2Ms / iterations);
+    if (waveMs > 0.0)
+        printf("Wave Shuffle: %.3f ms\n", waveMs / iterations);
     printf("WinogradProto:%.3f ms\n", winoProtoMs / iterations);
     printf("WinoNonFused: %.3f ms\n", winoNonFusedMs / iterations);
     printf("WinoNonFusedV2: %.3f ms\n", winoNonFusedV2Ms / iterations);
-    printf("Wave speedup: %.2fx\n", gemmMs / waveMs);
+    printf("WinoFused23V2: %.3f ms\n", winoFused23V2Ms / iterations);
+    if (waveMs > 0.0)
+        printf("Wave speedup: %.2fx\n", gemmMs / waveMs);
     printf("Wino speedup: %.2fx\n", gemmMs / winoProtoMs);
     printf("WinoNF speedup: %.2fx\n", gemmMs / winoNonFusedMs);
     printf("WinoNFv2 speedup: %.2fx\n", gemmMs / winoNonFusedV2Ms);
+    printf("WinoFused23v2 speedup: %.2fx\n", gemmMs / winoFused23V2Ms);
     
     return 0;
 }

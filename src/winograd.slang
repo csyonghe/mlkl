@@ -694,6 +694,70 @@ void winogradConvProtoBlock16(
 // ============================================================================
 // Winograd nonfused prototype (cuDNN-style pipeline: A/B/C buffers + GEMM)
 // ============================================================================
+//
+// This section implements a **3-kernel Winograd F(4x4,3x3) forward conv** pipeline:
+//
+//   (1) `winogradInputTransformBlock16`
+//       Reads NHWC input (float), computes the Winograd input transform, and writes `V`.
+//
+//   (2) `winogradDomainGemmF43` / `winogradDomainGemmF43_v2`
+//       Performs the Winograd-domain accumulation (conceptually a GEMM over icVec) and writes `M`.
+//
+//   (3) `winogradOutputTransformBlock16`
+//       Reads `M`, applies the inverse Winograd transform, adds bias, and writes NHWC output.
+//
+// These kernels are intentionally **non-fused** to make profiling and iteration easy.
+// The main performance goal here is: keep the hot kernel (2) as close as possible to a
+// high-throughput FP32 GEMM-like inner loop (coalesced loads, shared-memory reuse, low overhead).
+//
+// ----------------------------------------------------------------------------
+// Data layout conventions
+// ----------------------------------------------------------------------------
+//
+// We use `float4` packing throughout:
+// - **icVec** = input-channel vector index (`ic / 4`)
+// - **ocVec** = output-channel vector index (`oc / 4`)
+//
+// A `float4` typically represents **4 scalar channels** packed in the .xyzw lanes.
+//
+// ### V (Winograd-domain data, produced by kernel 1)
+// Logical shape: `V[tile][pos][icVec]` where each element is float4.
+//
+// Flattened indexing used by kernels:
+//   Vindex = (pos * icVecCount + icVec) * numTiles + tileIdx
+//
+// That is: for a fixed `(pos, icVec)`, tiles are contiguous in memory.
+//
+// ### M (Winograd-domain output, produced by kernel 2)
+// Logical shape: `M[tile][pos][ocVec]` where each element is float4.
+//
+// Flattened indexing used by kernels:
+//   Mindex = (pos * ocVecCount + ocVec) * numTiles + tileIdx
+//
+// ### weightsU (Winograd-domain filter, provided by CPU pre-transform)
+// `weightsU` is the Winograd-transformed filter "U", packed as float4.
+// It is created in `unit-test/bench-conv2d.cpp` (see `transformWeightsF43Packed`), uploaded once.
+//
+// There are **two packings** for `weightsU`:
+//
+// - **v1 packing** (used by `winogradDomainGemmF43`)
+//     idx = (((pos * ocVecCount + ocVec) * icVecCount + icVec) * 4 + o)
+//
+// - **v2 packing (icVec-major)** (used by `winogradDomainGemmF43_v2`)
+//     idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+//
+// Here `o` is 0..3 selecting which scalar output lane inside the ocVec we are producing.
+// Each `weightsU[idx]` is a float4 containing weights for the 4 scalar input channels in an icVec.
+//
+// v2 exists purely for performance: it enables coalesced loads when loading a whole ocVec block.
+//
+// ----------------------------------------------------------------------------
+// Alignment expectations (critical)
+// ----------------------------------------------------------------------------
+//
+// We use `loadAligned<16>()` / `storeAligned<16>()` for 16B vector loads/stores.
+// This relies on the underlying buffers being 16B aligned and on indexing by float4 elements.
+// In `--profile-conv`, `V`, `M`, input, output, and weights are allocated/aligned so this holds.
 // Layouts (matches cuDNN nonfused intent, but packed in float4):
 // - V (Winograd A/data):  [tile][pos][icVec] float4   (icVec = C/4)
 // - M (Winograd C/output):[tile][pos][ocVec] float4   (ocVec = K/4)
@@ -1038,13 +1102,106 @@ void winogradDomainGemmF43(
 // ---------------------------------------------------------------------------
 // Kernel 2 (v2): Winograd-domain GEMM (produce M = U (*) V), weights packed with icVec-major
 //
-// v1 weight packing (legacy):
-//   idx = (((pos * ocVecCount + ocVec) * icVecCount + icVec) * 4 + o)
+// This is the **hot kernel** in the nonfused pipeline.
 //
-// v2 weight packing (improves coalescing for TILE_OCV blocks):
-//   idx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+// ----------------------------------------------------------------------------
+// What does this kernel compute?
+// ----------------------------------------------------------------------------
 //
-// Everything else (V/M layouts, grid, threads) matches v1.
+// For a fixed Winograd position `pos` (0..35), tile `t`, and output vector `ocVec`,
+// we compute a float4 result:
+//
+//   M[t,pos,ocVec] = ( m0, m1, m2, m3 )
+//
+// where each component is a dot-product over the 4 scalar input channels in an icVec,
+// accumulated over all icVec:
+//
+//   m_lane(o) = sum_{icVec} dot( V[t,pos,icVec], U[pos,ocVec,icVec,o] )
+//
+// `dot4_to_float4(v, w0,w1,w2,w3)` is exactly this: it returns
+//   float4( dot(v,w0), dot(v,w1), dot(v,w2), dot(v,w3) )
+//
+// So one thread computes **two ocVecs** (ocVec0 and ocVec1=ocVec0+8) for **one tile**.
+//
+// ----------------------------------------------------------------------------
+// Inputs / outputs and their layouts
+// ----------------------------------------------------------------------------
+//
+// Inputs:
+// - params.V (float4*): Winograd-domain data V, indexed as:
+//     vIndex = (pos * icVecCount + icVec) * numTiles + tileIdx
+//
+// - params.weightsU (float4*): Winograd-domain weights U, **v2-packed** as:
+//     wIdx = (((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4 + o)
+//   (note: this differs from v1 which is ocVec-major then icVec).
+//
+// Output:
+// - params.M (float4*): Winograd-domain output M, indexed as:
+//     mIndex = (pos * ocVecCount + ocVec) * numTiles + tileIdx
+//
+// Alignment expectation:
+// - V/M/weightsU are addressed by float4 element indices and are expected to be 16B aligned.
+//   We use `loadAligned<16>()` / `storeAligned<16>()` for performance.
+//
+// ----------------------------------------------------------------------------
+// Dispatch and thread mapping
+// ----------------------------------------------------------------------------
+//
+// Dispatch (same as v1):
+//   groupId.x = tileBlock (TILE_TILES tiles per CTA)
+//   groupId.y = ocBlock   (TILE_OCV  ocVec per CTA)
+//   groupId.z = pos       (0..35)
+//
+// Threads: 256 threads = 32 * 8.
+// We interpret tid as a 2D coordinate:
+//   laneTile = tid & 31   (0..31)  selects which tile inside this CTA
+//   laneOCV  = tid >> 5   (0..7)   selects which ocVec pair this thread computes
+//
+// Each thread computes:
+//   tileIdx0 = tileBlockBase + laneTile
+//   ocVec0   = ocBlockBase   + laneOCV
+//   ocVec1   = ocVec0 + 8
+//
+// ----------------------------------------------------------------------------
+// Shared memory staging (reuse strategy)
+// ----------------------------------------------------------------------------
+//
+// We stage a small strip of the K dimension (icVec) each iteration:
+//   IC_STEP = 16 icVec values
+//
+// Shared memory:
+// - `s_Vblk0[IC_STEP][32+4]`:
+//     V for IC_STEP icVec values and 32 tiles.
+//     Only laneOCV==0 loads it (so V is loaded once and reused by 8 oc lanes).
+//     The +4 padding helps reduce bank conflicts for the common 32-lane access pattern.
+//
+// - `s_Wblk[IC_STEP][TILE_OCV][4]`:
+//     weights for IC_STEP icVec values, TILE_OCV ocVec values, and 4 output lanes.
+//     All threads participate in loading this in v2 (1024 float4 loads per CTA).
+//
+// ----------------------------------------------------------------------------
+// Why v2 packing is faster than v1
+// ----------------------------------------------------------------------------
+//
+// In v1 packing, weights for consecutive ocVec are **strided by icVecCount** in memory when
+// you sweep ocVec for a fixed icVec. That makes the weight loads for a TILE_OCV block poorly
+// coalesced unless you add additional staging logic.
+//
+// In v2 packing, for fixed (pos, icVec, o), ocVec is contiguous. Our cooperative load
+// linearizes [s][ocvLocal][o], so neighboring threads tend to load neighboring ocVec values.
+// This results in significantly better global-memory coalescing and lower load latency.
+//
+// ----------------------------------------------------------------------------
+// Fast paths (bounds-check elimination)
+// ----------------------------------------------------------------------------
+//
+// For typical production shapes, most CTAs are fully in-bounds:
+// - fullTileBlock: this CTA's 32 tiles are all valid
+// - fullOcBlock:   this CTA's 16 ocVec are all valid
+// - fullIcStep:    this IC_STEP chunk is fully within icVecCount
+//
+// When these are true, we take a fast path that removes per-element bounds checks.
+// These conditions are uniform across the CTA, so they don't introduce divergence.
 // ---------------------------------------------------------------------------
 [numthreads(256, 1, 1)]
 void winogradDomainGemmF43_v2(
@@ -1237,6 +1394,292 @@ void winogradDomainGemmF43_v2(
         {
             int outIndex01 = (pos * ocVecCount + ocVec1) * params.numTiles + tileIdx0;
             storeAligned<16>(params.M + outIndex01, acc01);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fused kernel (v2): Winograd-domain GEMM + output transform (no global M)
+//
+// Goal:
+// - Remove the intermediate `M` buffer traffic without destroying the good properties of
+//   `winogradDomainGemmF43_v2` (coalesced weights loads, shared-memory reuse, low overhead).
+//
+// Key idea:
+// - Keep the **v2 weights packing** and load weights in a way that remains coalesced:
+//   for fixed (pos, icVec, o), ocVec is contiguous in memory.
+// - Compute a small **ocVec block** per CTA (OCV_PER_CTA), so weights loads are coalesced across ocVec.
+// - Stage `V` for a tile-block into shared once per (pos, icStep), and reuse across all ocVec in the block.
+//
+// What it computes:
+// - For each tile and each ocVec in the CTA block, compute the 4x4 output tile directly:
+//     y[r,c] = sum_{py,px} AT[r,py] * M[py,px] * A[px,c]
+//   where M[py,px] is the Winograd-domain accumulation over icVec for this (pos=py*6+px).
+//
+// Rather than materializing all M[py,px], we accumulate directly into the 16 output values (4x4)
+// using the linearity of the transform (outer-product of AT row coeffs and A col coeffs).
+//
+// Dispatch (different from the previous naive fused attempt):
+//   x = ceil(numTilesW / 4)   (one CTA per 16x16 output block)
+//   y = ceil(numTilesH / 4)
+//   z = batchSize * ceil(ocVecCount / OCV_PER_CTA)
+//
+// Threads:
+//   numthreads(16, OCV_PER_CTA, 1) => 16 tiles per CTA * OCV_PER_CTA ocVec per CTA
+//   Each thread computes one output tile (4x4) for one ocVec.
+//
+// Notes:
+// - This is still a prototype. It trades away some tiling freedom compared to cuDNN SASS kernels,
+//   but it keeps the most important property that made v2 fast: **coalesced weights loads across ocVec**.
+// ---------------------------------------------------------------------------
+[numthreads(16, 4, 1)]
+void winogradDomainGemmOutputFusedF43_v2(
+    ConstantBuffer<WinogradNonFusedParams, CDataLayout> params,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    static const int TILE_O = 4;
+    static const int TILES_PER_CTA = 4;
+    static const int BLOCK_O = TILE_O * TILES_PER_CTA; // 16 output pixels per CTA in X/Y
+    static const int OCV_PER_CTA = 4;
+    static const int IC_STEP = 16;
+
+    int ocVecCount = params.outChannels / 4;
+    int icVecCount = params.inChannels / 4;
+
+    int blockX = int(groupId.x);
+    int blockY = int(groupId.y);
+
+    int ocTiles = (ocVecCount + OCV_PER_CTA - 1) / OCV_PER_CTA;
+    int batch = int(groupId.z) / ocTiles;
+    int ocTile = int(groupId.z) - batch * ocTiles;
+    if ((uint)batch >= (uint)params.batchSize) return;
+
+    int tileIdxInBlock = int(groupThreadId.x); // 0..15
+    int ocvLocal = int(groupThreadId.y);       // 0..3
+    int ocVec = ocTile * OCV_PER_CTA + ocvLocal;
+
+    // Global tile coords within the tile grid
+    int tileY = tileIdxInBlock >> 2; // 0..3
+    int tileX = tileIdxInBlock & 3;  // 0..3
+    int tileGlobalY = blockY * TILES_PER_CTA + tileY;
+    int tileGlobalX = blockX * TILES_PER_CTA + tileX;
+    bool validTile = (uint)tileGlobalY < (uint)params.numTilesH && (uint)tileGlobalX < (uint)params.numTilesW;
+    int tileIdx = (batch * params.numTilesH + tileGlobalY) * params.numTilesW + tileGlobalX;
+
+    // Output tile origin in pixel space
+    int outY0 = tileGlobalY * TILE_O;
+    int outX0 = tileGlobalX * TILE_O;
+
+    // Shared staging for V and weights for a single (pos, icStep):
+    // - V is reused across ocVec in the CTA block => only needs [IC_STEP][16]
+    // - weights are reused across tiles => [IC_STEP][OCV_PER_CTA][4]
+    static groupshared float4 s_V[IC_STEP][16 + 4];      // +4 padding for bank conflict avoidance
+    static groupshared float4 s_W[IC_STEP][OCV_PER_CTA][4];
+
+    // Accumulate final output tile values directly:
+    // yAcc[oy][ox] where oy,ox in 0..3. Each entry is float4 (one ocVec = 4 channels).
+    float4 yAcc[4][4];
+    [unroll] for (int oy = 0; oy < 4; ++oy) { [unroll] for (int ox = 0; ox < 4; ++ox) { yAcc[oy][ox] = float4(0.0); } }
+
+    // If this ocVec is out of range, we can early-out (but keep bounds checks uniform where possible).
+    bool validOc = (uint)ocVec < (uint)ocVecCount;
+
+    // Coefficient helpers for AT and A (same as used in winogradOutputTransformBlock16)
+    // AT rows (r=0..3), columns py=0..5:
+    // r0: [1,1,1,1,1,0]
+    // r1: [0,1,-1,2,-2,0]
+    // r2: [0,1, 1,4, 4,0]
+    // r3: [0,1,-1,8,-8,1]
+    // A columns are the same vectors indexed by px (row in A).
+
+    for (int pos = 0; pos < 36; ++pos)
+    {
+        int py = pos / 6;
+        int px = pos - py * 6;
+
+        // Precompute AT row coefficients for this py
+        float rowC0, rowC1, rowC2, rowC3;
+        if (py == 0)      { rowC0 = 1.0; rowC1 = 0.0; rowC2 = 0.0; rowC3 = 0.0; }
+        else if (py == 1) { rowC0 = 1.0; rowC1 = 1.0; rowC2 = 1.0; rowC3 = 1.0; }
+        else if (py == 2) { rowC0 = 1.0; rowC1 = -1.0; rowC2 = 1.0; rowC3 = -1.0; }
+        else if (py == 3) { rowC0 = 1.0; rowC1 = 2.0; rowC2 = 4.0; rowC3 = 8.0; }
+        else if (py == 4) { rowC0 = 1.0; rowC1 = -2.0; rowC2 = 4.0; rowC3 = -8.0; }
+        else              { rowC0 = 0.0; rowC1 = 0.0; rowC2 = 0.0; rowC3 = 1.0; }
+
+        // Precompute A column coefficients for this px
+        float colC0, colC1, colC2, colC3;
+        if (px == 0)      { colC0 = 1.0; colC1 = 0.0; colC2 = 0.0; colC3 = 0.0; }
+        else if (px == 1) { colC0 = 1.0; colC1 = 1.0; colC2 = 1.0; colC3 = 1.0; }
+        else if (px == 2) { colC0 = 1.0; colC1 = -1.0; colC2 = 1.0; colC3 = -1.0; }
+        else if (px == 3) { colC0 = 1.0; colC1 = 2.0; colC2 = 4.0; colC3 = 8.0; }
+        else if (px == 4) { colC0 = 1.0; colC1 = -2.0; colC2 = 4.0; colC3 = -8.0; }
+        else              { colC0 = 0.0; colC1 = 0.0; colC2 = 0.0; colC3 = 1.0; }
+
+        for (int icBase = 0; icBase < icVecCount; icBase += IC_STEP)
+        {
+            bool fullIcStep = (icBase + IC_STEP) <= icVecCount;
+
+            // ------------------------------------------------------------
+            // Stage V into shared (tile-major contiguous loads)
+            // Only ocvLocal==0 loads V; other oc lanes reuse it.
+            // ------------------------------------------------------------
+            if (ocvLocal == 0)
+            {
+                if (validTile)
+                {
+                    if (fullIcStep)
+                    {
+                        [unroll]
+                        for (int s = 0; s < IC_STEP; ++s)
+                        {
+                            int vIndex = (pos * icVecCount + (icBase + s)) * params.numTiles + tileIdx;
+                            s_V[s][tileIdxInBlock] = loadAligned<16>(params.V + vIndex);
+                        }
+                    }
+                    else
+                    {
+                        for (int s = 0; s < IC_STEP; ++s)
+                        {
+                            int icVec = icBase + s;
+                            float4 v = float4(0.0);
+                            if ((uint)icVec < (uint)icVecCount)
+                            {
+                                int vIndex = (pos * icVecCount + icVec) * params.numTiles + tileIdx;
+                                v = loadAligned<16>(params.V + vIndex);
+                            }
+                            s_V[s][tileIdxInBlock] = v;
+                        }
+                    }
+                }
+                else
+                {
+                    [unroll]
+                    for (int s = 0; s < IC_STEP; ++s)
+                    {
+                        s_V[s][tileIdxInBlock] = float4(0.0);
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------
+            // Stage weights into shared (coalesced across ocVec using v2 packing)
+            // Only tileIdxInBlock==0 loads weights for each ocvLocal.
+            // ------------------------------------------------------------
+            if (tileIdxInBlock == 0)
+            {
+                if (validOc)
+                {
+                    if (fullIcStep)
+                    {
+                        [unroll]
+                        for (int s = 0; s < IC_STEP; ++s)
+                        {
+                            int icVec = icBase + s;
+                            int wBase = ((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4;
+                            s_W[s][ocvLocal][0] = loadAligned<16>(params.weightsU + (wBase + 0));
+                            s_W[s][ocvLocal][1] = loadAligned<16>(params.weightsU + (wBase + 1));
+                            s_W[s][ocvLocal][2] = loadAligned<16>(params.weightsU + (wBase + 2));
+                            s_W[s][ocvLocal][3] = loadAligned<16>(params.weightsU + (wBase + 3));
+                        }
+                    }
+                    else
+                    {
+                        for (int s = 0; s < IC_STEP; ++s)
+                        {
+                            int icVec = icBase + s;
+                            if ((uint)icVec < (uint)icVecCount)
+                            {
+                                int wBase = ((pos * icVecCount + icVec) * ocVecCount + ocVec) * 4;
+                                s_W[s][ocvLocal][0] = loadAligned<16>(params.weightsU + (wBase + 0));
+                                s_W[s][ocvLocal][1] = loadAligned<16>(params.weightsU + (wBase + 1));
+                                s_W[s][ocvLocal][2] = loadAligned<16>(params.weightsU + (wBase + 2));
+                                s_W[s][ocvLocal][3] = loadAligned<16>(params.weightsU + (wBase + 3));
+                            }
+                            else
+                            {
+                                s_W[s][ocvLocal][0] = float4(0.0);
+                                s_W[s][ocvLocal][1] = float4(0.0);
+                                s_W[s][ocvLocal][2] = float4(0.0);
+                                s_W[s][ocvLocal][3] = float4(0.0);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    [unroll]
+                    for (int s = 0; s < IC_STEP; ++s)
+                    {
+                        s_W[s][ocvLocal][0] = float4(0.0);
+                        s_W[s][ocvLocal][1] = float4(0.0);
+                        s_W[s][ocvLocal][2] = float4(0.0);
+                        s_W[s][ocvLocal][3] = float4(0.0);
+                    }
+                }
+            }
+
+            GroupMemoryBarrierWithGroupSync();
+
+            // ------------------------------------------------------------
+            // Compute M chunk for this (pos, tile, ocVec) and immediately accumulate into yAcc.
+            // ------------------------------------------------------------
+            float4 mChunk = float4(0.0);
+            if (validTile && validOc)
+            {
+                [unroll]
+                for (int s = 0; s < IC_STEP; ++s)
+                {
+                    int icVec = icBase + s;
+                    if (!fullIcStep && icVec >= icVecCount) continue;
+
+                    float4 v = s_V[s][tileIdxInBlock];
+                    float4 w0 = s_W[s][ocvLocal][0];
+                    float4 w1 = s_W[s][ocvLocal][1];
+                    float4 w2 = s_W[s][ocvLocal][2];
+                    float4 w3 = s_W[s][ocvLocal][3];
+                    mChunk += dot4_to_float4(v, w0, w1, w2, w3);
+                }
+            }
+
+            // Outer-product accumulation: yAcc[oy][ox] += mChunk * rowCoeff[oy] * colCoeff[ox]
+            float4 mr0 = mChunk * rowC0;
+            float4 mr1 = mChunk * rowC1;
+            float4 mr2 = mChunk * rowC2;
+            float4 mr3 = mChunk * rowC3;
+
+            yAcc[0][0] += mr0 * colC0; yAcc[0][1] += mr0 * colC1; yAcc[0][2] += mr0 * colC2; yAcc[0][3] += mr0 * colC3;
+            yAcc[1][0] += mr1 * colC0; yAcc[1][1] += mr1 * colC1; yAcc[1][2] += mr1 * colC2; yAcc[1][3] += mr1 * colC3;
+            yAcc[2][0] += mr2 * colC0; yAcc[2][1] += mr2 * colC1; yAcc[2][2] += mr2 * colC2; yAcc[2][3] += mr2 * colC3;
+            yAcc[3][0] += mr3 * colC0; yAcc[3][1] += mr3 * colC1; yAcc[3][2] += mr3 * colC2; yAcc[3][3] += mr3 * colC3;
+
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+
+    // Add bias and write output tile (4x4) for this (tile, ocVec)
+    if (!validTile || !validOc) return;
+
+    float4* bias4 = (float4*)params.bias;
+    float4 bias = loadAligned<16>(bias4 + ocVec);
+
+    float4* out4 = (float4*)params.output;
+
+    [unroll]
+    for (int oy = 0; oy < 4; ++oy)
+    {
+        int outY = outY0 + oy;
+        if ((uint)outY >= (uint)params.H) continue;
+
+        [unroll]
+        for (int ox = 0; ox < 4; ++ox)
+        {
+            int outX = outX0 + ox;
+            if ((uint)outX >= (uint)params.W) continue;
+
+            float4 y = yAcc[oy][ox] + bias;
+            int outBase = ((batch * (params.H * params.W) + outY * params.W + outX) * ocVecCount);
+            storeAligned<16>(out4 + outBase + ocVec, y);
         }
     }
 }
